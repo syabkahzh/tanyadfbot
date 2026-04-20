@@ -1,6 +1,8 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.executors.asyncio import AsyncIOExecutor
+import pytz
 from db import Database
 from processor import GeminiProcessor
 from listener import TelethonListener
@@ -11,146 +13,119 @@ db = Database()
 gemini = GeminiProcessor()
 listener = TelethonListener(db)
 bot = TelegramBot(db, gemini)
-scheduler = AsyncIOScheduler()
 
-# ── Debounce state ───────────────────────────────────────────────────────────
-_recent_alerts_cache: list[tuple] = []  # Stores (brand, word_set)
-# ────────────────────────────────────────────────────────────────────────────
+WIB = pytz.timezone(Config.TIMEZONE)
+scheduler = AsyncIOScheduler(timezone=WIB, executors={"default": AsyncIOExecutor()})
+
+BOOT_TIME = datetime.now(timezone.utc)
+_recent_alerts_history: list[dict] = []
 
 def _make_tg_link(chat_id, msg_id):
-    # Standardize chat_id (remove -100 prefix if present)
     cid = str(chat_id)
     if cid.startswith("-100"): cid = cid[4:]
     return f"https://t.me/c/{cid}/{msg_id}"
 
-async def processing_loop():
-    global _recent_alerts_cache
-    
-    print(f"[{datetime.now()}] 🧠 Starting AI Analysis Batch...")
-    batch = db.get_unprocessed_batch(50)
-    if not batch: 
-        print("☕ No new messages in queue.")
-        return
+def _parse_ts(ts) -> datetime:
+    """Always returns a UTC-aware datetime from whatever timestamp format we get."""
+    if isinstance(ts, datetime):
+        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    s = str(ts).replace('Z', '+00:00')
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return datetime.now(timezone.utc)
 
-    msgs_to_proc = [{"id": r['id'], "text": r['text'], "timestamp": r['timestamp'], "sender_name": r['sender_name'], "tg_msg_id": r['tg_msg_id'], "chat_id": r['chat_id']} for r in batch]
-    print(f"🤖 Sending {len(msgs_to_proc)} messages to {Config.MODEL_ID}...")
-    
+async def processing_loop():
+    global _recent_alerts_history
+
+    if not _recent_alerts_history:
+        recent_promos = await db.get_promos(hours=3, limit=15)
+        for r in recent_promos:
+            _recent_alerts_history.append({"brand": r['brand'], "summary": r['summary']})
+
+    print(f"[{datetime.now(WIB).strftime('%H:%M:%S WIB')}] 🧠 Analysis Batch Started...")
+    batch = await db.get_unprocessed_batch(100)
+    if not batch: return
+
+    msgs_to_proc = [
+        {"id": r['id'], "text": r['text'], "timestamp": r['timestamp'],
+         "tg_msg_id": r['tg_msg_id'], "chat_id": r['chat_id']}
+        for r in batch
+    ]
     promos = await gemini.process_batch(msgs_to_proc)
-    
-    # FIX: Always mark as processed immediately to prevent loops
-    db.mark_batch_processed([m["id"] for m in msgs_to_proc])
-    
-    if not promos:
-        print("⚠️ No promos extracted or AI API failed. Batch cleared.")
-        return
+    if promos is None: return
 
     msg_id_map = {m["id"]: m for m in msgs_to_proc}
-    promo_ids = [p.original_msg_id for p in promos]
-    
-    for p in promos:
+    unique_promos = await gemini.filter_duplicates(promos, _recent_alerts_history)
+
+    promos_to_save = []
+    now_utc = datetime.now(timezone.utc)
+
+    for p in unique_promos:
         m = msg_id_map.get(p.original_msg_id)
         if not m: continue
-        
+
         tg_link = _make_tg_link(m['chat_id'], m['tg_msg_id'])
-        
-        # 1. Always save to DB for history/summaries
-        db.save_promo(p.original_msg_id, p, tg_link)
-        
-        # 2. Check for duplicates against the live alert cache
-        promo_words = set(p.summary.lower().split())
-        is_dupe = False
-        
-        for cached_brand, cached_words in _recent_alerts_cache:
-            # Check if same brand OR both are 'unknown'
-            if p.brand.lower() == cached_brand.lower() or p.brand.lower() == "unknown":
-                # Calculate word overlap (Jaccard-ish)
-                if not promo_words or not cached_words: continue
-                overlap = len(promo_words & cached_words) / max(len(promo_words | cached_words), 1)
-                
-                if overlap > 0.55: # 55% similarity threshold
-                    is_dupe = True
-                    break
-        
-        # 3. Only alert if genuinely new
-        if not is_dupe:
-            print(f"🔥 PROMO FOUND: {p.brand} - {p.summary[:50]}...")
-            if p.valid_until != 'unknown' or p.status == 'active':
-                await bot.send_alert(p, tg_link)
-                
-                # Add to cache and rotate (keep last 30)
-                _recent_alerts_cache.append((p.brand, promo_words))
-                if len(_recent_alerts_cache) > 30:
-                    _recent_alerts_cache.pop(0)
-        else:
-            print(f"🔇 SILENCED DUPE: {p.brand} — {p.summary[:50]}")
+        promos_to_save.append((m['id'], p, tg_link))
 
-    for m in msgs_to_proc:
-        if m['id'] not in promo_ids:
-            print(f"⏭️  Skipped (Not a promo): ID {m['id']} | {m['text'][:50]}...")
+        msg_time = _parse_ts(m['timestamp'])
+        age_seconds = (now_utc - msg_time).total_seconds()
 
-    print(f"✅ Batch Complete. Extracted {len(promos)} promos.")
+        # FIX: Only alert fresh promos (≤60 min). Boot grace only for truly recent
+        # messages (≤90 min) to handle normal processing delay, not 12h backlog.
+        is_fresh = age_seconds < 3600
+        is_boot_catchup = age_seconds < 5400 and (now_utc - BOOT_TIME).total_seconds() < 300
+
+        if p.status != 'expired' and (is_fresh or is_boot_catchup):
+            await bot.send_alert(p, tg_link, timestamp=m['timestamp'])
+            _recent_alerts_history.append({"brand": p.brand, "summary": p.summary})
+            if len(_recent_alerts_history) > 30:
+                _recent_alerts_history.pop(0)
+
+    success = await db.save_promos_batch(promos_to_save, [m["id"] for m in msgs_to_proc])
+    if success:
+        print(f"✅ Batch: {len(msgs_to_proc)} msgs → {len(unique_promos)} new promos saved.")
 
 async def hourly_digest_job():
-    print(f"[{datetime.now()}] 🕒 Generating Hourly Digest...")
-    rows = db.get_promos(hours=1)
+    rows = await db.get_promos(hours=1)
     if not rows:
-        print("No promos in the last hour for digest.")
+        print("ℹ️ Hourly digest: no promos this hour, skipping.")
         return
-
     context = "\n".join([f"- {r['brand']}: {r['summary']}" for r in rows])
+    now_wib = datetime.now(WIB)
     digest = await gemini.answer_question(
-        "Please summarize the last hour of promotional activity into a bulleted list. Highlight the best deals.",
+        f"Summarize these deals concisely in Indonesian. Hour: {now_wib.strftime('%H:00 WIB')}",
         context
     )
-    
-    await bot.send_digest(digest, datetime.now().strftime('%H:00'))
-    print("✅ Hourly Digest sent.")
-
-async def trend_monitor_job():
-    """Detects 'hot topics' in the group and interprets them with context."""
-    print(f"[{datetime.now()}] 🔍 Checking for trends...")
-    WINDOW_MIN = 20
-    
-    hot_words_data = db.get_recent_words(minutes=WINDOW_MIN)
-    if not hot_words_data: return
-    
-    top_words = [w for w, count in hot_words_data[:5] if count >= 3]
-    if not top_words: return
-
-    all_raw = db.get_recent_messages(minutes=WINDOW_MIN)
-    context_msgs = [m['text'] for m in all_raw if any(w in m['text'].lower() for w in top_words)]
-    
-    if not context_msgs: return
-
-    topic_summary = await gemini.interpret_keywords(top_words, WINDOW_MIN, context_msgs)
-
-    if topic_summary:
-        print(f"📈 Trend Detected: {topic_summary}")
-        await bot.send_plain(f"💡 *Topik Ramai di Group*\n\n{topic_summary}")
+    await bot.send_digest(digest, now_wib.strftime('%H:00 WIB'))
 
 async def main():
-    if not Config.validate():
-        return
-        
+    if not Config.validate(): return
+    await db.init()
     await bot.app.initialize()
     await bot.app.start()
     await bot.app.updater.start_polling()
-    
+
     await listener.start()
-    await listener.sync_history(6)
-    
-    scheduler.add_job(processing_loop, "interval", minutes=2)
-    scheduler.add_job(trend_monitor_job, "interval", minutes=15)
-    scheduler.add_job(hourly_digest_job, "cron", minute=0)
+    # Sync only 2h on boot — aggressive 12h was the root of stale alert flooding
+    asyncio.create_task(listener.sync_history(2))
+
+    scheduler.add_job(processing_loop, "interval", minutes=1, id="process")
+    # FIX: cron now uses WIB timezone (scheduler is WIB-aware)
+    scheduler.add_job(hourly_digest_job, "cron", minute=0, id="digest")
     scheduler.start()
-    
+
     await processing_loop()
-    
-    print("TanyaDFBot Full System Online.")
-    await asyncio.Event().wait()
+    now_wib = datetime.now(WIB).strftime('%H:%M WIB')
+    print(f"✅ TanyaDFBot Online — {now_wib}")
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await db.close()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Bot stopped by user.")
+        pass

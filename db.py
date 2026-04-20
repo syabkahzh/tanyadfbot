@@ -1,188 +1,176 @@
-import sqlite3
-from datetime import datetime
+import aiosqlite
+from datetime import datetime, timezone
 from config import Config
 
 class Database:
     def __init__(self):
-        self.conn = sqlite3.connect(Config.DB_PATH, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self._create_tables()
+        self.db_path = Config.DB_PATH
+        self.conn = None
 
-    def _create_tables(self):
-        with self.conn:
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    tg_msg_id INTEGER,
-                    chat_id INTEGER,
-                    sender_id INTEGER,
-                    sender_name TEXT,
-                    timestamp DATETIME,
-                    text TEXT,
-                    reply_to_msg_id INTEGER,
-                    processed BOOLEAN DEFAULT 0,
-                    UNIQUE(tg_msg_id, chat_id)
-                )
-            """)
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS promos (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    source_msg_id INTEGER,
-                    summary TEXT,
-                    brand TEXT,
-                    conditions TEXT,
-                    tg_link TEXT,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (source_msg_id) REFERENCES messages (id)
-                )
-            """)
+    async def init(self):
+        self.conn = await aiosqlite.connect(self.db_path)
+        self.conn.row_factory = aiosqlite.Row
+        await self.conn.execute("PRAGMA journal_mode=WAL")
+        await self.conn.execute("PRAGMA timezone = 'UTC'")  # explicit
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tg_msg_id INTEGER,
+                chat_id INTEGER,
+                sender_id INTEGER,
+                sender_name TEXT,
+                timestamp TEXT NOT NULL,  -- always stored as ISO8601 UTC with +00:00
+                text TEXT,
+                reply_to_msg_id INTEGER,
+                processed BOOLEAN DEFAULT 0,
+                UNIQUE(tg_msg_id, chat_id)
+            )
+        """)
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS promos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_msg_id INTEGER,
+                summary TEXT,
+                brand TEXT,
+                conditions TEXT,
+                tg_link TEXT,
+                status TEXT DEFAULT 'active',
+                -- FIX: store as explicit UTC ISO string, not SQLite CURRENT_TIMESTAMP
+                created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now')),
+                FOREIGN KEY (source_msg_id) REFERENCES messages (id)
+            )
+        """)
+        await self.conn.commit()
 
-    # ── Core message/promo ops ───────────────────────────────────────────────
+    async def close(self):
+        if self.conn:
+            await self.conn.close()
 
-    def save_message(self, tg_msg_id, chat_id, sender_id, sender_name, timestamp, text, reply_to_msg_id):
+    async def save_message(self, tg_msg_id, chat_id, sender_id, sender_name, timestamp, text, reply_to_msg_id, processed=0):
+        # Normalize timestamp to UTC ISO8601 string
+        if isinstance(timestamp, datetime):
+            ts_str = timestamp.astimezone(timezone.utc).isoformat()
+        else:
+            ts_str = str(timestamp)
+
         try:
-            with self.conn:
-                cursor = self.conn.execute("""
-                    INSERT OR IGNORE INTO messages (tg_msg_id, chat_id, sender_id, sender_name, timestamp, text, reply_to_msg_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (tg_msg_id, chat_id, sender_id, sender_name, timestamp, text, reply_to_msg_id))
-                return cursor.lastrowid
+            cursor = await self.conn.execute("""
+                INSERT OR IGNORE INTO messages (tg_msg_id, chat_id, sender_id, sender_name, timestamp, text, reply_to_msg_id, processed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (tg_msg_id, chat_id, sender_id, sender_name, ts_str, text, reply_to_msg_id, processed))
+            await self.conn.commit()
+            # lastrowid is 0 on IGNORE — return None to signal "not new"
+            return cursor.lastrowid if cursor.lastrowid else None
         except Exception as e:
             print(f"DB Error (save_message): {e}")
             return None
 
-    def get_unprocessed_batch(self, batch_size=50):
-        cursor = self.conn.execute("""
+    async def get_unprocessed_batch(self, batch_size=50):
+        async with self.conn.execute("""
             SELECT id, text, timestamp, sender_name, tg_msg_id, chat_id
-            FROM messages WHERE processed = 0 LIMIT ?
-        """, (batch_size,))
-        return cursor.fetchall()
+            FROM messages WHERE processed = 0 ORDER BY id ASC LIMIT ?
+        """, (batch_size,)) as cursor:
+            return await cursor.fetchall()
 
-    def mark_batch_processed(self, ids):
+    async def save_promos_batch(self, promos_to_save: list, processed_msg_ids: list):
+        try:
+            for source_id, p, link in promos_to_save:
+                await self.conn.execute("""
+                    INSERT INTO promos (source_msg_id, summary, brand, conditions, tg_link, status)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (source_id, p.summary, p.brand, p.conditions, link, p.status))
+
+            if processed_msg_ids:
+                placeholders = ','.join(['?'] * len(processed_msg_ids))
+                await self.conn.execute(
+                    f"UPDATE messages SET processed = 1 WHERE id IN ({placeholders})",
+                    processed_msg_ids
+                )
+            await self.conn.commit()
+            return True
+        except Exception as e:
+            await self.conn.rollback()
+            print(f"❌ DB Batch Error: {e}")
+            return False
+
+    async def mark_batch_processed(self, ids):
         if not ids: return
-        with self.conn:
-            self.conn.execute(
-                f"UPDATE messages SET processed = 1 WHERE id IN ({','.join(['?']*len(ids))})", ids
-            )
+        await self.conn.execute(
+            f"UPDATE messages SET processed = 1 WHERE id IN ({','.join(['?']*len(ids))})", ids
+        )
+        await self.conn.commit()
 
-    def save_promo(self, source_msg_id, p_data, tg_link):
-        with self.conn:
-            self.conn.execute("""
-                INSERT INTO promos (source_msg_id, summary, brand, conditions, tg_link)
-                VALUES (?, ?, ?, ?, ?)
-            """, (source_msg_id, p_data.summary, p_data.brand, p_data.conditions, tg_link))
-
-    def get_promos(self, hours=None, limit=None):
-        query = "SELECT brand, summary, conditions, tg_link, created_at FROM promos"
+    async def get_promos(self, hours=None, limit=None):
+        """
+        Returns promos joined with source message timestamps.
+        FIX: compare using UTC-aware strings consistently.
+        """
+        query = """
+            SELECT p.brand, p.summary, p.conditions, p.tg_link, p.status,
+                   m.timestamp as msg_time, p.created_at
+            FROM promos p
+            JOIN messages m ON p.source_msg_id = m.id
+        """
         params = []
         conds = []
         if hours:
-            conds.append("created_at >= datetime('now', ?)")
+            # Use strftime comparison on stored UTC ISO strings (safe for our format)
+            conds.append("m.timestamp >= strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', ?)")
             params.append(f'-{hours} hours')
         if conds:
             query += " WHERE " + " AND ".join(conds)
-        query += " ORDER BY id DESC"
+        query += " ORDER BY p.id DESC"
         if limit:
             query += " LIMIT ?"
             params.append(limit)
-        return self.conn.execute(query, params).fetchall()
 
-    # ── Trend / monitoring helpers ───────────────────────────────────────────
+        async with self.conn.execute(query, params) as cursor:
+            return await cursor.fetchall()
 
-    def get_message_count_in_window(self, minutes=5):
-        row = self.conn.execute("""
-            SELECT COUNT(*) FROM messages
-            WHERE timestamp >= datetime('now', ?)
-        """, (f'-{minutes} minutes',)).fetchone()
-        return row[0]
+    async def get_last_n_messages(self, n=50):
+        async with self.conn.execute("""
+            SELECT text, sender_name, timestamp
+            FROM messages ORDER BY id DESC LIMIT ?
+        """, (n,)) as cursor:
+            return await cursor.fetchall()
 
-    def get_recent_messages(self, minutes=10):
-        cursor = self.conn.execute("""
+    async def get_last_msg_id(self, chat_id):
+        async with self.conn.execute(
+            "SELECT MAX(tg_msg_id) FROM messages WHERE chat_id = ?", (chat_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row and row[0] else 0
+
+    async def get_recent_messages(self, minutes=10):
+        async with self.conn.execute("""
             SELECT id, text, sender_id, sender_name, reply_to_msg_id, timestamp
             FROM messages
-            WHERE timestamp >= datetime('now', ?)
+            WHERE timestamp >= strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', ?)
             ORDER BY timestamp DESC
-        """, (f'-{minutes} minutes',))
-        return cursor.fetchall()
+        """, (f'-{minutes} minutes',)) as cursor:
+            return await cursor.fetchall()
 
-    def get_hot_threads(self, minutes=20, min_replies=3):
-        """
-        Return hot threads with the original message text + link info,
-        by joining reply_to_msg_id back to the originating message.
-        Only returns threads not already seen before (new since last check).
-        """
-        cursor = self.conn.execute("""
-            SELECT
-                m.reply_to_msg_id AS tg_msg_id,
-                COUNT(*) AS reply_count,
-                orig.text AS orig_text,
-                orig.sender_name AS orig_sender,
-                orig.chat_id AS chat_id
-            FROM messages m
-            LEFT JOIN messages orig
-                ON orig.tg_msg_id = m.reply_to_msg_id
-                AND orig.chat_id = m.chat_id
-            WHERE m.reply_to_msg_id IS NOT NULL
-              AND m.timestamp >= datetime('now', ?)
-            GROUP BY m.reply_to_msg_id
-            HAVING reply_count >= ?
-            ORDER BY reply_count DESC
-        """, (f'-{minutes} minutes', min_replies))
-        return cursor.fetchall()
-
-    def get_recent_words(self, minutes=20):
-        """
-        Returns list of (word, count) from recent messages,
-        filtered to meaningful tokens only. Caller decides what to do with them.
-        """
+    async def get_recent_words(self, minutes=20):
         STOP = {
             'yang','yg','iya','gak','ada','aku','kak','juga','gais','bisa','ga','ya',
             'di','ke','dan','atau','tapi','pls','nih','ini','itu','udah','dah','nggk',
-            'lagi','aja','kok','kalo','smpe','dri','dr','tdk','blm','mau','tanya',
-            'tau','lho','sih','dong','deh','banget','emang','kayak','terus','jadi',
-            'sama','kaya','punya','udah','ngga','nggak','enggak','abis','habis',
-            'dengan','untuk','dari','juga','buat','biasa','kalau','kayaknya',
-            # slang that's too generic to signal anything
-            'pake','boleh','nuker','beli','tadi','masuk','minta','coba','kasih',
+            'lagi','aja','kok','kalo','smpe','dri','dr','tdk','blm','mau','tanya','tau',
+            'lho','sih','dong','deh','banget','emang','kayak','terus','jadi','sama',
+            'kaya','punya','abis','habis','dengan','untuk','dari','buat','biasa','kalau',
+            'kayaknya','pake','boleh','nuker','beli','tadi','masuk','minta','coba','kasih'
         }
-        rows = self.conn.execute("""
+        async with self.conn.execute("""
             SELECT text FROM messages
-            WHERE timestamp >= datetime('now', ?)
-        """, (f'-{minutes} minutes',)).fetchall()
+            WHERE timestamp >= strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', ?)
+        """, (f'-{minutes} minutes',)) as cursor:
+            rows = await cursor.fetchall()
 
         freq = {}
         for row in rows:
-            seen_in_msg = set()  # count each word once per message (prevents one person spamming)
-            for word in row['text'].lower().split():
+            seen_in_msg = set()
+            for word in row[0].lower().split():
                 word = word.strip('.,!?:;()"\'')
-                if (
-                    len(word) > 3
-                    and word not in STOP
-                    and not word.startswith('http')
-                    and word not in seen_in_msg
-                ):
+                if len(word) > 3 and word not in STOP and not word.startswith('http') and word not in seen_in_msg:
                     freq[word] = freq.get(word, 0) + 1
                     seen_in_msg.add(word)
-
         return sorted(freq.items(), key=lambda x: -x[1])
-
-    def get_time_mentions(self, minutes=5):
-        """
-        Return recent messages that contain a time reference (jam X, HH:MM, etc).
-        Only looks in the freshest window so we catch them as they arrive.
-        """
-        import re
-        TIME_RE = re.compile(
-            r'\bjam\s*\d{1,2}(?:[.:]\d{2})?\b'
-            r'|\b\d{1,2}[.:]\d{2}\b'
-            r'|\b\d{1,2}\s*(?:pagi|siang|sore|malam|wib|wita|wit)\b',
-            re.IGNORECASE
-        )
-        rows = self.conn.execute("""
-            SELECT id, tg_msg_id, chat_id, sender_name, text, timestamp
-            FROM messages
-            WHERE timestamp >= datetime('now', ?)
-            ORDER BY timestamp DESC
-        """, (f'-{minutes} minutes',)).fetchall()
-
-        return [r for r in rows if TIME_RE.search(r['text'])]

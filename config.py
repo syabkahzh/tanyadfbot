@@ -21,6 +21,9 @@ class Config:
     SESSION_NAME = "tg_session"
     MODEL_ID = "gemma-4-31b-it"
 
+    # Your timezone: WIB = UTC+7
+    TIMEZONE = "Asia/Jakarta"
+    UTC_OFFSET_HOURS = 7
 
     @classmethod
     def validate(cls):

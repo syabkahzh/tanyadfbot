@@ -1,6 +1,8 @@
 telethon
+python-telegram-bot[job-queue]
 google-genai
-python-dotenv
+aiosqlite
 pydantic
-python-telegram-bot
+python-dotenv
 apscheduler
+pytz
