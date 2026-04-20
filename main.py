@@ -13,7 +13,19 @@ listener = TelethonListener(db)
 bot = TelegramBot(db, gemini)
 scheduler = AsyncIOScheduler()
 
+# ── Debounce state ───────────────────────────────────────────────────────────
+_recent_alerts_cache: list[tuple] = []  # Stores (brand, word_set)
+# ────────────────────────────────────────────────────────────────────────────
+
+def _make_tg_link(chat_id, msg_id):
+    # Standardize chat_id (remove -100 prefix if present)
+    cid = str(chat_id)
+    if cid.startswith("-100"): cid = cid[4:]
+    return f"https://t.me/c/{cid}/{msg_id}"
+
 async def processing_loop():
+    global _recent_alerts_cache
+    
     print(f"[{datetime.now()}] 🧠 Starting AI Analysis Batch...")
     batch = db.get_unprocessed_batch(50)
     if not batch: 
@@ -24,10 +36,12 @@ async def processing_loop():
     print(f"🤖 Sending {len(msgs_to_proc)} messages to {Config.MODEL_ID}...")
     
     promos = await gemini.process_batch(msgs_to_proc)
+    
+    # FIX: Always mark as processed immediately to prevent loops
     db.mark_batch_processed([m["id"] for m in msgs_to_proc])
     
     if not promos:
-        print("⚠️ No promos extracted or AI API failed. Batch cleared, moving on.")
+        print("⚠️ No promos extracted or AI API failed. Batch cleared.")
         return
 
     msg_id_map = {m["id"]: m for m in msgs_to_proc}
@@ -37,11 +51,38 @@ async def processing_loop():
         m = msg_id_map.get(p.original_msg_id)
         if not m: continue
         
-        tg_link = f"https://t.me/c/{str(m['chat_id'])[4:]}/{m['tg_msg_id']}"
+        tg_link = _make_tg_link(m['chat_id'], m['tg_msg_id'])
+        
+        # 1. Always save to DB for history/summaries
         db.save_promo(p.original_msg_id, p, tg_link)
         
-        print(f"🔥 PROMO FOUND: {p.brand} - {p.summary[:50]}...")
-        await bot.send_alert(p, tg_link)
+        # 2. Check for duplicates against the live alert cache
+        promo_words = set(p.summary.lower().split())
+        is_dupe = False
+        
+        for cached_brand, cached_words in _recent_alerts_cache:
+            # Check if same brand OR both are 'unknown'
+            if p.brand.lower() == cached_brand.lower() or p.brand.lower() == "unknown":
+                # Calculate word overlap (Jaccard-ish)
+                if not promo_words or not cached_words: continue
+                overlap = len(promo_words & cached_words) / max(len(promo_words | cached_words), 1)
+                
+                if overlap > 0.55: # 55% similarity threshold
+                    is_dupe = True
+                    break
+        
+        # 3. Only alert if genuinely new
+        if not is_dupe:
+            print(f"🔥 PROMO FOUND: {p.brand} - {p.summary[:50]}...")
+            if p.valid_until != 'unknown' or p.status == 'active':
+                await bot.send_alert(p, tg_link)
+                
+                # Add to cache and rotate (keep last 30)
+                _recent_alerts_cache.append((p.brand, promo_words))
+                if len(_recent_alerts_cache) > 30:
+                    _recent_alerts_cache.pop(0)
+        else:
+            print(f"🔇 SILENCED DUPE: {p.brand} — {p.summary[:50]}")
 
     for m in msgs_to_proc:
         if m['id'] not in promo_ids:
