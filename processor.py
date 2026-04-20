@@ -54,15 +54,6 @@ class GeminiProcessor:
                 "You are a highly sensitive expert at finding deals in Indonesian Telegram chats. "
                 "Indonesian users use slang: 'jd' (jadi), 'cmn' (cuman), 'hrga' (harga), 'pake' (pakai). "
                 "EXTRACT ANYTHING that looks like a deal, a price drop, a coupon code, or a 'deals' mention. "
-                "Example: 'pake deals jd cmn 9.5k' is a PROMO for a store (unknown) at price 9.5k. "
-                "If you see a link and a price, it's a promo. "
-                "If you see a brand (Shopee, Grab, Foodpanda, etc) and a discount, it's a promo. "
-                "For each, extract: "
-                "- summary: short description (1-2 sentences) "
-                "- brand: store or company name "
-                "- conditions: any requirements (e.g., 'min spend') "
-                "- valid_until: expiry date if mentioned "
-                "- status: 'active' if it looks current. "
                 "Return a JSON array. Be extremely aggressive—include anything that might be a deal."
             )
         }
@@ -79,14 +70,31 @@ class GeminiProcessor:
         return response.parsed.promos
 
     async def answer_question(self, question: str, context: str) -> str:
-        # ... existing answer_question logic ...
+        config = {
+            "system_instruction": (
+                "You are a helpful assistant specialized in Indonesian discount deals. "
+                "Use the provided promo context to answer the user's question concisely. "
+                "Use Indonesian slang where appropriate to match the community vibe. "
+                "Always provide links if available."
+            )
+        }
+
+        response = await self._call_with_retry(
+            model_id=Config.MODEL_ID,
+            contents=f"Question: {question}\n\nContext:\n{context}",
+            config=config
+        )
+
+        if not response:
+            return "❌ Maaf, sistem AI lagi sibuk. Coba lagi bentar ya!"
+            
+        return response.text
 
     async def interpret_keywords(self, hot_words: List[str], window: int, context_msgs: List[str]) -> Optional[str]:
         """Interprets trending keywords using specific Indonesian context and NO_TREND safety."""
         if not context_msgs: return None
 
         word_str = ", ".join(hot_words)
-        # Limit to 20 messages to save tokens
         context_str = "\n- ".join(context_msgs[:20]) 
         
         prompt = (
