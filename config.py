@@ -14,13 +14,15 @@ class Config:
     API_HASH = os.getenv("TG_API_HASH", "")
     BOT_TOKEN = os.getenv("BOT_TOKEN", "")
     OWNER_ID = get_int("MY_TELEGRAM_ID", 0)
+    EXTRA_AUTH_ID = get_int("EXTRA_AUTH_ID", 0)
     TARGET_GROUP = os.getenv("TARGET_GROUP", "")
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
     DB_PATH = "tanya_main.db"
     SESSION_NAME = "tg_session"
     MODEL_ID = "gemma-4-31b-it"
-    MODEL_FALLBACK = "gemini-3.1-flash-lite-preview"
+    MODEL_FALLBACK = "gemma-4-26b-a4b-it"
+    MODEL_LAST_RESORT = "gemini-3.1-flash-lite-preview"
     MODEL_FAST = "gemma-4-26b-a4b-it"
 
     # Your timezone: WIB = UTC+7

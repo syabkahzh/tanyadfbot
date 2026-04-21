@@ -2,7 +2,7 @@ import aiosqlite
 from datetime import datetime, timezone
 from config import Config
 
-def _normalize_brand(brand: str) -> str:
+def normalize_brand(brand: str) -> str:
     if not brand: return "Unknown"
     b = brand.strip()
     # Fix model hallucination artifact
@@ -10,13 +10,31 @@ def _normalize_brand(brand: str) -> str:
         return "Unknown"
     
     # Normalize common variants
-    canon = {'hokben': 'HokBen', 'hophop': 'HopHop', 'hop hop': 'HopHop',
-             'shopeefood': 'ShopeeFood', 'shopee food': 'ShopeeFood',
-             'gofood': 'GoFood', 'go food': 'GoFood', 'kopken': 'Kopi Kenangan',
-             'kopi kenangan': 'Kopi Kenangan', 'alfamart': 'Alfamart',
-             'indomaret': 'Indomaret', 'spx': 'SPX'}
+    canon = {
+        'hokben': 'HokBen', 'hoka ben': 'HokBen',
+        'hophop': 'HopHop', 'hop hop': 'HopHop',
+        'shopeefood': 'ShopeeFood', 'shopee food': 'ShopeeFood',
+        'gofood': 'GoFood', 'go food': 'GoFood',
+        'gopay': 'GoPay',
+        'kopken': 'Kopi Kenangan', 'kopi kenangan': 'Kopi Kenangan',
+        'alfamart': 'Alfamart', 'indomaret': 'Indomaret',
+        'spx': 'SPX', 'spx express': 'SPX', 'shopee xpress': 'SPX',
+        "the people's cafe": 'The Peoples Cafe',
+        'the peoples cafe': 'The Peoples Cafe',
+        'tpc': 'The Peoples Cafe',
+        'ismaya+': 'Ismaya', 'ismaya+ delivery': 'Ismaya',
+        'cupbob': 'Cupbop',
+        'pubg': 'PUBG',
+        # junk -> Unknown
+        'brand': 'Unknown', 'tidak diketahui': 'Unknown',
+        'tidak disebutkan': 'Unknown', 'sunknown': 'Unknown',
+        'goco': 'GoPay Coins', 'gogogo': 'gogogo',
+    }
     
-    return canon.get(b.lower(), b.title())
+    if b.lower() in canon:
+        return canon[b.lower()]
+    # Capitalize only the first letter, leave the rest as-is (e.g. ShopeeFood stays ShopeeFood)
+    return b[0].upper() + b[1:] if b else "Unknown"
 
 class Database:
     def __init__(self):
@@ -27,6 +45,7 @@ class Database:
         self.conn = await aiosqlite.connect(self.db_path)
         self.conn.row_factory = aiosqlite.Row
         await self.conn.execute("PRAGMA journal_mode=WAL")
+        await self.conn.execute("PRAGMA foreign_keys=ON")
         await self.conn.execute("PRAGMA wal_autocheckpoint=1000")
         await self.conn.execute("PRAGMA cache_size=-8000")
         await self.conn.execute("PRAGMA synchronous=NORMAL")
@@ -53,6 +72,7 @@ class Database:
             "ALTER TABLE messages ADD COLUMN time_alerted INTEGER DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN has_photo INTEGER DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN image_processed INTEGER DEFAULT 0",
+            "ALTER TABLE pending_alerts ADD COLUMN flush_id TEXT DEFAULT NULL",
         ]:
             try:
                 await self.conn.execute(col_sql)
@@ -69,8 +89,8 @@ class Database:
                 conditions TEXT,
                 tg_link TEXT,
                 status TEXT NOT NULL DEFAULT 'unknown' CHECK(status IN ('active', 'expired', 'unknown')),
-                -- FIX: store as explicit UTC ISO string, not SQLite CURRENT_TIMESTAMP
-                created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S+00:00', 'now')),
+                -- FIX: store as naive UTC string to match query format
+                created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
                 FOREIGN KEY (source_msg_id) REFERENCES messages (id)
             )
         """)
@@ -83,7 +103,20 @@ class Database:
                 p_data_json TEXT,
                 tg_link TEXT,
                 timestamp TEXT,
-                created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S+00:00', 'now'))
+                created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
+            )
+        """)
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS pending_confirmations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                brand TEXT,
+                p_data_json TEXT,
+                tg_link TEXT,
+                timestamp TEXT,
+                confidence INTEGER DEFAULT 0,
+                corroborations INTEGER DEFAULT 0,
+                expires_at TEXT,
+                created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
             )
         """)
         await self.conn.commit()
@@ -106,7 +139,7 @@ class Database:
         """Fetch recent alerts for deduplication seeding on boot."""
         async with self.conn.execute("""
             SELECT DISTINCT brand, summary FROM promos
-            WHERE created_at >= strftime('%Y-%m-%d %H:%M:%S+00:00','now',?)
+            WHERE created_at >= strftime('%Y-%m-%d %H:%M:%S','now',?)
             ORDER BY id DESC LIMIT ?
         """, (f'-{hours} hours', limit)) as cur:
             return await cur.fetchall()
@@ -169,12 +202,16 @@ class Database:
     async def save_promos_batch(self, promos_to_save: list, processed_msg_ids: list):
         try:
             for source_id, p, link in promos_to_save:
+                # NEW: skip junk brands entirely — don't store, don't alert
+                clean_brand = normalize_brand(p.brand)
+                if clean_brand == "Unknown" and (not p.summary or len(p.summary) < 15):
+                    continue
                 # Sanitize status before insert
                 status = p.status if p.status in ('active', 'expired', 'unknown') else 'unknown'
                 await self.conn.execute("""
                     INSERT OR IGNORE INTO promos (source_msg_id, summary, brand, conditions, tg_link, status)
                     VALUES (?, ?, ?, ?, ?, ?)
-                """, (source_id, p.summary, _normalize_brand(p.brand), p.conditions, link, status))
+                """, (source_id, p.summary, clean_brand, p.conditions, link, status))
 
             if processed_msg_ids:
                 placeholders = ','.join(['?'] * len(processed_msg_ids))

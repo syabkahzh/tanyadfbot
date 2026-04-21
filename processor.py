@@ -3,8 +3,9 @@ import asyncio
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Union
 from config import Config
+from db import normalize_brand
 
 class PromoExtraction(BaseModel):
     original_msg_id: int
@@ -43,31 +44,86 @@ ATURAN:
 3. Summary harus 1 kalimat padat.
 4. Output harus valid JSON sesuai schema."""
 
+_WORD_BOUNDARY_KEYWORDS = re.compile(
+    r'\b(off|on|aman|work|bs|jp|mm)\b', re.IGNORECASE
+)
+_STRONG_KEYWORDS = {
+    'sfood','gfood','grab','shopee','gojek','tokped','tokopedia',
+    'voucher','vcr','voc','diskon','promo','cashback','gratis',
+    'klaim','claim','limit','error','bug','ready','restock','ristok',
+    'luber','pecah','flash','sale','deal','murah','hemat','bonus',
+    'bayar','checkout','order','ongkir','gratis ongkir','cod'
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 class GeminiProcessor:
     def __init__(self):
         self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
-        self._last_calls = [] # List of timestamps
+        self._last_calls = []       # list of (timestamp, tokens_used)
+        self._rate_lock = asyncio.Lock()
 
-    async def _rate_limit(self):
-        """Ensures max 10 calls per minute."""
+        # Limits — set conservatively below free tier ceiling
+        self._rpm_limit = 8
+        self._tpm_limit = 200_000   # free tier is ~250k, keep 50k headroom
+        self._consecutive_429s = 0          # tracks back-to-back rate limit hits
+        self._rpm_floor = 5                 # never go below this
+        self._rpm_ceiling = 10              # never go above this
+        self._last_rpm_adjust = 0.0         # loop time of last adjustment
+
+    @staticmethod
+    def _estimate_tokens(text: Union[str, list]) -> int:
+        """Rough token estimate: Indonesian text ~3.5 chars/token, 200 overhead."""
+        if isinstance(text, list):
+            chars = sum(len(str(p)) for p in text)
+        else:
+            chars = len(str(text))
+        return int(chars / 3.5) + 200
+
+    async def _rate_limit(self, estimated_tokens: int = 1000):
+        """Block until both RPM and TPM windows have capacity."""
         while True:
-            now = asyncio.get_event_loop().time()
-            # Remove calls older than 60s
-            self._last_calls = [t for t in self._last_calls if now - t < 60]
-            if len(self._last_calls) < 10:
-                self._last_calls.append(now)
-                return
-            wait_time = 60 - (now - self._last_calls[0])
-            await asyncio.sleep(max(0.1, wait_time))
+            async with self._rate_lock:
+                now = asyncio.get_event_loop().time()
+                # Evict entries older than 60s
+                self._last_calls = [(t, tok) for t, tok in self._last_calls if now - t < 60]
 
-    async def _call_with_retry(self, contents, config, model_id=None, max_retries=2):
-        """Calls Gemini with automated fallback and rate limiting."""
-        await self._rate_limit()
-        # 1. Start with requested model (or default)
-        # 2. Fallback to Config.MODEL_FALLBACK (gemini-3.1-flash-lite-preview)
-        models = [model_id or Config.MODEL_ID, Config.MODEL_FALLBACK]
+                current_rpm = len(self._last_calls)
+                current_tpm = sum(tok for _, tok in self._last_calls)
+
+                rpm_ok = current_rpm < self._rpm_limit
+                tpm_ok = (current_tpm + estimated_tokens) <= self._tpm_limit
+
+                if rpm_ok and tpm_ok:
+                    self._last_calls.append((now, estimated_tokens))
+                    # Successful call — gradually recover RPM if we've been quiet
+                    if self._consecutive_429s > 0:
+                        self._consecutive_429s = max(0, self._consecutive_429s - 1)
+                    elif (now - self._last_rpm_adjust > 120 and
+                          self._rpm_limit < self._rpm_ceiling and
+                          len(self._last_calls) < self._rpm_limit * 0.5):
+                        # Quiet: < 50% RPM used, been 2+ min since last adjust → creep up
+                        self._rpm_limit = min(self._rpm_ceiling, self._rpm_limit + 1)
+                        self._last_rpm_adjust = now
+                        print(f"📈 Adaptive RPM: recovered to {self._rpm_limit} RPM")
+                    return
+
+                # Calculate wait needed
+                if self._last_calls:
+                    wait_time = 60 - (now - self._last_calls[0][0])
+                else:
+                    wait_time = 1.0
+
+            await asyncio.sleep(max(0.5, wait_time))
+
+    async def _call_with_retry(self, contents, config, model_id=None, max_retries=2, estimated_tokens=1000):
+        """Calls Gemini with automated fallback across 3 tiers of models."""
+        await self._rate_limit(estimated_tokens)
+        
+        # 1. Gemma 31B (Primary)
+        # 2. Gemma 26B (Fallback)
+        # 3. Gemini 3.1 (Last Resort)
+        models = [model_id or Config.MODEL_ID, Config.MODEL_FALLBACK, Config.MODEL_LAST_RESORT]
         
         for mid in models:
             if not mid: continue
@@ -80,12 +136,18 @@ class GeminiProcessor:
                 except Exception as e:
                     err_msg = str(e).lower()
                     if "429" in err_msg or "resource_exhausted" in err_msg:
-                        print(f"⚠️ Rate limited on {mid}, trying next fallback...")
-                        break # Try next model
+                        self._consecutive_429s += 1
+                        # Back off: subtract 1 RPM per hit, floor at 5
+                        if self._consecutive_429s >= 2:
+                            new_limit = max(self._rpm_floor, self._rpm_limit - 1)
+                            if new_limit != self._rpm_limit:
+                                self._rpm_limit = new_limit
+                                print(f"📉 Adaptive RPM: backed off to {self._rpm_limit} RPM (429 count: {self._consecutive_429s})")
+                        break  # Try next model tier
                     
                     if attempt == max_retries - 1:
-                        print(f"❌ {mid} failed after {max_retries} attempts, trying fallback...")
-                        continue # Try next model
+                        print(f"❌ {mid} failed after {max_retries} attempts, trying next tier...")
+                        continue # Try next model tier
                     
                     wait = 1.5 ** attempt
                     await asyncio.sleep(wait)
@@ -93,64 +155,57 @@ class GeminiProcessor:
 
     def _is_worth_checking(self, text: str) -> bool:
         """Pre-filter to skip low-signal messages without AI calls (RPM efficiency)."""
+        if not text or not text.strip():
+            return False
         t = text.strip().lower()
-        if not t: return False
         
         # Hard exclusions: known bot noise or non-promo system messages
         if "saya membisukan dia" in t or "@dfautokick_bot" in t:
             return False
 
         words = t.split()
-        
-        # 1. Immediate triggers for very short signals
-        short_signals = {
-            'aman', 'on', 'jp', 'mm', 'bs', 'ywwa', 'work', 'ready', 
-            'mantap', 'masuk', 'pecah', 'luber', 'ristok', 'restock'
-        }
-        if t in short_signals:
-            return True
 
-        # 2. Pattern detection
-        has_percent = bool(re.search(r'\d+\s*(%|persen)', t))
-        has_price = bool(re.search(r'\d+\s*(k|rb|ribu)', t))
-        
-        question_patterns = ['ga?', 'gak?', 'nggak?', 'kah?', 'ya?', 'dong?', '?']
-        is_question = any(t.endswith(p) for p in question_patterns) or t.count('?') > t.count('!')
-
-        # 3. Expanded Keyword sets
-        keywords = {
-            # Platforms/Brands
-            'sfood', 'gfood', 'grab', 'shopee', 'gojek', 'tokped', 'blibli',
-            'spay', 'gopay', 'ovo', 'dana', 'linkaja', 'pln', 'bpjs', 'pulsa',
-            'hokben', 'mcd', 'kfc', 'chatime', 'starbucks', 'kopken',
-            # Promo signals
-            'voucher', 'vcr', 'diskon', 'promo', 'off', 'cashback', 'gratis',
-            'klaim', 'claim', 'limit', 'error', 'bug', 'mumpung', 'gercep',
-            'masih bisa', 'bisa pake', 'nyantol', 'kejar'
-        }
-        
-        has_keyword = any(kw in t for kw in keywords)
-        
-        # Logic:
-        # - Always check if it has a price, percentage, or high-signal keyword
-        if has_percent or has_price or has_keyword:
-            return True
-            
-        # - If it's a question with no signals, skip if it's short
-        if is_question and len(words) < 5:
+        # Definite skip: pure question with no promo content
+        question_words = {'ga','gak','nggak','apa','gimana','berapa','kapan','dimana','kenapa'}
+        if t.endswith('?') and words and words[0] in question_words:
             return False
-            
-        # - Fallback for longer messages that might be complex descriptions
-        return len(words) >= 6
+        if len(words) <= 2 and t.endswith('?'):
+            return False
 
-    async def process_batch(self, messages: List[dict]) -> List[PromoExtraction]:
+        # Strong keyword match → always worth it
+        if any(kw in t for kw in _STRONG_KEYWORDS):
+            return True
+
+        # Word-boundary match for ambiguous shorts
+        if _WORD_BOUNDARY_KEYWORDS.search(t):
+            return True
+
+        return False
+
+    async def process_batch(self, messages: List[dict], db=None) -> List[PromoExtraction]:
         if not messages: return []
 
         filtered = [m for m in messages if self._is_worth_checking(m['text'])]
         if not filtered: return []
 
+        # Enrich with context ONLY for replies if DB is provided
+        if db:
+            chat_id = filtered[0]['chat_id']
+            reply_ids = [m['reply_to_msg_id'] for m in filtered if m.get('reply_to_msg_id')]
+            reply_map = await db.get_reply_sources_bulk(reply_ids, chat_id) if reply_ids else {}
+            
+            for m in filtered:
+                if m.get('reply_to_msg_id') and m['reply_to_msg_id'] in reply_map:
+                    # fetch parent only, truncated
+                    parent_text = (reply_map[m['reply_to_msg_id']] or "")[:60]
+                    m['context'] = f"[reply to: {parent_text}] "
+                else:
+                    m['context'] = ""
+        else:
+            for m in filtered: m['context'] = ""
+
         batch_text = "\n---\n".join([
-            f"ID:{m['id']} C:{m.get('context','')} MSG:{m['text']}"
+            f"ID:{m['id']} {m['context']}MSG:{m['text'] or ''}"
             for m in filtered
         ])
 
@@ -163,14 +218,18 @@ class GeminiProcessor:
         response = await self._call_with_retry(
             contents=f"Batch pesan:\n\n{batch_text}",
             config=config,
-            model_id=Config.MODEL_ID
+            model_id=Config.MODEL_ID,
+            estimated_tokens=self._estimate_tokens(batch_text)
         )
 
-        if not response or not response.parsed: return []
+        if response is None: return None
+        if not response.parsed: return []
 
+        JUNK_SUMMARIES = {'summary', 'none', 'n/a', '-', 'tidak ada', 'tidak ditemukan'}
         valid = []
         for p in response.parsed.promos:
-            if p.summary and p.summary.strip():
+            s = (p.summary or "").strip()
+            if s and len(s) >= 15 and s.lower() not in JUNK_SUMMARIES:
                 valid.append(p)
         return valid
 
@@ -179,10 +238,10 @@ class GeminiProcessor:
         if not new_promos: return []
         if not recent_alerts: return new_promos
 
-        recent_keys = {f"{r['brand'].lower()}:{r['summary'][:35].lower()}" for r in recent_alerts}
+        recent_keys = {f"{normalize_brand(r['brand']).lower()}:{r['summary'][:35].lower()}" for r in recent_alerts}
         unique = []
         for p in new_promos:
-            key = f"{p.brand.lower()}:{p.summary[:35].lower()}"
+            key = f"{normalize_brand(p.brand).lower()}:{p.summary[:35].lower()}"
             if key not in recent_keys:
                 unique.append(p)
                 # Prevent intra-batch dupes
@@ -195,7 +254,8 @@ class GeminiProcessor:
         response = await self._call_with_retry(
             contents=f"Rangkum pesan ini:\n\n{context}",
             config={"system_instruction": _DIGEST_SYSTEM},
-            model_id=Config.MODEL_FAST
+            model_id=Config.MODEL_FAST,
+            estimated_tokens=self._estimate_tokens(context)
         )
         return response.text if response else "❌ Gagal merangkum."
 
@@ -213,7 +273,8 @@ class GeminiProcessor:
         response = await self._call_with_retry(
             contents=prompt,
             config={"system_instruction": _DIGEST_SYSTEM},
-            model_id=Config.MODEL_FAST
+            model_id=Config.MODEL_FAST,
+            estimated_tokens=self._estimate_tokens(prompt)
         )
         return response.text if response else "Thread ini sedang ramai dibicarakan."
 
@@ -222,7 +283,8 @@ class GeminiProcessor:
         response = await self._call_with_retry(
             contents=f"Pertanyaan: {question}\n\nKonteks:\n{context}",
             config={"system_instruction": _DIGEST_SYSTEM},
-            model_id=Config.MODEL_FALLBACK
+            model_id=Config.MODEL_FALLBACK,
+            estimated_tokens=self._estimate_tokens(question + context)
         )
         return response.text if response else "❌ AI Busy."
 
@@ -243,7 +305,8 @@ class GeminiProcessor:
                 types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
             ],
             config=config,
-            model_id=Config.MODEL_ID
+            model_id=Config.MODEL_ID,
+            estimated_tokens=self._estimate_tokens(prompt) + 1000  # +1000 for image encoding overhead
         )
 
         if not response or not response.parsed:
@@ -268,7 +331,8 @@ class GeminiProcessor:
         response = await self._call_with_retry(
             contents=prompt,
             config={"system_instruction": system},
-            model_id=Config.MODEL_FAST
+            model_id=Config.MODEL_FAST,
+            estimated_tokens=self._estimate_tokens(prompt)
         )
         
         if response and response.text and "NO_TREND" not in response.text:

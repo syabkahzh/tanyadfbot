@@ -37,8 +37,8 @@ class TelegramBot:
         self.gemini = gemini_processor
         self.start_time = datetime.now(timezone.utc)
         
-        # Authorized IDs: You and the new requested ID
-        self.auth_ids = {Config.OWNER_ID, 2045932320}
+        # Authorized IDs: Dynamically loaded from config
+        self.auth_ids = {uid for uid in (Config.OWNER_ID, Config.EXTRA_AUTH_ID) if uid}
 
         request = HTTPXRequest(connect_timeout=30.0, read_timeout=60.0)
         self.app = ApplicationBuilder().token(Config.BOT_TOKEN).request(request).build()
@@ -154,11 +154,19 @@ class TelegramBot:
 
         now_wib = datetime.now(WIB).strftime('%H:%M:%S WIB')
         latest_wib = _to_wib(latest_ts) + " WIB" if latest_ts else "N/A"
+        
+        # Calculate current RPM pressure
+        from main import gemini
+        now = asyncio.get_event_loop().time()
+        active_calls = len([t for t, tok in gemini._last_calls if now - t < 60])
+        rpm_status = f"`{active_calls}/{gemini._rpm_limit}`"
+        
         text = (
             f"📊 *Status* — `{now_wib}`\n"
             f"📩 Total pesan: `{msg_count}`\n"
             f"🔥 Promos: `{promo_count}`\n"
             f"🔄 Queue: `{unprocessed}`\n"
+            f"⚡ Gemini RPM: {rpm_status}\n"
             f"🕒 Pesan terbaru: `{latest_wib}`"
         )
         await status_msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
