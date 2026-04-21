@@ -138,11 +138,11 @@ class Database:
             await self.conn.close()
 
     async def save_message(self, tg_msg_id, chat_id, sender_id, sender_name, timestamp, text, reply_to_msg_id, processed=0, has_photo=0):
-        # Normalize timestamp to UTC ISO8601 string
+        # Normalize timestamp to UTC string with SPACE separator
         if isinstance(timestamp, datetime):
             ts_str = timestamp.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S+00:00')
         else:
-            ts_str = str(timestamp)
+            ts_str = str(timestamp).replace('T', ' ').replace('Z', '+00:00')
 
         try:
             cursor = await self.conn.execute("""
@@ -196,7 +196,7 @@ class Database:
         )
         await self.conn.commit()
 
-    async def get_promos(self, hours=None, limit=None):
+    async def get_promos(self, hours=None, limit=None, since_dt: datetime = None):
         """
         Returns promos joined with source message timestamps.
         FIX: compare using UTC-aware strings consistently.
@@ -209,13 +209,17 @@ class Database:
         """
         params = []
         conds = []
-        if hours:
+        if since_dt:
+            conds.append("m.timestamp >= ?")
+            params.append(since_dt.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S+00:00'))
+        elif hours:
             # Use strftime comparison on stored UTC ISO strings (safe for our format)
             conds.append("m.timestamp >= strftime('%Y-%m-%d %H:%M:%S+00:00', 'now', ?)")
             params.append(f'-{hours} hours')
+        
         if conds:
             query += " WHERE " + " AND ".join(conds)
-        query += " ORDER BY p.id DESC"
+        query += " ORDER BY m.timestamp ASC"
         if limit:
             query += " LIMIT ?"
             params.append(limit)
@@ -293,6 +297,15 @@ class Database:
         ) as cur:
             rows = await cur.fetchall()
             return {r['tg_msg_id']: r['text'] for r in rows}
+
+    async def get_thread_replies(self, parent_tg_msg_id: int, chat_id: int, limit: int = 20):
+        """Fetch the most recent unique replies to a specific message."""
+        async with self.conn.execute("""
+            SELECT text, sender_name, timestamp FROM messages
+            WHERE reply_to_msg_id = ? AND chat_id = ?
+            ORDER BY id ASC LIMIT ?
+        """, (parent_tg_msg_id, chat_id, limit)) as cur:
+            return await cur.fetchall()
 
     async def get_recent_messages(self, minutes=10):
         async with self.conn.execute("""

@@ -195,11 +195,30 @@ class GeminiProcessor:
         response = await self._call_with_retry(
             contents=f"Rangkum pesan ini:\n\n{context}",
             config={"system_instruction": _DIGEST_SYSTEM},
-            model_id=Config.MODEL_FALLBACK  # Use cheaper model for generic summaries
+            model_id=Config.MODEL_FAST
         )
         return response.text if response else "❌ Gagal merangkum."
 
+    async def summarize_thread(self, parent_text: str, replies: List[str]) -> str:
+        """Summarizes a hot thread based on the root message and its replies."""
+        if not replies: return "Thread ini sedang ramai dibicarakan."
+
+        reply_context = "\n- ".join(replies[:20])
+        prompt = (
+            f"PESAN UTAMA: {parent_text}\n\n"
+            f"BEBERAPA BALASAN:\n- {reply_context}\n\n"
+            "Berdasarkan percakapan di atas, apa intinya? (Misal: orang-orang konfirmasi promo ini work, atau lagi bahas error). Jawab 1 kalimat singkat saja."
+        )
+
+        response = await self._call_with_retry(
+            contents=prompt,
+            config={"system_instruction": _DIGEST_SYSTEM},
+            model_id=Config.MODEL_FAST
+        )
+        return response.text if response else "Thread ini sedang ramai dibicarakan."
+
     async def answer_question(self, question: str, context: str) -> str:
+
         response = await self._call_with_retry(
             contents=f"Pertanyaan: {question}\n\nKonteks:\n{context}",
             config={"system_instruction": _DIGEST_SYSTEM},

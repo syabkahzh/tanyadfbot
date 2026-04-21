@@ -25,6 +25,7 @@ _buffer_flush_task = None
 _alerted_hot_threads: dict[int, int] = {}  # tg_msg_id -> last alerted count
 _last_trend_alert = ""  # debounce narratives
 _last_halfhour_digest_count = 0  # track new promos in 30m window
+_last_spike_alert = datetime.min.replace(tzinfo=timezone.utc) # cooldown for spikes
 
 def _make_tg_link(chat_id, msg_id):
     cid = str(chat_id)
@@ -48,7 +49,7 @@ def _esc(text: str) -> str:
     return text.replace("*", "\\*").replace("_", "\\_").replace("[", "\\[").replace("]", "\\]").replace("`", "\\`")
 
 async def _flush_alert_buffer():
-    await asyncio.sleep(90)  # collect for 90s
+    await asyncio.sleep(20)  # collect for 20s (reduced from 90s for speed)
     global _buffer_flush_task
     
     # Get but don't clear yet to prevent loss on crash
@@ -71,12 +72,13 @@ async def _flush_alert_buffer():
     _buffer_flush_task = None
     
     try:
+        # Separate per brand (topic) to ensure unique deals aren't buried
         for brand_key, items in snapshot.items():
             if len(items) == 1:
                 p, link, ts = items[0]
                 await bot.send_alert(p, link, timestamp=ts)
             else:
-                # Grouped alert
+                # Grouped alert: multiple people talking about the SAME topic
                 await bot.send_grouped_alert(brand_key, items)
         
         # Clear from DB only after successful sending
@@ -150,11 +152,15 @@ async def processing_loop():
         for r in recent_promos:
             _recent_alerts_history.append({"brand": r['brand'], "summary": r['summary']})
 
+    print(f"🚀 Processing Loop Started (Permanent Mode)")
     while True:
-        batch = await db.get_unprocessed_batch(200) # Increased batch size
-        if not batch: break
-        
-        print(f"[{datetime.now(WIB).strftime('%H:%M:%S WIB')}] 🧠 Analysis Batch Started ({len(batch)} messages)...")
+        try:
+            batch = await db.get_unprocessed_batch(200) 
+            if not batch:
+                await asyncio.sleep(2) # Tiny breather if no data
+                continue
+            
+            # ... (rest of the logic remains same, just ensure it doesn't 'break' the while loop)
 
         msgs_to_proc = [
             {"id": r['id'], "text": r['text'], "timestamp": r['timestamp'],
@@ -242,6 +248,10 @@ async def processing_loop():
         
         # Don't hammer the AI too fast even in catch-up mode
         await asyncio.sleep(1)
+        
+    except Exception as e:
+        print(f"❌ processing_loop batch error: {e}")
+        await asyncio.sleep(5)
 
 async def hourly_digest_job():
     try:
@@ -324,7 +334,7 @@ async def heartbeat_job():
 
 async def hot_thread_job():
     try:
-        threads = await db.get_hot_threads(minutes=30, min_replies=5)
+        threads = await db.get_hot_threads(minutes=30, min_replies=3)
         
         # Prune old threads from memory (keep last 100)
         if len(_alerted_hot_threads) > 100:
@@ -342,15 +352,22 @@ async def hot_thread_job():
                 
                 link = _make_tg_link(t['chat_id'], t['tg_msg_id'])
                 msg_wib = _parse_ts(t['timestamp']).astimezone(WIB).strftime('%H:%M')
-                
+
+                # Fetch replies for summarization
+                reply_rows = await db.get_thread_replies(t['tg_msg_id'], t['chat_id'])
+                replies = [r['text'] for r in reply_rows]
+                summary = await gemini.summarize_thread(t['text'], replies)
+
                 text = (
                     f"🧵 <b>Thread Ramai</b> ({t['reply_count']} balasan)\n\n"
                     f"💬 <i>{html.escape(t['text'][:300])}</i>\n"
                     f"— {html.escape(t['sender_name'])} (<code>{msg_wib} WIB</code>)\n\n"
+                    f"🤖 <b>Inti:</b> {html.escape(summary)}\n\n"
                     f"🔗 <a href='{link}'>Lihat pesan asli</a>"
                 )
                 from telegram.constants import ParseMode
                 await bot.send_plain(text, parse_mode=ParseMode.HTML)
+
     except Exception as e:
         print(f"❌ hot_thread_job error: {e}")
 
@@ -387,8 +404,8 @@ async def trend_job():
         minutes = 20
         words_freq = await db.get_recent_words(minutes=minutes)
         
-        # Filter for words appearing 5+ times
-        hot_words = [w for w, c in words_freq if c >= 5][:10]
+        # Filter for words appearing 4+ times
+        hot_words = [w for w, c in words_freq if c >= 4][:10]
         if not hot_words:
             return
 
@@ -410,6 +427,39 @@ async def trend_job():
             await bot.send_plain(text, parse_mode=ParseMode.HTML)
     except Exception as e:
         print(f"❌ trend_job error: {e}")
+
+async def spike_detection_job():
+    """Detects sudden volume spikes (>30 msgs/min) and triggers summary."""
+    global _last_spike_alert
+    try:
+        # Check cooldown (10 minutes)
+        if (datetime.now(timezone.utc) - _last_spike_alert).total_seconds() < 600:
+            return
+
+        async with db.conn.execute("""
+            SELECT COUNT(*) FROM messages 
+            WHERE timestamp >= strftime('%Y-%m-%d %H:%M:%S+00:00', 'now', '-1 minute')
+        """) as cur:
+            count = (await cur.fetchone())[0]
+
+        if count >= 30:
+            print(f"🚀 SPIKE DETECTED: {count} msgs/min. Summarizing...")
+            recent_msgs = await db.get_recent_messages(minutes=3)
+            texts = [f"{m['sender_name']}: {m['text']}" for m in reversed(recent_msgs)]
+            
+            summary = await gemini.summarize_raw(texts)
+            
+            text = (
+                f"🚀 <b>Lonjakan Pesan Terdeteksi!</b>\n"
+                f"📊 Volume: <code>{count} pesan/menit</code>\n\n"
+                f"🤖 <b>Rangkuman Cepat:</b>\n{html.escape(summary)}"
+            )
+            from telegram.constants import ParseMode
+            await bot.send_plain(text, parse_mode=ParseMode.HTML)
+            _last_spike_alert = datetime.now(timezone.utc)
+
+    except Exception as e:
+        print(f"❌ spike_detection_job error: {e}")
 
 async def db_maintenance_job():
     try:
@@ -442,11 +492,13 @@ async def main():
     await bot.app.start()
     await bot.app.updater.start_polling()
 
+    # Start the permanent processing loop
+    asyncio.create_task(processing_loop())
+
     await listener.start()
-    # Sync only 2h on boot — aggressive 12h was the root of stale alert flooding
+    # Sync only 2h on boot
     asyncio.create_task(listener.sync_history(2))
 
-    scheduler.add_job(processing_loop, "interval", minutes=1, id="process", misfire_grace_time=30)
     # Image processing job every 3 minutes
     scheduler.add_job(image_processing_job, "interval", minutes=3, id="images", misfire_grace_time=120)
     # Hourly: skip 2am, 3am, 4am WIB to avoid sleep alerts
@@ -458,7 +510,8 @@ async def main():
     scheduler.add_job(heartbeat_job, "cron", minute=30, id="heartbeat", misfire_grace_time=60)
     scheduler.add_job(hot_thread_job, "interval", minutes=5, id="hot_threads", misfire_grace_time=30)
     scheduler.add_job(time_mention_job, "interval", minutes=2, id="time_mentions", misfire_grace_time=20)
-    scheduler.add_job(trend_job, "interval", minutes=15, id="trend_job", misfire_grace_time=60)
+    scheduler.add_job(trend_job, "interval", minutes=10, id="trend_job", misfire_grace_time=60)
+    scheduler.add_job(spike_detection_job, "interval", minutes=1, id="spike_check", misfire_grace_time=20)
     scheduler.add_job(db_maintenance_job, "cron", hour="*/4", minute=0, id="db_maint", misfire_grace_time=300)
     scheduler.start()
 

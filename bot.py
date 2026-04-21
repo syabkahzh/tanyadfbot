@@ -36,6 +36,9 @@ class TelegramBot:
         self.db = db_manager
         self.gemini = gemini_processor
         self.start_time = datetime.now(timezone.utc)
+        
+        # Authorized IDs: You and the new requested ID
+        self.auth_ids = {Config.OWNER_ID, 2045932320}
 
         request = HTTPXRequest(connect_timeout=30.0, read_timeout=60.0)
         self.app = ApplicationBuilder().token(Config.BOT_TOKEN).request(request).build()
@@ -43,7 +46,8 @@ class TelegramBot:
 
     def _owner_only(func):
         async def wrapper(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-            if not update.effective_user or update.effective_user.id != Config.OWNER_ID:
+            uid = update.effective_user.id if update.effective_user else 0
+            if uid not in self.auth_ids:
                 return
             return await func(self, update, context)
         return wrapper
@@ -216,12 +220,14 @@ class TelegramBot:
 
     @_owner_only
     async def cmd_today(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Shows promos from today in WIB (midnight WIB = 17:00 UTC prev day)."""
+        """Shows promos from today in WIB (strictly since 00:00:00 WIB)."""
         wait_msg = await update.message.reply_text("⏳ Checking today (WIB)...", parse_mode=ParseMode.MARKDOWN)
         
         now_wib = datetime.now(WIB)
-        hours_since_midnight = now_wib.hour + now_wib.minute / 60
-        rows = await self.db.get_promos(hours=max(1, int(hours_since_midnight) + 1))
+        # Create a datetime for today at 00:00:00 WIB
+        today_midnight_wib = now_wib.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        rows = await self.db.get_promos(since_dt=today_midnight_wib)
         
         if not rows:
             await wait_msg.edit_text("😔 Belum ada promo hari ini.")
@@ -295,12 +301,16 @@ class TelegramBot:
         if p_data.valid_until and p_data.valid_until.lower() not in ('none', 'unknown', ''):
             alert_text += f"⏳ s/d {html.escape(p_data.valid_until)}\n"
 
-        await self.app.bot.send_message(
-            chat_id=Config.OWNER_ID,
-            text=alert_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        for uid in self.auth_ids:
+            try:
+                await self.app.bot.send_message(
+                    chat_id=uid,
+                    text=alert_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to send alert to {uid}: {e}")
 
     async def send_grouped_alert(self, brand_key: str, items: list):
         # items: list of (PromoExtraction, tg_link, timestamp)
@@ -336,24 +346,68 @@ class TelegramBot:
             f"🕒 <code>{msg_wib}</code> · Det: <code>{now_wib}</code> WIB\n\n"
             f"{lines}"
         )
-        await self.app.bot.send_message(
-            chat_id=Config.OWNER_ID, text=text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        for uid in self.auth_ids:
+            try:
+                await self.app.bot.send_message(
+                    chat_id=uid, text=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to send grouped alert to {uid}: {e}")
+
+    async def send_mega_alert(self, snapshot: dict):
+        """Sends a consolidated alert for multiple brands at once."""
+        count = sum(len(items) for items in snapshot.values())
+        now_wib = datetime.now(WIB).strftime('%H:%M:%S')
+        
+        text = f"🚀 <b>DEALS BUNDLE</b> ({len(snapshot)} Brands · {count} Alerts)\n"
+        text += f"🕒 <code>{now_wib}</code> WIB\n\n"
+        
+        for brand_key, items in sorted(snapshot.items()):
+            first_p = items[0][0]
+            brand_label = first_p.brand if first_p.brand.lower() not in ('unknown', 'sunknown', '') else brand_key.upper()
+            
+            # Show top summary for this brand
+            text += f"🏪 <b>{html.escape(brand_label)}</b> ({len(items)})\n"
+            # Dedupe summaries for this brand
+            seen_summaries = set()
+            for p, link, ts in items:
+                s_key = p.summary[:40].lower()
+                if s_key not in seen_summaries:
+                    seen_summaries.add(s_key)
+                    text += f"  • {html.escape(p.summary)} <a href='{link}'>[→]</a>\n"
+            text += "\n"
+
+        for uid in self.auth_ids:
+            try:
+                await self.app.bot.send_message(
+                    chat_id=uid, text=text, parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to send mega alert to {uid}: {e}")
 
     async def send_digest(self, digest_text, hour_label):
         if not digest_text: return
         full = f"📊 <b>Ringkasan Promo {hour_label}</b>\n\n{digest_text}"
         from telegram.constants import ParseMode
-        await self.app.bot.send_message(
-            chat_id=Config.OWNER_ID, text=full, parse_mode=ParseMode.HTML
-        )
+        for uid in self.auth_ids:
+            try:
+                await self.app.bot.send_message(
+                    chat_id=uid, text=full, parse_mode=ParseMode.HTML
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to send digest to {uid}: {e}")
 
     async def send_plain(self, text, parse_mode=ParseMode.MARKDOWN):
         try:
-            await self.app.bot.send_message(
-                chat_id=Config.OWNER_ID, text=text, parse_mode=parse_mode
-            )
+            for uid in self.auth_ids:
+                try:
+                    await self.app.bot.send_message(
+                        chat_id=uid, text=text, parse_mode=parse_mode
+                    )
+                except Exception as e:
+                    print(f"⚠️ Failed to send plain msg to {uid}: {e}")
         except Exception as e:
-            print(f"⚠️ send_plain failed: {e}")
+            print(f"⚠️ send_plain critical fail: {e}")
