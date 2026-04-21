@@ -20,6 +20,8 @@ class Config:
     DB_PATH = "tanya_main.db"
     SESSION_NAME = "tg_session"
     MODEL_ID = "gemma-4-31b-it"
+    MODEL_FALLBACK = "gemini-3.1-flash-lite-preview"
+    MODEL_FAST = "gemma-4-26b-a4b-it"
 
     # Your timezone: WIB = UTC+7
     TIMEZONE = "Asia/Jakarta"

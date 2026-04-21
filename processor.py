@@ -1,6 +1,7 @@
 import re
 import asyncio
 from google import genai
+from google.genai import types
 from pydantic import BaseModel
 from typing import Optional, List, Literal
 from config import Config
@@ -18,111 +19,138 @@ class BatchResponse(BaseModel):
     promos: List[PromoExtraction]
 
 # ── Prompt constants ──────────────────────────────────────────────────────────
-_EXTRACT_SYSTEM = """Kamu adalah analis grup promo Indonesia. Tugasmu: baca pesan-pesan dari grup dan ekstrak HANYA pesan yang menyatakan promo/voucher/deal sedang aktif atau berhasil digunakan.
+_EXTRACT_SYSTEM = """Kamu ekstrak promo dari percakapan grup deal hunter Indonesia (Discountfess).
 
-ATURAN EKSTRAKSI:
-1. EKSTRAK jika pesan berisi:
-   - Pernyataan bahwa promo/voucher AKTIF: "aman", "on", "ready", "masih bisa", "berhasil", "nyantol", "jp", "mantap", "work"
-   - Harga spesifik yang sangat murah disebutkan bersama brand/item: "hokben 4k", "ndog 5k", "sfood 80%"
-   - Konfirmasi voucher berhasil diklaim atau dipakai
-   - ALLCAPS keyword + brand → hampir pasti promo aktif
+ISTILAH KUNCI: mm=Mall Monday, bs=BerburuSales, nt=gagal/expired, jp=jackpot, sfood=ShopeeFood, gfood=GoFood
 
-2. ABAIKAN jika:
-   - Pesan <5 kata tanpa brand/item spesifik (contoh: "Aman", "Mantap", "Oke", "Makasih")
-   - Pertanyaan murni tanpa konfirmasi (contoh: "ada yg tau sfood?", "masih on ga?")
-   - Keluhan/drama tanpa info promo (contoh: "gagal terus", "sedih banget")
-   - Reply/tag orang tanpa info deal
+STATUS: active jika ada "aman/on/jp/work/restock/berhasil" | expired jika "abis/nt/sold out/ga bisa" | unknown jika ambigu
 
-3. BRAND: Selalu isi dengan nama brand yang jelas. Jika tidak ada brand, tulis "Unknown" — JANGAN ekstrak jika brand benar-benar tidak terdeteksi.
+EKSTRAK jika: ada sinyal aktif/expired + info brand/platform. SKIP jika: pertanyaan murni, OOT, curhat tanpa info promo.
 
-4. STATUS:
-   - "active": ada kata "aman", "on", "berhasil", "masih bisa", atau harga murah dikonfirmasi
-   - "expired": ada kata "habis", "abis", "udah ga bisa", "kehabisan", "sold out"
-   - "unknown": status tidak jelas dari konteks
-
-5. SUMMARY: singkat, informatif, max 1 kalimat. Sertakan harga jika disebutkan. Bahasa Indonesia.
-
-BRAND UMUM yang sering muncul:
-Shopee Food (sfood), GoFood, GrabFood, Hokben, McDonald's (mcd/mekdi), KFC, Chatime (kopken), 
-Kopi Kenangan, Starbucks, PLN, BPJS, Telkom/Indihome, Pulsa/Kuota, Aice, Gindaco, HopHop, Fore Coffee
-
-CONTOH BENAR:
-- "aman sfood" → brand: ShopeeFood, summary: "Voucher ShopeeFood aktif", status: active ✅
-- "aman ndog 5k, habis 16kg" → brand: Ndog, summary: "Telur 5k aktif, stok 16kg sudah habis", status: expired ✅  
-- "berhasil dapet hokben 4k" → brand: Hokben, summary: "Hokben berhasil di-redeem harga 4k", status: active ✅
-- "pln on" → brand: PLN, summary: "Promo PLN sedang aktif", status: active ✅
-- "sfood 80% bs semua resto" → brand: ShopeeFood, summary: "Diskon 80% berlaku di semua resto", status: active ✅
-
-CONTOH SALAH (jangan ekstrak):
-- "Makasih kk" → tidak ada brand/promo ❌
-- "masih on ga?" → pertanyaan, bukan konfirmasi ❌
-- "Kurang tau 🙏" → tidak ada info ❌
-- "ihh kesel bgt telor busuqq" → keluhan bukan promo ❌
-"""
+Context ditulis sebagai C: sebelum MSG: — gunakan untuk resolve brand jika pesan utama cuma "aman" atau "on".
+Summary: 1 kalimat informatif, sertakan harga/diskon jika ada.
+Brand: Gunakan nama yang konsisten — "HopHop" bukan "Hophop". Jika ragu → "Unknown" (bukan "sunknown" atau variasi lain)."""
 
 _DEDUP_SYSTEM = "Kamu agen deteksi duplikasi. Output HANYA angka indeks dipisah koma."
 
 _DIGEST_SYSTEM = "Kamu asisten ringkasan promo Indonesia. Jawab singkat dan informatif dalam bahasa Indonesia santai."
+
+_VISION_SYSTEM = """Kamu analis visual grup promo (Discountfess). Tugasmu ekstrak promo dari GAMBAR (poster/screenshot) + Caption.
+
+ATURAN:
+1. Analisis gambar dengan teliti (diskon, brand, syarat).
+2. Jika gambar adalah screenshot chat, prioritaskan info promo yang sedang dibahas.
+3. Summary harus 1 kalimat padat.
+4. Output harus valid JSON sesuai schema."""
 
 # ─────────────────────────────────────────────────────────────────────────────
 
 class GeminiProcessor:
     def __init__(self):
         self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
+        self._last_calls = [] # List of timestamps
 
-    async def _call_with_retry(self, model_id, contents, config, max_retries=3):
-        for attempt in range(max_retries):
-            try:
-                response = await self.client.aio.models.generate_content(
-                    model=model_id, contents=contents, config=config
-                )
-                return response
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    print(f"❌ AI API failed after {max_retries} attempts: {e}")
-                    return None
-                wait = 2 ** attempt
-                print(f"⚠️ Retry {attempt+1}/{max_retries} in {wait}s: {e}")
-                await asyncio.sleep(wait)
+    async def _rate_limit(self):
+        """Ensures max 10 calls per minute."""
+        while True:
+            now = asyncio.get_event_loop().time()
+            # Remove calls older than 60s
+            self._last_calls = [t for t in self._last_calls if now - t < 60]
+            if len(self._last_calls) < 10:
+                self._last_calls.append(now)
+                return
+            wait_time = 60 - (now - self._last_calls[0])
+            await asyncio.sleep(max(0.1, wait_time))
+
+    async def _call_with_retry(self, contents, config, model_id=None, max_retries=2):
+        """Calls Gemini with automated fallback and rate limiting."""
+        await self._rate_limit()
+        # 1. Start with requested model (or default)
+        # 2. Fallback to Config.MODEL_FALLBACK (gemini-3.1-flash-lite-preview)
+        models = [model_id or Config.MODEL_ID, Config.MODEL_FALLBACK]
+        
+        for mid in models:
+            if not mid: continue
+            for attempt in range(max_retries):
+                try:
+                    response = await self.client.aio.models.generate_content(
+                        model=mid, contents=contents, config=config
+                    )
+                    return response
+                except Exception as e:
+                    err_msg = str(e).lower()
+                    if "429" in err_msg or "resource_exhausted" in err_msg:
+                        print(f"⚠️ Rate limited on {mid}, trying next fallback...")
+                        break # Try next model
+                    
+                    if attempt == max_retries - 1:
+                        print(f"❌ {mid} failed after {max_retries} attempts, trying fallback...")
+                        continue # Try next model
+                    
+                    wait = 1.5 ** attempt
+                    await asyncio.sleep(wait)
         return None
+
+    def _is_worth_checking(self, text: str) -> bool:
+        """Pre-filter to skip low-signal messages without AI calls (RPM efficiency)."""
+        t = text.strip().lower()
+        if not t: return False
+        
+        # Hard exclusions: known bot noise or non-promo system messages
+        if "saya membisukan dia" in t or "@dfautokick_bot" in t:
+            return False
+
+        words = t.split()
+        
+        # 1. Immediate triggers for very short signals
+        short_signals = {
+            'aman', 'on', 'jp', 'mm', 'bs', 'ywwa', 'work', 'ready', 
+            'mantap', 'masuk', 'pecah', 'luber', 'ristok', 'restock'
+        }
+        if t in short_signals:
+            return True
+
+        # 2. Pattern detection
+        has_percent = bool(re.search(r'\d+\s*(%|persen)', t))
+        has_price = bool(re.search(r'\d+\s*(k|rb|ribu)', t))
+        
+        question_patterns = ['ga?', 'gak?', 'nggak?', 'kah?', 'ya?', 'dong?', '?']
+        is_question = any(t.endswith(p) for p in question_patterns) or t.count('?') > t.count('!')
+
+        # 3. Expanded Keyword sets
+        keywords = {
+            # Platforms/Brands
+            'sfood', 'gfood', 'grab', 'shopee', 'gojek', 'tokped', 'blibli',
+            'spay', 'gopay', 'ovo', 'dana', 'linkaja', 'pln', 'bpjs', 'pulsa',
+            'hokben', 'mcd', 'kfc', 'chatime', 'starbucks', 'kopken',
+            # Promo signals
+            'voucher', 'vcr', 'diskon', 'promo', 'off', 'cashback', 'gratis',
+            'klaim', 'claim', 'limit', 'error', 'bug', 'mumpung', 'gercep',
+            'masih bisa', 'bisa pake', 'nyantol', 'kejar'
+        }
+        
+        has_keyword = any(kw in t for kw in keywords)
+        
+        # Logic:
+        # - Always check if it has a price, percentage, or high-signal keyword
+        if has_percent or has_price or has_keyword:
+            return True
+            
+        # - If it's a question with no signals, skip if it's short
+        if is_question and len(words) < 5:
+            return False
+            
+        # - Fallback for longer messages that might be complex descriptions
+        return len(words) >= 6
 
     async def process_batch(self, messages: List[dict]) -> List[PromoExtraction]:
         if not messages: return []
 
-        # Pre-filter: skip clearly useless messages before sending to LLM
-        def is_worth_checking(text: str) -> bool:
-            t = text.strip()
-            if len(t) < 5: return False
-            words = t.split()
-            if len(words) < 2:
-                # Single word only worth it if it's a known strong signal
-                return t.lower() in {'aman', 'on', 'mantap', 'jp', 'berhasil'}
-            # Questions without confirmation keywords
-            question_patterns = ['ga?', 'gak?', 'nggak?', 'kah?', 'ya?', 'dong?', '?']
-            has_question = any(t.endswith(p) for p in question_patterns) or t.count('?') > t.count('!')
-            promo_signals = any(w in t.lower() for w in [
-                'aman', 'on', 'ready', 'berhasil', 'work', 'mantap', 'jp', 'nyantol',
-                'voucher', 'vcr', 'diskon', 'promo', 'off', 'cashback', 'gratis',
-                'sfood', 'gofood', 'grabfood', 'pln', 'bpjs', 'pulsa', 'kuota',
-                'hokben', 'mcd', 'kfc', 'chatime', 'shopee', 'gojek', 'grab',
-                'masih bisa', 'bisa pake', 'klaim', '4k', '5k', '6k', '10k', '20k',
-                '%', 'ribu', 'rb', 'grb'
-            ])
-            # Short pure questions with no promo signal → skip
-            if has_question and not promo_signals and len(words) < 6:
-                return False
-            return promo_signals or len(words) >= 4
-
-        filtered = [m for m in messages if is_worth_checking(m['text'])]
-        skipped = len(messages) - len(filtered)
-        if skipped > 0:
-            print(f"🔍 Pre-filter: skipped {skipped} low-signal msgs, sending {len(filtered)} to LLM")
-
-        if not filtered:
-            return []
+        filtered = [m for m in messages if self._is_worth_checking(m['text'])]
+        if not filtered: return []
 
         batch_text = "\n---\n".join([
-            f"MSG_ID:{m['id']} | {m['text']}"
+            f"ID:{m['id']} C:{m.get('context','')} MSG:{m['text']}"
             for m in filtered
         ])
 
@@ -133,87 +161,97 @@ class GeminiProcessor:
         }
 
         response = await self._call_with_retry(
-            model_id=Config.MODEL_ID,
-            contents=f"Batch pesan grup promo Indonesia:\n\n{batch_text}",
-            config=config
+            contents=f"Batch pesan:\n\n{batch_text}",
+            config=config,
+            model_id=Config.MODEL_ID
         )
 
-        if response is None: return None
-        if not response.parsed: return []
+        if not response or not response.parsed: return []
 
-        # Validate: drop results where brand is clearly bad
         valid = []
         for p in response.parsed.promos:
-            if not p.summary or p.summary.strip() == '':
-                continue
-            valid.append(p)
+            if p.summary and p.summary.strip():
+                valid.append(p)
         return valid
 
     async def filter_duplicates(self, new_promos: List[PromoExtraction], recent_alerts: List[dict]) -> List[PromoExtraction]:
+        """Local fast deduplication using brand + summary matching to save AI costs."""
         if not new_promos: return []
         if not recent_alerts: return new_promos
 
-        recent_context = "\n".join([f"- {r['brand']}: {r['summary']}" for r in recent_alerts])
-        new_context = "\n".join([f"IDX {i}: {p.brand} — {p.summary}" for i, p in enumerate(new_promos)])
-
-        prompt = (
-            f"PROMO SUDAH ADA:\n{recent_context}\n\n"
-            f"PROMO BARU (cek duplikat):\n{new_context}\n\n"
-            "Return indeks IDX dari promo yang BUKAN duplikat, dipisah koma. "
-            "Duplikat = brand sama + penawaran sama. Jika semua unik, return semua indeks."
-        )
-
-        response = await self._call_with_retry(
-            model_id=Config.MODEL_ID,
-            contents=prompt,
-            config={"system_instruction": _DEDUP_SYSTEM}
-        )
-
-        if not response or not response.text:
-            return new_promos
-
-        try:
-            valid_indices = [int(i) for i in re.findall(r'\d+', response.text) if int(i) < len(new_promos)]
-            if not valid_indices:
-                return new_promos
-            return [new_promos[i] for i in valid_indices]
-        except Exception:
-            return new_promos
+        recent_keys = {f"{r['brand'].lower()}:{r['summary'][:35].lower()}" for r in recent_alerts}
+        unique = []
+        for p in new_promos:
+            key = f"{p.brand.lower()}:{p.summary[:35].lower()}"
+            if key not in recent_keys:
+                unique.append(p)
+                # Prevent intra-batch dupes
+                recent_keys.add(key)
+        return unique
 
     async def summarize_raw(self, texts: List[str]) -> str:
         if not texts: return "Tidak ada pesan."
         context = "\n---\n".join(texts)
-        prompt = (
-            "Rangkum pesan-pesan berikut dari grup chat promo secara singkat dan padat "
-            "dalam bahasa Indonesia santai. Fokus pada deal/promo yang disebutkan. "
-            "Gunakan bullet points."
-        )
         response = await self._call_with_retry(
-            model_id=Config.MODEL_ID,
-            contents=f"{prompt}\n\nPesan:\n{context}",
-            config={"system_instruction": _DIGEST_SYSTEM}
+            contents=f"Rangkum pesan ini:\n\n{context}",
+            config={"system_instruction": _DIGEST_SYSTEM},
+            model_id=Config.MODEL_FALLBACK  # Use cheaper model for generic summaries
         )
         return response.text if response else "❌ Gagal merangkum."
 
     async def answer_question(self, question: str, context: str) -> str:
         response = await self._call_with_retry(
-            model_id=Config.MODEL_ID,
-            contents=f"Pertanyaan: {question}\n\nKonteks promo:\n{context}",
-            config={"system_instruction": _DIGEST_SYSTEM}
+            contents=f"Pertanyaan: {question}\n\nKonteks:\n{context}",
+            config={"system_instruction": _DIGEST_SYSTEM},
+            model_id=Config.MODEL_FALLBACK
         )
-        return response.text if response else "❌ AI API Busy."
+        return response.text if response else "❌ AI Busy."
+
+    async def process_image(self, image_bytes: bytes, caption: str, original_msg_id: int) -> PromoExtraction | None:
+        """Analyzes an image using a multimodal model (Gemma vision-enabled)."""
+        prompt = f"Caption: {caption}" if caption else "Ekstrak info promo dari gambar ini."
+        
+        config = {
+            "response_mime_type": "application/json",
+            "response_schema": PromoExtraction,
+            "system_instruction": _VISION_SYSTEM,
+        }
+
+        # Use the primary multimodal model
+        response = await self._call_with_retry(
+            contents=[
+                prompt,
+                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+            ],
+            config=config,
+            model_id=Config.MODEL_ID
+        )
+
+        if not response or not response.parsed:
+            return None
+            
+        res = response.parsed
+        res.original_msg_id = original_msg_id
+        return res
 
     async def interpret_keywords(self, hot_words: List[str], window: int, context_msgs: List[str]) -> str | None:
         if not context_msgs: return None
         word_str = ", ".join(hot_words)
-        context_str = "\n- ".join(context_msgs[:20])
-        prompt = f"Dalam {window} menit terakhir, kata ini sering muncul: {word_str}\n\nKonteks:\n{context_str}"
-        system = "Kamu analis grup promo. Jika tidak ada promo/event jelas, ketik NO_TREND saja."
-        response = await self._call_with_retry(
-            model_id=Config.MODEL_ID,
-            contents=prompt,
-            config={"system_instruction": system}
+        context_str = "\n- ".join(context_msgs[:30])
+        prompt = f"Trending words: {word_str}\nContext:\n{context_str}"
+        
+        system = (
+            "Kamu analis grup promo. Simpulkan ADA KEJADIAN APA dalam 1-2 kalimat narasi.\n"
+            "Jika tidak ada yang penting, tulis: NO_TREND"
         )
+        
+        # Use FAST model for trend interpretation
+        response = await self._call_with_retry(
+            contents=prompt,
+            config={"system_instruction": system},
+            model_id=Config.MODEL_FAST
+        )
+        
         if response and response.text and "NO_TREND" not in response.text:
             return response.text.strip()
         return None
