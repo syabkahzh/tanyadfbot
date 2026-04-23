@@ -278,6 +278,33 @@ class TelethonListener:
                 if row and row[0]:
                     last_id = row[0]
 
+        async def fetch_and_buffer(iterator):
+            buffer = []
+            async for message in iterator:
+                if not message.text:
+                    continue
+                
+                msg_age = (datetime.now(timezone.utc) - message.date.astimezone(timezone.utc)).total_seconds()
+                mark_processed = 1 if msg_age > 900 else 0
+                
+                # Check for time mentions roughly
+                has_time = any(w in message.text.lower() for w in ['jam','menit','detik','sore','siang','pagi','malam'])
+                
+                buffer.append((
+                    message.id, chat_id, message.sender_id,
+                    f"User_{message.sender_id}", message.date.isoformat(),
+                    message.text, message.reply_to_msg_id,
+                    mark_processed, 1 if message.photo else 0, 1 if has_time else 0
+                ))
+                
+                if len(buffer) >= 100:
+                    await self._bulk_save_to_db(buffer)
+                    buffer = []
+                await asyncio.sleep(0)
+            
+            if buffer:
+                await self._bulk_save_to_db(buffer)
+
         if last_id:
             last_ts  = await self.db.get_last_msg_timestamp(chat_id)
             gap_hours = (
@@ -287,85 +314,36 @@ class TelethonListener:
             if gap_hours > catchup_hours:
                 print(f"⚠️ Gap {gap_hours:.1f}h — fetching last {catchup_hours}h only.")
                 limit_date = datetime.now(timezone.utc) - timedelta(hours=catchup_hours)
-                counter = 0
-                async for message in self.client.iter_messages(
+                await fetch_and_buffer(self.client.iter_messages(
                     chat_id, offset_date=limit_date, reverse=True
-                ):
-                    if message.text:
-                        msg_age = (datetime.now(timezone.utc) - message.date.astimezone(timezone.utc)).total_seconds()
-                        mark_processed = 1 if msg_age > 900 else 0
-                        await self.db.save_message(
-                            tg_msg_id=message.id,
-                            chat_id=message.chat_id,
-                            sender_id=message.sender_id,
-                            sender_name=f"User_{message.sender_id}",
-                            timestamp=message.date,
-                            text=message.text,
-                            reply_to_msg_id=message.reply_to_msg_id,
-                            processed=mark_processed,
-                            has_photo=1 if message.photo else 0,
-                            has_time_mention=0,
-                            commit=False
-                        )
-                        counter += 1
-                        if counter % 100 == 0:
-                            await self.db.conn.commit()
-                        await asyncio.sleep(0)
-                await self.db.conn.commit()
+                ))
             else:
                 print(f"🔄 Short gap ({gap_hours:.1f}h) — catching up from msg {last_id}.")
-                counter = 0
-                async for message in self.client.iter_messages(
+                await fetch_and_buffer(self.client.iter_messages(
                     chat_id, min_id=last_id, reverse=True
-                ):
-                    if message.text:
-                        msg_age = (datetime.now(timezone.utc) - message.date.astimezone(timezone.utc)).total_seconds()
-                        mark_processed = 1 if msg_age > 900 else 0
-                        await self.db.save_message(
-                            tg_msg_id=message.id,
-                            chat_id=message.chat_id,
-                            sender_id=message.sender_id,
-                            sender_name=f"User_{message.sender_id}",
-                            timestamp=message.date,
-                            text=message.text,
-                            reply_to_msg_id=message.reply_to_msg_id,
-                            processed=mark_processed,
-                            has_photo=1 if message.photo else 0,
-                            has_time_mention=0,
-                            commit=False
-                        )
-                        counter += 1
-                        if counter % 100 == 0:
-                            await self.db.conn.commit()
-                        await asyncio.sleep(0)
-                await self.db.conn.commit()
+                ))
         else:
             print(f"⏱️ DB empty — syncing last {hours}h.")
             limit_date = datetime.now(timezone.utc) - timedelta(hours=hours)
-            counter = 0
-            async for message in self.client.iter_messages(
+            await fetch_and_buffer(self.client.iter_messages(
                 chat_id, offset_date=limit_date, reverse=True
-            ):
-                if message.text:
-                    msg_age = (datetime.now(timezone.utc) - message.date.astimezone(timezone.utc)).total_seconds()
-                    mark_processed = 1 if msg_age > 900 else 0
-                    await self.db.save_message(
-                        tg_msg_id=message.id,
-                        chat_id=message.chat_id,
-                        sender_id=message.sender_id,
-                        sender_name=f"User_{message.sender_id}",
-                        timestamp=message.date,
-                        text=message.text,
-                        reply_to_msg_id=message.reply_to_msg_id,
-                        processed=mark_processed,
-                        has_photo=1 if message.photo else 0,
-                        has_time_mention=0,
-                        commit=False
-                    )
-                    counter += 1
-                    if counter % 100 == 0:
-                        await self.db.conn.commit()
-                    await asyncio.sleep(0)
-            await self.db.conn.commit()
+            ))
 
         print("✅ History sync complete.")
+
+    async def _bulk_save_to_db(self, msgs_data: list[tuple]):
+        """Performs a bulk insert of messages into the database."""
+        if not self.db.conn or not msgs_data:
+            return
+            
+        try:
+            await self.db.conn.executemany("""
+                INSERT OR IGNORE INTO messages
+                    (tg_msg_id, chat_id, sender_id, sender_name, timestamp,
+                     text, reply_to_msg_id, processed, has_photo, has_time_mention)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, msgs_data)
+            await self.db.conn.commit()
+            print(f"   📥 Bulk Queued {len(msgs_data)} msgs")
+        except Exception as e:
+            logger.error(f"DB bulk_save error: {e}")

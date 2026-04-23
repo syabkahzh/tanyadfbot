@@ -31,7 +31,7 @@ from shared import (
     db, gemini, bot, listener,
     _recent_alerts_history, _recent_alerts_lock,
     _parse_ts,
-    _alerted_aman_parents, _alerted_aman_parents_deque, _aman_lock,
+    _alerted_aman_parents_deque, _aman_lock,
     _BRAND_KEYWORDS, _make_tg_link, _guess_brand,
     _flush_alert_buffer, _score_confidence,
     _listener_reconnecting, _last_trend_alert, _last_spike_alert,

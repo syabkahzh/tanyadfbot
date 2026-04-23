@@ -511,6 +511,7 @@ class GeminiProcessor:
             for r in recent_alerts[-50:]
         ]
         recent_brands_set = set(recent_brands_tail)
+        history_tail = list(recent_alerts[-50:])
 
         unique: list[PromoExtraction] = []
         for p in new_promos:
@@ -522,7 +523,7 @@ class GeminiProcessor:
                     and p.status == 'active'):
                 p_words = set(re.findall(r'\w+', p.summary.lower())[:6])
                 is_dupe = False
-                for r in reversed(list(recent_alerts[-50:])):
+                for r in reversed(history_tail):
                     if normalize_brand(r.get('brand', '')).lower() == brand_key:
                         r_words = set(re.findall(r'\w+', r.get('summary', '').lower())[:6])
                         if len(p_words & r_words) >= 2:

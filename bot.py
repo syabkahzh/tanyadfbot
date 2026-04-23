@@ -757,18 +757,20 @@ class TelegramBot:
                     seen_l.add(l)
             ext_links_block = "\n" + "\n".join([f"🔗 {l}" for l in unique_links[:5]]) + "\n"
 
-        text = (
-            f"🔥 <b>PROMO GRUP: {html.escape(brand_label)}</b>\n"
-            f"🕒 Msg: <code>{msg_wib}</code> · Det: <code>{now_wib}</code> WIB{latency_str}\n"
-            f"🛠 Source: {source_chip}\n\n"
-            f"{lines_block}\n"
-            f"{ext_links_block}"
-        )
+        text_parts = [
+            f"🔥 <b>PROMO GRUP: {html.escape(brand_label)}</b>",
+            f"🕒 Msg: <code>{msg_wib}</code> · Det: <code>{now_wib}</code> WIB{latency_str}",
+            f"🛠 Source: {source_chip}\n",
+            lines_block,
+            ext_links_block
+        ]
 
         if total_corr > 0:
-            text += f"\n✅ <b>Confirmed by {total_corr} users</b>\n"
+            text_parts.append(f"\n✅ <b>Confirmed by {total_corr} users</b>")
             for snip in all_snippets[:3]:
-                text += f"🔥 <i>\"{html.escape(snip)}\"</i>\n"
+                text_parts.append(f"🔥 <i>\"{html.escape(snip)}\"</i>")
+
+        text = "\n".join(text_parts)
 
         async def _safe_send(uid):
             try:

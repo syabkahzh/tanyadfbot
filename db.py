@@ -546,12 +546,18 @@ class Database:
             
         try:
             await self.conn.execute("BEGIN")
+            
+            # Prepare bulk data
+            promo_data = []
             for source_id, p, link in promos_to_save:
                 clean_brand = normalize_brand(p.brand)
                 if clean_brand == "Unknown" and (not p.summary or len(p.summary) < 15):
                     continue
                 status = p.status if p.status in ('active', 'expired', 'unknown') else 'unknown'
-                await self.conn.execute("""
+                promo_data.append((source_id, p.summary, clean_brand, p.conditions or '', link, status))
+
+            if promo_data:
+                await self.conn.executemany("""
                     INSERT INTO promos
                         (source_msg_id, summary, brand, conditions, tg_link, status, via_fastpath)
                     VALUES (?, ?, ?, ?, ?, ?, 0)
@@ -560,7 +566,7 @@ class Database:
                         tg_link     = excluded.tg_link,
                         source_msg_id = COALESCE(excluded.source_msg_id, source_msg_id),
                         created_at  = strftime('%Y-%m-%d %H:%M:%S+00:00','now')
-                """, (source_id, p.summary, clean_brand, p.conditions or '', link, status))
+                """, promo_data)
 
             if processed_msg_ids:
                 ph = ','.join('?' * len(processed_msg_ids))
