@@ -432,26 +432,30 @@ async def main() -> None:
     )
 
     # ── Scheduled jobs ─────────────────────────────────────────────────────────
-    # Relaxed schedule to reduce event loop congestion
+    # Adaptive Jitter: varied timing to avoid patterns and 'rush hour' spikes
     scheduler.add_job(
         jobs.image_processing_job, "interval", minutes=5,
-        id="images", args=[db, gemini, listener]
+        id="images", args=[db, gemini, listener], jitter=30
     )
     scheduler.add_job(
-        jobs.hourly_digest_job, "cron", minute=1, hour="0,1,5-23", # offset by 1m
-        id="digest", args=[db, gemini, bot, WIB]
+        jobs.brewing_digest_job, "cron", minute=0, hour="0,1,5-23",
+        id="brewing_digest", args=[bot]
     )
     scheduler.add_job(
-        jobs.midnight_digest_job, "cron", hour=5, minute=1, # offset by 1m
-        id="midnight_digest", args=[db, gemini, bot]
+        jobs.hourly_digest_job, "cron", minute=1, hour="0,1,5-23",
+        id="digest", args=[db, gemini, bot, WIB], jitter=60 # 01:00–01:01
     )
     scheduler.add_job(
-        jobs.halfhour_digest_job, "cron", minute="16,46", # offset by 1m
-        id="halfhour_digest", args=[db, gemini, bot, WIB]
+        jobs.midnight_digest_job, "cron", hour=5, minute=0,
+        id="midnight_digest", args=[db, gemini, bot], jitter=300 # 05:00–05:05
     )
     scheduler.add_job(
-        jobs.heartbeat_job, "cron", minute=31, # offset by 1m
-        id="heartbeat", args=[db, gemini, bot, WIB]
+        jobs.halfhour_digest_job, "cron", minute="14,44",
+        id="halfhour_digest", args=[db, gemini, bot, WIB], jitter=240 # 14-18 & 44-48
+    )
+    scheduler.add_job(
+        jobs.heartbeat_job, "cron", minute=30,
+        id="heartbeat", args=[db, gemini, bot, WIB], jitter=120 # 30-32
     )
     scheduler.add_job(
         jobs.hot_thread_job, "interval", minutes=15,

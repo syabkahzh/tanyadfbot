@@ -23,6 +23,16 @@ logger = logging.getLogger(__name__)
 
 # ── Digest jobs ──────────────────────────────────────────────────────────────
 
+async def brewing_digest_job(bot: TelegramBot) -> None:
+    """Sends a mock info message before the actual hourly digest."""
+    try:
+        await bot.send_plain(
+            "🍵 Brewing hourly digest for ya, will be ready 1 minute again mawmaw",
+            parse_mode='HTML'
+        )
+    except Exception as e:
+        logger.error(f"brewing_digest_job error: {e}")
+
 async def hourly_digest_job(db: Database, gemini: GeminiProcessor, bot: TelegramBot, WIB: Any) -> None:
     """Generates and sends a summary of promotions from the last hour."""
     logger.info("⏰ [Job] Starting hourly_digest_job...")
