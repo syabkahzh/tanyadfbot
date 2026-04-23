@@ -454,7 +454,7 @@ class Database:
             cutoff = _ts_str(datetime.now(timezone.utc) - timedelta(minutes=minutes))
             async with self.conn.execute(
                 "SELECT id, text, timestamp, tg_msg_id, chat_id, reply_to_msg_id "
-                "FROM messages WHERE processed=0 AND timestamp >= ? ORDER BY timestamp DESC LIMIT ?",
+                "FROM messages WHERE processed=0 AND timestamp >= ? ORDER BY timestamp ASC LIMIT ?",
                 (cutoff, batch_size)
             ) as cur:
                 rows = await cur.fetchall()

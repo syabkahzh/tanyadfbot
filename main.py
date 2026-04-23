@@ -332,25 +332,29 @@ async def processing_loop() -> None:
             headroom_pct = max(0.0, 1.0 - (total_used / max(total_cap, 1)))
 
             if _queue_emergency_mode:
-                batch_size = int(30 + 20 * headroom_pct)   # 30-50
+                batch_size = int(50 + 50 * headroom_pct)   # 50-100
             else:
-                batch_size = int(15 + 15 * headroom_pct)    # 15-30
+                batch_size = int(30 + 30 * headroom_pct)   # 30-60
 
             # ── CORE FIX: fetch AND claim inside the same lock acquisition ──────
             combined: list[Any] = []
             async with _in_progress_lock:
-                priority_raw = await db.get_unprocessed_recent(minutes=10, batch_size=batch_size + 20)
-                priority = [r for r in priority_raw if r['id'] not in _in_progress_ids]
+                # If queue is backing up, reserve 25% of the batch for strictly chronological backlog drainage
+                backlog_reserve = int(batch_size * 0.25) if queue_size > 50 else 0
+                priority_cap = batch_size - backlog_reserve
 
-                backlog_size = max(0, batch_size - len(priority))
-                if backlog_size > 0:
-                    old_raw = await db.get_unprocessed_batch(batch_size=backlog_size + 20)
+                priority_raw = await db.get_unprocessed_recent(minutes=10, batch_size=priority_cap + 20)
+                priority = [r for r in priority_raw if r['id'] not in _in_progress_ids][:priority_cap]
+
+                backlog_needed = batch_size - len(priority)
+                if backlog_needed > 0:
+                    old_raw = await db.get_unprocessed_batch(batch_size=backlog_needed + 20)
                     seen = {r['id'] for r in priority}
-                    old_batch = [r for r in old_raw if r['id'] not in seen and r['id'] not in _in_progress_ids]
+                    old_batch = [r for r in old_raw if r['id'] not in seen and r['id'] not in _in_progress_ids][:backlog_needed]
                 else:
                     old_batch = []
 
-                combined = (priority + old_batch)[:batch_size]
+                combined = priority + old_batch
                 if combined:
                     for r in combined:
                         _in_progress_ids.add(r['id'])
@@ -519,9 +523,9 @@ async def main() -> None:
         id="reaper", args=[db, bot]
     )
     scheduler.add_job(
-        jobs.confirmation_gate_job, "interval", minutes=4,
-        id="confirm_gate", args=[db]
+        jobs.confirmation_gate_job, "interval", minutes=1, id="confirm_gate", args=[db]
     )
+
     scheduler.add_job(
         jobs.db_maintenance_job, "cron", hour="*/4", minute=5,
         id="db_maint", args=[db, bot]
