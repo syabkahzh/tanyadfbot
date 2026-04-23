@@ -551,6 +551,8 @@ async def main() -> None:
         logger.critical(f"🛑 Critical crash: {e}", exc_info=True)
     finally:
         scheduler.shutdown()
+        if bot.app.updater and bot.app.updater.running:
+            await bot.app.updater.stop()
         await bot.app.stop()
         await bot.app.shutdown()
         await listener.client.disconnect()
