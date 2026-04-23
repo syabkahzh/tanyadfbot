@@ -259,11 +259,9 @@ class GeminiProcessor:
         self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
         self._dedup_lock = asyncio.Lock()
 
-        # Per-model slots — 11-12 RPM each
         self._slots: dict[str, _ModelSlot] = {
             Config.MODEL_ID:           _ModelSlot(Config.MODEL_ID,           11),
             Config.MODEL_FALLBACK:     _ModelSlot(Config.MODEL_FALLBACK,     11),
-            Config.MODEL_LAST_RESORT:  _ModelSlot(Config.MODEL_LAST_RESORT,  12, daily_limit=Config.MODEL_LAST_RESORT_RPD),
         }
         # Round-robin index (which primary model to try first)
         self._rr_idx: int = 0
@@ -313,13 +311,8 @@ class GeminiProcessor:
             acquired = await slot.acquire(timeout=45.0)
             if acquired:
                 return mid
-
-        # Absolute fallback: check RPD and RPM for Last Resort
-        lr_slot = self._slots.get(Config.MODEL_LAST_RESORT)
-        if lr_slot:
-            acquired = await lr_slot.acquire(timeout=5.0)
-            if acquired:
-                return Config.MODEL_LAST_RESORT
+        
+        return Config.MODEL_ID
 
         logger.warning("All models at capacity or quota exhausted. Falling back to primary.")
         return primaries[0]
@@ -370,21 +363,10 @@ class GeminiProcessor:
                     continue
 
                 if attempt == retries:
-                    # Last-ditch: LAST_RESORT fallback
-                    lr_slot = self._slots.get(Config.MODEL_LAST_RESORT)
-                    if lr_slot:
-                        if target in self._slots:
-                            self._slots[target].release_last()
-                        
-                        acquired = await lr_slot.acquire(timeout=5.0)
-                        if acquired:
-                            try:
-                                return await self.client.aio.models.generate_content(
-                                    model=Config.MODEL_LAST_RESORT, contents=contents, config=config
-                                )
-                            except Exception as e2:
-                                logger.error(f"{Config.MODEL_LAST_RESORT} failed: {e2}")
-                                return None
+                    logger.error(f"AI call failed in batch process after {retries} retries: {err}")
+                    if target in self._slots:
+                        self._slots[target].release_last()
+                    return None
 
                 await asyncio.sleep(1.5 ** attempt)
 

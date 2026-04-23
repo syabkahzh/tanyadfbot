@@ -41,7 +41,6 @@ class Config:
     # Models
     MODEL_ID: str = "gemma-4-31b-it"
     MODEL_FALLBACK: str = "gemma-4-26b-a4b-it"
-    MODEL_LAST_RESORT: str = "gemini-1.5-flash-lite-preview"
     MODEL_LAST_RESORT_RPD: int = 450
 
     # Timezone: WIB = UTC+7
