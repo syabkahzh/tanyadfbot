@@ -164,12 +164,19 @@ async def processing_loop() -> None:
                 shared._active_ai_tasks -= 1
 
             async with _recent_alerts_lock:
-                filtered = await gemini.filter_duplicates(promos, list(_recent_alerts_history))
+                history_snapshot = list(_recent_alerts_history)
+                filtered = await gemini.filter_duplicates(promos, history_snapshot)
 
             if filtered:
                 promos_to_save: list[tuple[int, PromoExtraction, str]] = []
                 now_utc        = datetime.now(timezone.utc)
                 msg_id_map     = {m['id']: m for m in msgs}
+
+                # Pre-calculate recently alerted brands for confidence scoring
+                recently_alerted_brands = {
+                    normalize_brand(r.get('brand', '')).lower()
+                    for r in history_snapshot[-20:]
+                }
 
                 for p in filtered:
                     m = msg_id_map.get(p.original_msg_id)
@@ -194,7 +201,7 @@ async def processing_loop() -> None:
 
                     if p.status != 'expired' and age_sec < 7200:
                         brand_key  = normalize_brand(p.brand)
-                        confidence = _score_confidence(p, m, list(_recent_alerts_history))
+                        confidence = _score_confidence(p, m, recently_alerted_brands)
 
                         if confidence >= 55:
                             await db.save_pending_alert(
@@ -211,6 +218,7 @@ async def processing_loop() -> None:
                                     "brand":   brand_key,
                                     "summary": p.summary,
                                 })
+                            recently_alerted_brands.add(brand_key.lower())
                         else:
                             if not db.conn:
                                 continue

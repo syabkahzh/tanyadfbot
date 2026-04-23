@@ -239,8 +239,17 @@ async def _flush_alert_buffer(delay: float = 0.5) -> None:
         await db.conn.commit()
 
 
-def _score_confidence(p: PromoExtraction, msg: dict, recent_alerts: list) -> int:
-    """Calculates a confidence score for a promotion."""
+def _score_confidence(p: PromoExtraction, msg: dict, recently_alerted_brands: set[str]) -> int:
+    """Calculates a confidence score for a promotion.
+
+    Args:
+        p: Extracted promotion data.
+        msg: Original message data.
+        recently_alerted_brands: Set of normalized brand names alerted recently.
+
+    Returns:
+        Confidence score from 0 to 100.
+    """
     score = 0
     if normalize_brand(p.brand) != "Unknown": score += 30
     if _CURRENCY_DISCOUNT_PATTERN.search(p.summary):
@@ -249,10 +258,6 @@ def _score_confidence(p: PromoExtraction, msg: dict, recent_alerts: list) -> int
     if msg.get('reply_to_msg_id'): score += 5
 
     brand_key = normalize_brand(p.brand).lower()
-    recently_alerted_brands = {
-        normalize_brand(r.get('brand', '')).lower()
-        for r in recent_alerts[-20:]
-    }
     if brand_key in recently_alerted_brands:
         score -= 15
 
