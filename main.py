@@ -55,10 +55,18 @@ BOOT_TIME: datetime            = datetime.now(timezone.utc)
 BOOT_CATCHUP_WINDOW: int       = 3600  # extended dynamically in main()
 
 _queue_emergency_mode: bool  = False
+
+# ── FIXED: Use a proper asyncio.Lock-guarded set so tasks can safely
+#           claim IDs before yielding control.
 _in_progress_ids: set[int]   = set()
+_in_progress_lock: asyncio.Lock = asyncio.Lock()
+
 _alerted_hot_threads: dict[int, tuple[int, datetime]] = {}
 _triage_cycle_counter: int   = 0
-_AI_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(8)  # max 8 concurrent AI batches
+
+# ── FIXED: Reduced to 5 concurrent AI batches to prevent head-of-line blocking.
+_AI_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(5)
+
 
 # ── Queue triage ───────────────────────────────────────────────────────────────
 
@@ -71,18 +79,21 @@ async def _auto_triage_queue() -> None:
     global _queue_emergency_mode
 
     queue = await db.get_queue_size()
-    if queue < 30:
+    if queue < 20:
         if _queue_emergency_mode:
             _queue_emergency_mode = False
             logger.info("Queue Surgeon: pressure normalized.")
         return
 
-    _queue_emergency_mode = True
-    triage_limit = min(queue, 1000)
+    _queue_emergency_mode = queue > 100
+    triage_limit = min(queue, 2000)
     logger.warning(f"Queue Surgeon: {queue} unprocessed — triaging up to {triage_limit}...")
 
     if not db.conn:
         return
+
+    async with _in_progress_lock:
+        current_in_progress = set(_in_progress_ids)
 
     async with db.conn.execute(
         "SELECT id, text, reply_to_msg_id FROM messages "
@@ -93,7 +104,7 @@ async def _auto_triage_queue() -> None:
 
     discard_ids: list[int] = []
     for r in rows:
-        if r['id'] in _in_progress_ids:
+        if r['id'] in current_in_progress:
             continue
         text = r['text'] or ''
         # Replies always worth checking (parent context might have signal)
@@ -110,27 +121,11 @@ async def _auto_triage_queue() -> None:
         logger.info(f"Triage discarded {len(discard_ids)} noise msgs ({queue - len(discard_ids)} remain).")
 
 
-async def commit_worker() -> None:
-    """Background task that periodically commits database transactions.
-
-    Reduces disk I/O by batching multiple writes into a single commit cycle.
-    """
-    logger.info("🗄️ Commit Worker started.")
-    while not shared.get_stop_event().is_set():
-        try:
-            await asyncio.sleep(3.0)
-            if db.conn:
-                await db.conn.commit()
-        except Exception as e:
-            logger.error(f"commit_worker error: {e}")
-            await asyncio.sleep(1)
-
-
 # ── Processing loop ────────────────────────────────────────────────────────────
 
 async def processing_loop() -> None:
     """Main background loop for message analysis and promotion extraction."""
-    global _triage_cycle_counter
+    global _triage_cycle_counter, _queue_emergency_mode
 
     # Seed dedup history from DB
     recent_promos = await db.get_recent_alert_brands(hours=6, limit=300)
@@ -148,26 +143,28 @@ async def processing_loop() -> None:
             msgs: Sequence of message records to analyze.
         """
         msg_ids = [m['id'] for m in msgs]
+        ai_start = time.monotonic()
         
         # SCOPE FIX: Semaphore only for the actual AI call
         async with _AI_SEMAPHORE:
             shared._active_ai_tasks += 1
-            ai_start = time.monotonic()
             try:
                 promos = await gemini.process_batch(msgs, db)
+            except TimeoutError:
+                logger.warning(f"AI rate limits exhausted — requeuing {len(msgs)} msgs for later.")
+                return
             except Exception as e:
                 logger.error(f"AI processing error: {e}", exc_info=True)
-                _in_progress_ids.difference_update(msg_ids)
-                shared._active_ai_tasks -= 1
+                await db.increment_ai_failure_count(msg_ids)
                 return
             finally:
-                ai_duration = time.monotonic() - ai_start
                 shared._active_ai_tasks -= 1
+
+        ai_duration = time.monotonic() - ai_start
 
         if promos is None:
             logger.warning(f"AI returned None — incrementing failure count for {len(msgs)} msgs.")
             await db.increment_ai_failure_count(msg_ids)
-            _in_progress_ids.difference_update(msg_ids)
             return
 
         try:
@@ -191,6 +188,24 @@ async def processing_loop() -> None:
                     if not m:
                         continue
 
+                    # ── FIXED: Reject obviously bad extractions early ──────
+                    brand_norm = normalize_brand(p.brand)
+                    summary_stripped = (p.summary or "").strip()
+
+                    # Never alert "Unknown" brand with vague summary
+                    if brand_norm == "Unknown" and len(summary_stripped) < 30:
+                        continue
+
+                    # Never alert meta-commentary ("user bertanya tentang...")
+                    _META_PATTERNS = re.compile(
+                        r"(user bertanya|tidak ada informasi|tidak disebutkan"
+                        r"|no information|pesan ini|pertanyaan tentang|"
+                        r"menanyakan|mencari tahu)",
+                        re.IGNORECASE,
+                    )
+                    if _META_PATTERNS.search(summary_stripped):
+                        continue
+
                     # Supplement links from raw text
                     urls = re.findall(r'(https?://[^\s>]+)', m['text'] or "")
                     seen = set(p.links)
@@ -205,10 +220,9 @@ async def processing_loop() -> None:
                     promos_to_save.append((m['id'], p, tg_link))
 
                     msg_time   = _parse_ts(m['timestamp'])
-                    now_utc    = datetime.now(timezone.utc)
                     age_sec    = (now_utc - msg_time).total_seconds()
                     
-                    p.queue_time = (now_utc - msg_time).total_seconds() - ai_duration
+                    p.queue_time = age_sec - ai_duration
                     p.ai_time    = ai_duration
 
                     if p.status != 'expired' and age_sec < 7200:
@@ -218,13 +232,8 @@ async def processing_loop() -> None:
                         if confidence >= 55:
                             await db.save_pending_alert(
                                 brand_key, p.model_dump_json(), tg_link, m['timestamp'],
-                                source='ai', commit=True # commit=True to avoid flush races
+                                source='ai', commit=False # commit=False + single commit at end
                             )
-                            t = shared.get_buffer_flush_task()
-                            if t is None or t.done():
-                                shared.set_buffer_flush_task(
-                                    asyncio.create_task(_flush_alert_buffer(delay=0.6))
-                                )
                             async with _recent_alerts_lock:
                                 _recent_alerts_history.append({
                                     "brand":   brand_key,
@@ -232,6 +241,9 @@ async def processing_loop() -> None:
                                 })
                             recently_alerted_brands.add(brand_key.lower())
                         else:
+                            if brand_norm == "Unknown":
+                                continue # drop silently
+
                             if not db.conn:
                                 continue
                             async with db.conn.execute(
@@ -244,7 +256,7 @@ async def processing_loop() -> None:
                             if existing:
                                 try:
                                     texts = json.loads(existing['corroboration_texts'])
-                                except:
+                                except (json.JSONDecodeError, TypeError, ValueError):
                                     texts = []
                                 if snippet and snippet not in texts:
                                     texts.append(snippet)
@@ -254,7 +266,6 @@ async def processing_loop() -> None:
                                     "SET corroborations=corroborations+1, corroboration_texts=? WHERE id=?",
                                     (json.dumps(texts), existing['id'])
                                 )
-                                await db.conn.commit()
                             else:
                                 expires_at = (
                                     datetime.now(timezone.utc) + timedelta(minutes=5)
@@ -267,13 +278,27 @@ async def processing_loop() -> None:
                                     (brand_key, p.model_dump_json(), tg_link,
                                      m['timestamp'], confidence, json.dumps(texts), expires_at)
                                 )
-                                await db.conn.commit()
+
+                # Commit all pending_alerts and confirmations in one shot
+                if db.conn:
+                    await db.conn.commit()
+
+                # Trigger flush for any new pending alerts
+                t = shared.get_buffer_flush_task()
+                if t is None or t.done():
+                    shared.set_buffer_flush_task(
+                        asyncio.create_task(_flush_alert_buffer(delay=0.6))
+                    )
 
                 await db.save_promos_batch(promos_to_save, msg_ids)
             else:
                 await db.mark_batch_processed(msg_ids)
+        except Exception as e:
+            logger.error(f"Post-AI processing error: {e}", exc_info=True)
+            await db.mark_batch_processed(msg_ids)
         finally:
-            _in_progress_ids.difference_update(msg_ids)
+            async with _in_progress_lock:
+                _in_progress_ids.difference_update(msg_ids)
 
         logger.debug(f"Batch completed: {len(msgs)} messages.")
 
@@ -281,46 +306,62 @@ async def processing_loop() -> None:
     while True:
         try:
             await db.ensure_connection()
-            # BUG 6 FIX: triage every 2 cycles
+
             _triage_cycle_counter += 1
-            if _triage_cycle_counter % 2 == 0:
+            queue_size = await db.get_queue_size()
+
+            # ── FIXED: Triage every cycle when queue is pressured
+            if queue_size > 20:
                 await _auto_triage_queue()
 
-            # Interleaved drain: Priority is VERY recent, history is the rest
-            priority_raw = await db.get_unprocessed_recent(minutes=2, batch_size=30)
-            priority = [r for r in priority_raw if r['id'] not in _in_progress_ids][:20]
+            # ── FIXED: Cap maximum concurrent AI tasks strictly.
+            current_tasks = shared._active_ai_tasks
+            if current_tasks >= 5:
+                logger.debug(f"AI saturated ({current_tasks} tasks). Sleeping 2s.")
+                await asyncio.sleep(2)
+                continue
 
+            # Slots available: how many more batches can we start?
+            slots_free = 5 - current_tasks
+
+            # Dynamic drain size based on pressure
             now_m = time.monotonic()
             total_used = sum(
                 len([t for t in slot._calls if now_m - t < 60])
                 for slot in gemini._slots.values()
             )
             total_cap    = sum(s.limit for s in gemini._slots.values())
-            headroom_pct = 1.0 - (total_used / max(total_cap, 1))
+            headroom_pct = max(0.0, 1.0 - (total_used / max(total_cap, 1)))
 
-            # Dynamically adjust drain size based on AI headroom and queue pressure
-            queue_size = await db.get_queue_size()
             if _queue_emergency_mode or queue_size > 100:
-                drain_size = int(60 + 80 * headroom_pct)   # 60–140
+                batch_size = int(40 + 40 * headroom_pct)   # 40–80
             else:
-                drain_size = int(30 + 50 * headroom_pct)    # 30–80
+                batch_size = int(20 + 30 * headroom_pct)    # 20–50
 
-            old_raw = await db.get_unprocessed_batch(batch_size=drain_size + 100)
+            # Limit by available AI slots
+            max_msgs = batch_size * slots_free
+
+            # Priority: very recent messages first
+            async with _in_progress_lock:
+                current_in_progress = set(_in_progress_ids)
+
+            priority_raw = await db.get_unprocessed_recent(minutes=2, batch_size=50)
+            priority = [r for r in priority_raw if r['id'] not in current_in_progress]
+
+            old_raw = await db.get_unprocessed_batch(batch_size=max_msgs + 50)
             seen_ids = {m['id'] for m in priority}
-            old_batch = [r for r in old_raw if r['id'] not in seen_ids and r['id'] not in _in_progress_ids]
+            old_batch = [r for r in old_raw if r['id'] not in seen_ids and r['id'] not in current_in_progress]
 
-            # Merge and cap
-            batch = (priority + old_batch)[:drain_size]
+            combined = (priority + old_batch)[:max_msgs]
 
-            if not batch:
+            if not combined:
                 await asyncio.sleep(2)
                 continue
 
             # PRE-FILTER OPTIMIZATION: 
-            # If a message is clearly noise, mark it processed NOW instead of sending to AI batch.
             to_ai = []
             noise_ids = []
-            for r in batch:
+            for r in combined:
                 if gemini._is_worth_checking(r['text']):
                     to_ai.append({
                         "id":               r['id'],
@@ -335,22 +376,30 @@ async def processing_loop() -> None:
 
             if noise_ids:
                 await db.mark_batch_processed(noise_ids)
-                _in_progress_ids.difference_update(noise_ids)
-                logger.info(f"🧹 Filtered {len(noise_ids)} noise messages from batch.")
+                logger.debug(f"🧹 Filtered {len(noise_ids)} noise messages from batch.")
 
             if not to_ai:
+                await asyncio.sleep(1)
                 continue
 
-            logger.info(f"🧬 [Pipeline] Sending {len(to_ai)} messages to AI "
-                        f"(Headroom: {headroom_pct:.0%}, Noise: {len(noise_ids)})")
+            # ── FIXED: Claim IDs *before* spawning tasks to prevent double-processing
+            async with _in_progress_lock:
+                # Re-check — some may have been claimed by a concurrent iteration
+                unclaimed = [m for m in to_ai if m["id"] not in _in_progress_ids]
+                for m in unclaimed:
+                    _in_progress_ids.add(m['id'])
 
-            if shared._active_ai_tasks < 8:
-                asyncio.create_task(process_one_batch(to_ai))
-            else:
-                logger.warning(f"AI saturated ({shared._active_ai_tasks} tasks). Sleeping.")
-                _in_progress_ids.difference_update([m['id'] for m in to_ai])
-                await asyncio.sleep(3)
+            if not unclaimed:
+                await asyncio.sleep(0.5)
                 continue
+
+            # Split into batches of batch_size and spawn one task per batch
+            for i in range(0, len(unclaimed), batch_size):
+                chunk = unclaimed[i : i + batch_size]
+                if chunk:
+                    asyncio.create_task(process_one_batch(chunk))
+                    logger.info(f"🧬 Spawned batch task: {len(chunk)} msgs "
+                                f"(headroom: {headroom_pct:.0%}, queue: {queue_size})")
 
             await asyncio.sleep(0.1)
         except Exception as e:
@@ -424,7 +473,6 @@ async def main() -> None:
     await bot.app.updater.start_polling()
 
     # Launch background loops
-    asyncio.create_task(commit_worker())
     asyncio.create_task(processing_loop())
     await listener.start()
     asyncio.create_task(
