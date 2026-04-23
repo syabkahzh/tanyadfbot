@@ -154,6 +154,11 @@ def _guess_brand(text: str | None) -> str:
             pattern = rf'(^|[^a-zA-Z0-9]){re.escape(kw)}($|[^a-zA-Z0-9])'
             if re.search(pattern, t):
                 return brand
+        elif len(kw) <= 5:
+            # BUG S4 FIX: short keywords (4-5 chars like 'grab') also need boundary
+            pattern = rf'(^|[^a-zA-Z0-9]){re.escape(kw)}($|[^a-zA-Z0-9])'
+            if re.search(pattern, t):
+                return brand
         elif kw in t:
             return brand
             

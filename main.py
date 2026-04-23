@@ -339,7 +339,7 @@ async def processing_loop() -> None:
             # ── CORE FIX: fetch AND claim inside the same lock acquisition ──────
             combined: list[Any] = []
             async with _in_progress_lock:
-                priority_raw = await db.get_unprocessed_recent(minutes=2, batch_size=batch_size + 20)
+                priority_raw = await db.get_unprocessed_recent(minutes=10, batch_size=batch_size + 20)
                 priority = [r for r in priority_raw if r['id'] not in _in_progress_ids]
 
                 backlog_size = max(0, batch_size - len(priority))
