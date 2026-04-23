@@ -265,6 +265,7 @@ class TelethonListener:
     async def sync_history(self, hours=6, catchup_hours=2):
         chat    = await self.client.get_entity(Config.TARGET_GROUP)
         chat_id = chat.id
+        from db import _ts_str
         
         from datetime import timezone
         PROCESS_CUTOFF = datetime.now(timezone.utc) - timedelta(minutes=30)
@@ -292,7 +293,7 @@ class TelethonListener:
                 
                 buffer.append((
                     message.id, chat_id, message.sender_id,
-                    f"User_{message.sender_id}", message.date.isoformat(),
+                    f"User_{message.sender_id}", _ts_str(message.date),
                     message.text, message.reply_to_msg_id,
                     mark_processed, 1 if message.photo else 0, 1 if has_time else 0
                 ))

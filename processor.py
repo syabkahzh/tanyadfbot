@@ -267,17 +267,17 @@ class GeminiProcessor:
         async with self._rr_lock:
             self._rr_idx = (self._rr_idx + 1) % len(primaries)
             primary_idx = self._rr_idx
+            
+            primary = primaries[primary_idx]
+            secondary = primaries[1 - primary_idx]
 
-        primary = primaries[primary_idx]
-        secondary = primaries[1 - primary_idx]
+            # 1. Try primary non-blocking
+            if await self._slots[primary].try_acquire_nowait():
+                return primary
 
-        # 1. Try primary non-blocking
-        if await self._slots[primary].try_acquire_nowait():
-            return primary
-
-        # 2. Try secondary non-blocking
-        if await self._slots[secondary].try_acquire_nowait():
-            return secondary
+            # 2. Try secondary non-blocking
+            if await self._slots[secondary].try_acquire_nowait():
+                return secondary
 
         # 3. Both full — wait on whichever has more headroom (or primary if equal)
         now = time.monotonic()
