@@ -8,6 +8,7 @@ from typing import Any, Sequence, cast
 
 from db import Database, normalize_brand
 from processor import GeminiProcessor, PromoExtraction, _CURRENCY_DISCOUNT_PATTERN
+from utils import _esc
 
 logger = logging.getLogger(__name__)
 
@@ -110,13 +111,6 @@ def _make_tg_link(chat_id: int | str, msg_id: int | str) -> str:
     return f"https://t.me/c/{cid}/{msg_id}"
 
 
-def _esc(text: str | None) -> str:
-    """Escapes MarkdownV2 special characters."""
-    if not text:
-        return ""
-    return (text.replace("*", "\\*").replace("_", "\\_")
-                .replace("[", "\\[").replace("]", "\\]")
-                .replace("`", "\\`"))
 
 
 async def _reconnect_listener(gap_minutes: float) -> None:

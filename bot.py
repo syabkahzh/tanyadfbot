@@ -24,6 +24,7 @@ from telegram.request import HTTPXRequest
 
 from config import Config
 from processor import PromoExtraction
+from utils import _esc
 import shared
 
 logger = logging.getLogger(__name__)
@@ -55,20 +56,6 @@ def _to_wib(ts: str | datetime | Any) -> str:
     except Exception:
         return "??"
 
-def _esc(text: str | None) -> str:
-    """Escapes common Markdown characters to prevent formatting errors.
-
-    Args:
-        text: The raw string to escape.
-
-    Returns:
-        The escaped string.
-    """
-    if not text:
-        return ""
-    return (text.replace("*", "\\*").replace("_", "\\_")
-                .replace("[", "\\[").replace("]", "\\]")
-                .replace("`", "\\`"))
 
 class TelegramBot:
     """Main Telegram Bot implementation."""
