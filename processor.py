@@ -601,13 +601,39 @@ class GeminiProcessor:
 
     async def interpret_keywords(self, hot_words: Sequence[str], window: int,
                                   context_msgs: Sequence[str]) -> str | None:
-        """Interprets the context behind a burst of specific keywords."""
+        """Interprets the context behind a burst of specific keywords.
+
+        Args:
+            hot_words: Frequent words detected.
+            window: Time window.
+            context_msgs: Full messages for context.
+
+        Returns:
+            Brief explanation or None.
+        """
         if not context_msgs:
             return None
-        system = f"Ada kenaikan penggunaan kata: {', '.join(hot_words)} dlm {window} menit. Jelaskan singkat."
+            
+        # Count keyword occurrences to help AI understand dominance
+        word_counts = {}
+        for w in hot_words:
+            word_counts[w] = sum(1 for msg in context_msgs if w.lower() in msg.lower())
+        
+        counts_str = ", ".join([f"'{w}' ({c}x)" for w, c in word_counts.items()])
+        
+        system = (
+            "Kamu analis sentimen real-time. Ada lonjakan aktivitas di grup.\n"
+            f"Kata kunci dominan dlm {window} menit terakhir: {counts_str}.\n"
+            "TUGASMU: Jelaskan APA yang sedang dibahas berdasarkan pesan-pesan berikut.\n"
+            "JANGAN menebak jika tidak ada informasi. Jawab dalam 1-2 kalimat padat."
+        )
+        
         target = await self._pick_model()
+        # Give AI the most recent messages (tail) as context
+        context_block = "\n".join([f"- {msg[:150]}" for msg in context_msgs[-40:]])
+        
         response = await self._call(
-            contents="\n- ".join(context_msgs[:30]),
+            contents=f"Pesan context:\n{context_block}",
             config={"system_instruction": system},
             model_id=target
         )
