@@ -165,8 +165,8 @@ async def processing_loop() -> None:
                 shared._active_ai_tasks -= 1
 
         if promos is None:
-            logger.warning(f"AI returned None — clearing {len(msgs)} msgs to prevent queue explosion.")
-            await db.mark_batch_processed(msg_ids)
+            logger.warning(f"AI returned None — incrementing failure count for {len(msgs)} msgs.")
+            await db.increment_ai_failure_count(msg_ids)
             _in_progress_ids.difference_update(msg_ids)
             return
 

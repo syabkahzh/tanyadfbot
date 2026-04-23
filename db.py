@@ -234,6 +234,7 @@ class Database:
             "ALTER TABLE messages ADD COLUMN time_alerted INTEGER DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN has_photo INTEGER DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN image_processed INTEGER DEFAULT 0",
+            "ALTER TABLE messages ADD COLUMN ai_failure_count INTEGER DEFAULT 0",
             "ALTER TABLE pending_alerts ADD COLUMN flush_id TEXT DEFAULT NULL",
             "ALTER TABLE pending_alerts ADD COLUMN corroborations INTEGER DEFAULT 0",
             "ALTER TABLE pending_alerts ADD COLUMN corroboration_texts TEXT DEFAULT '[]'",
@@ -479,6 +480,30 @@ class Database:
             await self.conn.commit()
         except Exception as e:
             logger.error(f"DB mark_batch_processed error: {e}")
+
+    async def increment_ai_failure_count(self, ids: Sequence[int]) -> None:
+        """Increments failure count for a batch of messages. 
+        
+        Messages with high failure counts (>=3) are eventually marked processed 
+        to prevent permanent loop on 'poison' messages.
+        """
+        if not self.conn or not ids:
+            return
+        ph = ','.join('?' * len(ids))
+        try:
+            # Increment count
+            await self.conn.execute(
+                f"UPDATE messages SET ai_failure_count = ai_failure_count + 1 WHERE id IN ({ph})",
+                list(ids)
+            )
+            # Mark those that reached 3 failures as processed so they don't block the queue forever
+            await self.conn.execute(
+                f"UPDATE messages SET processed=1 WHERE id IN ({ph}) AND ai_failure_count >= 3",
+                list(ids)
+            )
+            await self.conn.commit()
+        except Exception as e:
+            logger.error(f"DB increment_ai_failure_count error: {e}")
 
     async def get_last_msg_id(self, chat_id: int) -> int:
         """Retrieves the highest Telegram message ID seen in a chat.

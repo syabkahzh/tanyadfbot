@@ -346,22 +346,32 @@ class GeminiProcessor:
                 return res
             except Exception as e:
                 err = str(e)
+                # Check for rate limit or internal errors
                 is_rate = "429" in err or "resource_exhausted" in err.lower()
+                is_internal = "500" in err or "internal" in err.lower()
 
-                if is_rate and attempt < retries:
-                    # Switch to the other primary
+                if (is_rate or is_internal) and attempt < retries:
+                    # Log detail
+                    reason = "Rate-limited" if is_rate else "Internal Server Error"
+                    logger.warning(f"AI ({target}) {reason}: {err}. Attempt {attempt+1}/{retries+1}")
+
+                    # Switch to the other primary if available
                     other = [m for m in primaries if m != target]
                     if other:
                         if target in self._slots:
                             self._slots[target].release_last()
 
                         slot = self._slots[other[0]]
+                        # Shorter timeout for secondary acquisition
                         acquired = await slot.acquire(timeout=10.0)
                         if acquired:
                             target = other[0]
-                            logger.info(f"Rate-limited on {model_id}, switched to {target}")
+                            logger.info(f"Switched to {target} for retry.")
                             continue
-                    await asyncio.sleep(3 * (attempt + 1))
+                    
+                    # If can't switch or switch also failed, back off
+                    wait = (3 * (attempt + 1)) if is_internal else (1.5 ** attempt)
+                    await asyncio.sleep(wait)
                     continue
 
                 if attempt == retries:
