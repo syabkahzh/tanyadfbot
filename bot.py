@@ -624,11 +624,13 @@ class TelegramBot:
         if timestamp:
             ts = shared._parse_ts(timestamp)
             latency = (now_dt - ts).total_seconds()
-            
+
             detail = []
-            if p_data.queue_time: detail.append(f"Q: {p_data.queue_time:.1f}s")
-            if p_data.ai_time: detail.append(f"AI: {p_data.ai_time:.1f}s")
-            
+            if p_data.queue_time is not None:
+                detail.append(f"Q: {p_data.queue_time:.1f}s")
+            if p_data.ai_time is not None:
+                detail.append(f"AI: {p_data.ai_time:.1f}s")
+
             detail_str = f" ({' · '.join(detail)})" if detail else ""
             latency_str = f"\n⚡ Latency: <code>{latency:.2f}s</code>{detail_str}"
 

@@ -331,16 +331,34 @@ async def processing_loop() -> None:
             total_cap    = sum(s.limit for s in gemini._slots.values())
             headroom_pct = max(0.0, 1.0 - (total_used / max(total_cap, 1)))
 
+            # Larger batches so the loop actually keeps up with deal-hunter
+            # group bursts (~150 msgs/min per HANDOVER.md). The previous
+            # 15–30 ceiling made the processing queue balloon under load,
+            # which (combined with the DESC priority ordering fixed in db.py)
+            # was the root cause of the 10–30-min alert latencies.
             if _queue_emergency_mode:
-                batch_size = int(30 + 20 * headroom_pct)   # 30-50
+                batch_size = int(50 + 50 * headroom_pct)    # 50-100
             else:
-                batch_size = int(15 + 15 * headroom_pct)    # 15-30
+                batch_size = int(30 + 30 * headroom_pct)    # 30-60
+
+            # When the queue is pressured, reserve part of each batch for
+            # ancient backlog so it still drains even when priority is full.
+            # Without this, a steady stream of fresh messages can keep the
+            # priority window saturated forever while backlog rots.
+            reserved_backlog = 0
+            if queue_size > 50:
+                reserved_backlog = max(1, batch_size // 4)
+            priority_quota = max(1, batch_size - reserved_backlog)
 
             # ── CORE FIX: fetch AND claim inside the same lock acquisition ──────
             combined: list[Any] = []
             async with _in_progress_lock:
-                priority_raw = await db.get_unprocessed_recent(minutes=10, batch_size=batch_size + 20)
-                priority = [r for r in priority_raw if r['id'] not in _in_progress_ids]
+                priority_raw = await db.get_unprocessed_recent(
+                    minutes=10, batch_size=priority_quota + 20
+                )
+                priority = [
+                    r for r in priority_raw if r['id'] not in _in_progress_ids
+                ][:priority_quota]
 
                 backlog_size = max(0, batch_size - len(priority))
                 if backlog_size > 0:
@@ -519,7 +537,7 @@ async def main() -> None:
         id="reaper", args=[db, bot]
     )
     scheduler.add_job(
-        jobs.confirmation_gate_job, "interval", minutes=4,
+        jobs.confirmation_gate_job, "interval", minutes=1,
         id="confirm_gate", args=[db]
     )
     scheduler.add_job(

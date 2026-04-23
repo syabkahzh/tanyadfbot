@@ -1,6 +1,7 @@
 import asyncio
 import html
 import logging
+import re
 import uuid
 from collections import deque
 from datetime import datetime, timezone
