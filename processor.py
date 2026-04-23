@@ -56,6 +56,8 @@ class PromoExtraction(BaseModel):
     status: Literal["active", "expired", "unknown"]
     links: List[str] = []
     detected_at: Optional[str] = None
+    queue_time: Optional[float] = None
+    ai_time: Optional[float] = None
 
 class BatchResponse(BaseModel):
     """Wrapper for batch AI extraction results."""
@@ -389,26 +391,34 @@ class GeminiProcessor:
         if "saya membisukan dia" in t or "@dfautokick_bot" in t:
             return False
 
-        words = t.split()
-        if len(words) < 2:
+        # Ignore common very short noise
+        if len(t) < 4:
             return False
 
-        question_words = {'ga','gak','nggak','apa','gimana','berapa','kapan','dimana','kenapa'}
+        words = t.split()
+        if len(words) < 2 and not any(kw in t for kw in ['sfood','gfood','grab','aman','on','jp']):
+            return False
+
+        question_words = {'ga','gak','nggak','apa','gimana','berapa','kapan','dimana','kenapa','ada','masih'}
         if t.endswith('?') and words and words[0] in question_words:
             return False
-        if len(words) <= 3 and t.endswith('?'):
+        if len(words) <= 4 and t.endswith('?'):
             return False
 
         if _SOCIAL_FILLER.match(t):
             return False
 
+        # Strong signal bypass
         if any(kw in t for kw in _STRONG_KEYWORDS):
             return True
         if _WORD_BOUNDARY_KEYWORDS.search(t):
             return True
-        if len(words) <= 3:
+        
+        # If no strong keywords, require more length to be considered "content"
+        if len(words) <= 4:
             return False
-        return False
+            
+        return bool(_PROMO.search(t))
 
     async def process_batch(self, messages: Sequence[dict[str, Any]], db: Any = None) -> list[PromoExtraction] | None:
         """Extracts promos from a batch of messages using AI.

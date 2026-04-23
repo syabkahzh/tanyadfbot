@@ -1,5 +1,5 @@
 import re
-from typing import List, Set
+from typing import Set
 
 # --- FROM processor.py ---
 _STRONG_KEYWORDS: Set[str] = {

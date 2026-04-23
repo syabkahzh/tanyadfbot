@@ -6,6 +6,7 @@ and reliable message delivery with retry logic.
 
 import asyncio
 import html
+import json
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Sequence, Callable, TypeVar, cast
@@ -24,6 +25,7 @@ from telegram.request import HTTPXRequest
 
 from config import Config
 from processor import PromoExtraction
+from utils import _esc
 import shared
 
 logger = logging.getLogger(__name__)
@@ -51,9 +53,9 @@ def _to_wib(ts: str | datetime | Any) -> str:
         
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(WIB).strftime('%H:%M')
+        return dt.astimezone(WIB).strftime('%H:%M:%S')
     except Exception:
-        return "??"
+        return "??:??:??"
 
 def _esc(text: str | None) -> str:
     """Escapes common Markdown characters to prevent formatting errors.
@@ -636,7 +638,13 @@ class TelegramBot:
         if timestamp:
             ts = shared._parse_ts(timestamp)
             latency = (now_dt - ts).total_seconds()
-            latency_str = f" ⚡ <code>{latency:.2f}s</code>"
+            
+            detail = []
+            if p_data.queue_time: detail.append(f"Q: {p_data.queue_time:.1f}s")
+            if p_data.ai_time: detail.append(f"AI: {p_data.ai_time:.1f}s")
+            
+            detail_str = f" ({' · '.join(detail)})" if detail else ""
+            latency_str = f"\n⚡ Latency: <code>{latency:.2f}s</code>{detail_str}"
 
         source_chip = "🤖 <code>processed by ai</code>" if source == 'ai' else "🐍 <code>triggered pythonly</code>"
 
@@ -662,7 +670,7 @@ class TelegramBot:
             except:
                 pass
 
-        for uid in self.auth_ids:
+        async def _safe_send(uid):
             try:
                 logger.info(f"📢 [Broadcast] Sending alert to {uid}")
                 await self._send_with_retry(
@@ -673,6 +681,9 @@ class TelegramBot:
                 )
             except Exception as e:
                 logger.error(f"Failed to send alert to {uid} after retries: {e}")
+
+        if self.auth_ids:
+            await asyncio.gather(*[_safe_send(uid) for uid in self.auth_ids])
 
     async def send_grouped_alert(self, brand_key: str, items: list[tuple[PromoExtraction, str, Any, int, str, str]]) -> None:
         """Broadcasts a consolidated alert for multiple promos of the same brand.
@@ -702,6 +713,14 @@ class TelegramBot:
         now_wib = datetime.now(WIB).strftime('%H:%M:%S')
         first_ts = items[0][2]
         msg_wib = _to_wib(first_ts)
+        
+        # Calculate latency for the group (based on the first item)
+        latency_str = ""
+        if first_ts:
+            ts = shared._parse_ts(first_ts)
+            latency = (datetime.now(timezone.utc) - ts).total_seconds()
+            latency_str = f"\n⚡ Latency: <code>{latency:.2f}s</code>"
+
         lines = []
         all_ext_links: list[str] = []
         total_corr = sum(it[3] for it in items)
@@ -740,7 +759,7 @@ class TelegramBot:
 
         text = (
             f"🔥 <b>PROMO GRUP: {html.escape(brand_label)}</b>\n"
-            f"🕒 Msg: <code>{msg_wib}</code> · Det: <code>{now_wib}</code> WIB\n"
+            f"🕒 Msg: <code>{msg_wib}</code> · Det: <code>{now_wib}</code> WIB{latency_str}\n"
             f"🛠 Source: {source_chip}\n\n"
             f"{lines_block}\n"
             f"{ext_links_block}"
@@ -751,7 +770,7 @@ class TelegramBot:
             for snip in all_snippets[:3]:
                 text += f"🔥 <i>\"{html.escape(snip)}\"</i>\n"
 
-        for uid in self.auth_ids:
+        async def _safe_send(uid):
             try:
                 await self._send_with_retry(
                     chat_id=uid, text=text,
@@ -759,6 +778,9 @@ class TelegramBot:
                 )
             except Exception as e:
                 logger.error(f"Failed to send grouped alert to {uid} after retries: {e}")
+
+        if self.auth_ids:
+            await asyncio.gather(*[_safe_send(uid) for uid in self.auth_ids])
 
     async def send_mega_alert(self, snapshot: dict[str, list[tuple[PromoExtraction, str, Any, int]]]) -> None:
         """Sends a consolidated alert for multiple brands at once.
@@ -785,11 +807,14 @@ class TelegramBot:
                     text += f"  • {html.escape(p.summary)} <a href='{link}'>[→]</a>\n"
             text += "\n"
 
-        for uid in self.auth_ids:
+        async def _safe_send(uid):
             try:
                 await self._send_with_retry(chat_id=uid, text=text, parse_mode=ParseMode.HTML)
             except Exception as e:
                 logger.error(f"Failed to send mega alert to {uid}: {e}")
+
+        if self.auth_ids:
+            await asyncio.gather(*[_safe_send(uid) for uid in self.auth_ids])
 
     async def send_digest(self, digest_text: str, hour_label: str) -> None:
         """Sends a formatted digest of recent promotions.
@@ -802,11 +827,15 @@ class TelegramBot:
             return
             
         full = f"📊 <b>Ringkasan Promo {hour_label}</b>\n\n{digest_text}"
-        for uid in self.auth_ids:
+        
+        async def _safe_send(uid):
             try:
                 await self._send_with_retry(chat_id=uid, text=full, parse_mode=ParseMode.HTML)
             except Exception as e:
                 logger.error(f"Failed to send digest to {uid}: {e}")
+
+        if self.auth_ids:
+            await asyncio.gather(*[_safe_send(uid) for uid in self.auth_ids])
 
     async def send_plain(self, text: str, parse_mode: str = ParseMode.MARKDOWN) -> None:
         """Sends a simple text message to all authorized owners.
@@ -815,13 +844,16 @@ class TelegramBot:
             text: The message text.
             parse_mode: Telegram parse mode.
         """
-        for uid in self.auth_ids:
+        async def _safe_send(uid):
             try:
                 await self._send_with_retry(
                     chat_id=uid, text=text, parse_mode=parse_mode
                 )
             except Exception as e:
                 logger.error(f"Failed to send plain msg to {uid} after retries: {e}")
+
+        if self.auth_ids:
+            await asyncio.gather(*[_safe_send(uid) for uid in self.auth_ids])
 
     async def alert_error(self, component: str, error: Exception) -> None:
         """Notifies the owner of a critical system error and logs it for retry.

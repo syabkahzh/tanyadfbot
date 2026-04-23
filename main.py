@@ -32,11 +32,12 @@ from shared import (
     _recent_alerts_history, _recent_alerts_lock,
     _parse_ts,
     _alerted_aman_parents, _alerted_aman_parents_deque, _aman_lock,
-    _BRAND_KEYWORDS, _make_tg_link, _esc, _guess_brand,
+    _BRAND_KEYWORDS, _make_tg_link, _guess_brand,
     _flush_alert_buffer, _score_confidence,
     _listener_reconnecting, _last_trend_alert, _last_spike_alert,
     _reconnect_listener
 )
+from utils import _esc
 
 logger = logging.getLogger(__name__)
 
@@ -147,29 +148,43 @@ async def processing_loop() -> None:
             msgs: Sequence of message records to analyze.
         """
         msg_ids = [m['id'] for m in msgs]
+        
+        # SCOPE FIX: Semaphore only for the actual AI call
         async with _AI_SEMAPHORE:
             shared._active_ai_tasks += 1
+            ai_start = time.monotonic()
             try:
                 promos = await gemini.process_batch(msgs, db)
-
-                if promos is None:
-                    logger.warning(f"AI returned None — clearing {len(msgs)} msgs to prevent queue explosion.")
-                    await db.mark_batch_processed(msg_ids)
-                    return
             except Exception as e:
                 logger.error(f"AI processing error: {e}", exc_info=True)
-                return
-            finally:
                 _in_progress_ids.difference_update(msg_ids)
                 shared._active_ai_tasks -= 1
+                return
+            finally:
+                ai_duration = time.monotonic() - ai_start
+                shared._active_ai_tasks -= 1
 
+        if promos is None:
+            logger.warning(f"AI returned None — clearing {len(msgs)} msgs to prevent queue explosion.")
+            await db.mark_batch_processed(msg_ids)
+            _in_progress_ids.difference_update(msg_ids)
+            return
+
+        try:
             async with _recent_alerts_lock:
-                filtered = await gemini.filter_duplicates(promos, list(_recent_alerts_history))
+                history_snapshot = list(_recent_alerts_history)
+                filtered = await gemini.filter_duplicates(promos, history_snapshot)
 
             if filtered:
                 promos_to_save: list[tuple[int, PromoExtraction, str]] = []
                 now_utc        = datetime.now(timezone.utc)
                 msg_id_map     = {m['id']: m for m in msgs}
+
+                # Pre-calculate recently alerted brands for confidence scoring
+                recently_alerted_brands = {
+                    normalize_brand(r.get('brand', '')).lower()
+                    for r in history_snapshot[-20:]
+                }
 
                 for p in filtered:
                     m = msg_id_map.get(p.original_msg_id)
@@ -190,27 +205,32 @@ async def processing_loop() -> None:
                     promos_to_save.append((m['id'], p, tg_link))
 
                     msg_time   = _parse_ts(m['timestamp'])
+                    now_utc    = datetime.now(timezone.utc)
                     age_sec    = (now_utc - msg_time).total_seconds()
+                    
+                    p.queue_time = (now_utc - msg_time).total_seconds() - ai_duration
+                    p.ai_time    = ai_duration
 
                     if p.status != 'expired' and age_sec < 7200:
                         brand_key  = normalize_brand(p.brand)
-                        confidence = _score_confidence(p, m, list(_recent_alerts_history))
+                        confidence = _score_confidence(p, m, recently_alerted_brands)
 
                         if confidence >= 55:
                             await db.save_pending_alert(
                                 brand_key, p.model_dump_json(), tg_link, m['timestamp'],
-                                source='ai', commit=False
+                                source='ai', commit=True # commit=True to avoid flush races
                             )
                             t = shared.get_buffer_flush_task()
                             if t is None or t.done():
                                 shared.set_buffer_flush_task(
-                                    asyncio.create_task(_flush_alert_buffer(delay=0.8))
+                                    asyncio.create_task(_flush_alert_buffer(delay=0.6))
                                 )
                             async with _recent_alerts_lock:
                                 _recent_alerts_history.append({
                                     "brand":   brand_key,
                                     "summary": p.summary,
                                 })
+                            recently_alerted_brands.add(brand_key.lower())
                         else:
                             if not db.conn:
                                 continue
@@ -252,8 +272,10 @@ async def processing_loop() -> None:
                 await db.save_promos_batch(promos_to_save, msg_ids)
             else:
                 await db.mark_batch_processed(msg_ids)
+        finally:
+            _in_progress_ids.difference_update(msg_ids)
 
-            logger.debug(f"Batch completed: {len(msgs)} messages.")
+        logger.debug(f"Batch completed: {len(msgs)} messages.")
 
     logger.info("Processing Loop started.")
     while True:
@@ -264,8 +286,8 @@ async def processing_loop() -> None:
             if _triage_cycle_counter % 2 == 0:
                 await _auto_triage_queue()
 
-            # Interleaved drain
-            priority_raw = await db.get_unprocessed_recent(minutes=3, batch_size=30)
+            # Interleaved drain: Priority is VERY recent, history is the rest
+            priority_raw = await db.get_unprocessed_recent(minutes=2, batch_size=30)
             priority = [r for r in priority_raw if r['id'] not in _in_progress_ids][:20]
 
             now_m = time.monotonic()
@@ -276,46 +298,61 @@ async def processing_loop() -> None:
             total_cap    = sum(s.limit for s in gemini._slots.values())
             headroom_pct = 1.0 - (total_used / max(total_cap, 1))
 
-            if _queue_emergency_mode:
-                drain_size = int(60 + 80 * headroom_pct)   # 60–140
+            # Dynamically adjust drain size based on AI headroom and queue pressure
+            queue_size = await db.get_queue_size()
+            if _queue_emergency_mode or queue_size > 100:
+                drain_size = int(80 + 100 * headroom_pct)   # 80–180
             else:
-                drain_size = int(30 + 70 * headroom_pct)    # 30–100
+                drain_size = int(35 + 65 * headroom_pct)    # 35–100
 
-            old_raw = await db.get_unprocessed_batch(batch_size=drain_size + 50)
+            old_raw = await db.get_unprocessed_batch(batch_size=drain_size + 100)
             seen_ids = {m['id'] for m in priority}
             old_batch = [r for r in old_raw if r['id'] not in seen_ids and r['id'] not in _in_progress_ids]
 
-            batch = (priority + old_batch)[:max(drain_size, 40)]
+            # Merge and cap
+            batch = (priority + old_batch)[:drain_size]
 
             if not batch:
                 await asyncio.sleep(2)
                 continue
 
-            logger.info(f"🧬 [Pipeline] Processing batch of {len(batch)} messages "
-                        f"({len(priority)} ⚡ priority, {len(batch)-len(priority)} 🕒 history)")
+            # PRE-FILTER OPTIMIZATION: 
+            # If a message is clearly noise, mark it processed NOW instead of sending to AI batch.
+            to_ai = []
+            noise_ids = []
+            for r in batch:
+                if gemini._is_worth_checking(r['text']):
+                    to_ai.append({
+                        "id":               r['id'],
+                        "text":             r['text'],
+                        "timestamp":        r['timestamp'],
+                        "tg_msg_id":        r['tg_msg_id'],
+                        "chat_id":          r['chat_id'],
+                        "reply_to_msg_id":  r['reply_to_msg_id'],
+                    })
+                else:
+                    noise_ids.append(r['id'])
 
-            ids = [r['id'] for r in batch]
-            _in_progress_ids.update(ids)
+            if noise_ids:
+                await db.mark_batch_processed(noise_ids)
+                _in_progress_ids.difference_update(noise_ids)
+                logger.info(f"🧹 Filtered {len(noise_ids)} noise messages from batch.")
 
-            msgs = [
-                {
-                    "id":               r['id'],
-                    "text":             r['text'],
-                    "timestamp":        r['timestamp'],
-                    "tg_msg_id":        r['tg_msg_id'],
-                    "chat_id":          r['chat_id'],
-                    "reply_to_msg_id":  r['reply_to_msg_id'],
-                }
-                for r in batch
-            ]
-            if shared._active_ai_tasks < 8:
-                asyncio.create_task(process_one_batch(msgs))
-            else:
-                logger.warning(f"AI saturated ({shared._active_ai_tasks} tasks). Sleeping.")
-                await asyncio.sleep(5)
+            if not to_ai:
                 continue
 
-            await asyncio.sleep(0.2)
+            logger.info(f"🧬 [Pipeline] Sending {len(to_ai)} messages to AI "
+                        f"(Headroom: {headroom_pct:.0%}, Noise: {len(noise_ids)})")
+
+            if shared._active_ai_tasks < 8:
+                asyncio.create_task(process_one_batch(to_ai))
+            else:
+                logger.warning(f"AI saturated ({shared._active_ai_tasks} tasks). Sleeping.")
+                _in_progress_ids.difference_update([m['id'] for m in to_ai])
+                await asyncio.sleep(3)
+                continue
+
+            await asyncio.sleep(0.1)
         except Exception as e:
             logger.error(f"processing_loop error: {e}", exc_info=True)
             await bot.alert_error("processing_loop", e)
@@ -447,7 +484,7 @@ async def main() -> None:
     )
     # NEW: runtime watchdog for stuck pending_alerts
     scheduler.add_job(
-        _alert_watchdog, "interval", minutes=5, id="alert_watchdog"
+        _alert_watchdog, "interval", minutes=1, id="alert_watchdog"
     )
 
     scheduler.start()

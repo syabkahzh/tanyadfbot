@@ -15,8 +15,9 @@ from typing import Any, Sequence, cast
 from db import Database
 from processor import GeminiProcessor, PromoExtraction
 from bot import TelegramBot
+from utils import _esc
 import shared
-from shared import _make_tg_link, _flush_alert_buffer, _esc, _reconnect_listener
+from shared import _make_tg_link, _flush_alert_buffer, _reconnect_listener
 
 logger = logging.getLogger(__name__)
 
