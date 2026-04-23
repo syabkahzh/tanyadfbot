@@ -240,6 +240,8 @@ async def _flush_alert_buffer(delay: float = 0.5) -> None:
         await db.conn.commit()
 
 
+_ACTIVE_SLANG = re.compile(r'\b(jp|aman|on|work|luber|pecah)\b', re.IGNORECASE)
+
 def _score_confidence(p: PromoExtraction, msg: dict, recently_alerted_brands: set[str]) -> int:
     """Calculates a confidence score for a promotion.
 
@@ -255,6 +257,11 @@ def _score_confidence(p: PromoExtraction, msg: dict, recently_alerted_brands: se
     if normalize_brand(p.brand) != "Unknown": score += 30
     if _CURRENCY_DISCOUNT_PATTERN.search(p.summary):
         score += 30
+        
+    # BUG S1 FIX: Slang active signals count as implicit confirmation
+    if _ACTIVE_SLANG.search(p.summary or ''):
+        score += 15
+        
     if p.status == 'active': score += 15
     if msg.get('reply_to_msg_id'): score += 5
 

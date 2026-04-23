@@ -231,7 +231,7 @@ async def processing_loop() -> None:
                         brand_key  = normalize_brand(p.brand)
                         confidence = _score_confidence(p, m, recently_alerted_brands)
 
-                        if confidence >= 55:
+                        if confidence >= 45:
                             await db.save_pending_alert(
                                 brand_key, p.model_dump_json(), tg_link, m['timestamp'],
                                 source='ai', commit=False # commit=False + single commit at end
