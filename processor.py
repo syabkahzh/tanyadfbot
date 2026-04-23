@@ -17,7 +17,7 @@ from db import normalize_brand
 
 logger = logging.getLogger(__name__)
 
-# ── Pre-compiled Patterns (Performance Optimization) ─────────────────────────
+# ── Pre-compiled Patterns ─────────────────────────────────────────────────────
 _WORD_BOUNDARY_KEYWORDS = re.compile(
     r'\b(off|on|aman|work|bs|jp|mm)\b', re.IGNORECASE
 )
@@ -41,6 +41,13 @@ _JUNK_SUMMARY_PATTERN = re.compile(
 )
 _CURRENCY_DISCOUNT_PATTERN = re.compile(
     r'(rp\s?\d|rb\s?\d|\d+[kK]|disc|diskon|gratis|free|\d+\s*%|cashback)',
+    re.IGNORECASE
+)
+# Summaries that describe the message rather than the promo — always reject
+_META_SUMMARY_PATTERN = re.compile(
+    r'(user bertanya|tidak ada informasi|tidak disebutkan|no information|'
+    r'pesan ini|pertanyaan tentang|menanyakan|mencari tahu|'
+    r'meminta konfirmasi|menginformasikan bahwa)',
     re.IGNORECASE
 )
 
@@ -73,9 +80,7 @@ class TrendResponse(BaseModel):
     trends: List[TrendItem]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Prompt constants
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Prompt constants ──────────────────────────────────────────────────────────
 
 _EXTRACT_SYSTEM = """Kamu ekstrak promo dari percakapan grup deal hunter Indonesia (Discountfess).
 
@@ -89,6 +94,8 @@ JANGAN EKSTRAK: form isi data pribadi (NIK/KTP/alamat), kuis berhadiah yang butu
 Context ditulis sebagai C: sebelum MSG: — gunakan untuk resolve brand jika pesan utama cuma "aman" atau "on".
 Summary: 1 kalimat informatif, sertakan harga/diskon jika ada.
 Brand: Gunakan nama yang konsisten — "HopHop" bukan "Hophop". Jika ragu → "Unknown" (bukan "sunknown" atau variasi lain).
+
+PENTING: Jika kamu tidak yakin ada promo nyata, JANGAN isi summary dengan deskripsi tentang pesan itu sendiri seperti "User bertanya tentang..." atau "Pesan ini membahas...". Lebih baik SKIP sama sekali.
 
 CONTOH YANG HARUS DI-SKIP:
 - 'wkwkwk iya bener' → OOT
@@ -129,9 +136,7 @@ ATURAN OUTPUT:
 - Brand: nama konsisten, "Unknown" jika tidak jelas tapi promo valid"""
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Pre-filter keyword sets (no AI cost)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Pre-filter keyword sets ───────────────────────────────────────────────────
 
 _STRONG_KEYWORDS: set[str] = {
     'sfood','gfood','grab','shopee','gojek','tokped','tokopedia',
@@ -149,271 +154,219 @@ _STRONG_KEYWORDS: set[str] = {
 _JUNK_SUMMARIES: set[str] = {'summary','none','n/a','-','tidak ada','tidak ditemukan'}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Token-bucket rate limiter (per model)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Rate limiter ──────────────────────────────────────────────────────────────
 
 class _ModelSlot:
-    """Sliding-window token bucket (RPM) + Daily Quota (RPD) manager.
+    """Sliding-window RPM + daily RPD limiter.
 
-    Attributes:
-        model_id: The identifier of the AI model.
-        limit: Requests per minute (RPM) limit.
-        daily_limit: Optional daily requests (RPD) limit.
+    KEY DESIGN: acquire() is the ONLY way to register a call.
+    release_last() is synchronous so counts are accurate immediately.
     """
 
     def __init__(self, model_id: str, limit: int, daily_limit: int = 0) -> None:
-        """Initializes the ModelSlot.
-
-        Args:
-            model_id: Model identifier.
-            limit: RPM limit.
-            daily_limit: RPD limit.
-        """
-        self.model_id: str = model_id
-        self.limit: int    = limit
-        self.daily_limit: int = daily_limit
+        self.model_id = model_id
+        self.limit = limit
+        self.daily_limit = daily_limit
         self._calls: list[float] = []
-        self._daily_calls: list[float] = []  # Track 24h window
-        self._lock: asyncio.Lock = asyncio.Lock()
+        self._daily_calls: list[float] = []
+        self._lock = asyncio.Lock()
+
+    def _cleanup(self, now: float) -> None:
+        """Remove expired timestamps. Must be called under self._lock."""
+        self._calls = [t for t in self._calls if now - t < 60]
+        if self.daily_limit > 0:
+            self._daily_calls = [t for t in self._daily_calls if now - t < 86400]
 
     def available(self, now: float) -> int:
-        """Calculates current available RPM capacity.
+        """Current available RPM slots. Approximate — does not lock."""
+        cutoff = now - 60
+        active = sum(1 for t in self._calls if t > cutoff)
+        return max(0, self.limit - active)
 
-        Args:
-            now: Current monotonic timestamp.
-
-        Returns:
-            Number of slots remaining in the current minute.
-        """
-        self._calls = [t for t in self._calls if now - t < 60]
-        return self.limit - len(self._calls)
+    async def try_acquire_nowait(self) -> bool:
+        """Non-blocking attempt. Returns True and records the call if a slot is free."""
+        now = time.monotonic()
+        async with self._lock:
+            self._cleanup(now)
+            if self.daily_limit > 0 and len(self._daily_calls) >= self.daily_limit:
+                return False
+            if len(self._calls) < self.limit:
+                self._calls.append(now)
+                if self.daily_limit > 0:
+                    self._daily_calls.append(now)
+                return True
+        return False
 
     async def acquire(self, timeout: float = 90.0) -> bool:
-        """Waits for and claims a rate-limit slot.
-
-        Args:
-            timeout: Maximum seconds to wait before failing.
-
-        Returns:
-            True if slot was acquired, False if timeout or daily quota hit.
-        """
+        """Blocking acquire. Returns True if a slot was obtained before timeout."""
         deadline = time.monotonic() + timeout
         while True:
-            now = time.monotonic()
-            async with self._lock:
-                # 1. Cleanup old records
-                self._calls = [t for t in self._calls if now - t < 60]
-                if self.daily_limit > 0:
-                    self._daily_calls = [t for t in self._daily_calls if now - t < 86400]
-                
-                # 2. Check Daily Limit
-                if self.daily_limit > 0 and len(self._daily_calls) >= self.daily_limit:
-                    return False
-
-                # 3. Check RPM Limit
-                if len(self._calls) < self.limit:
-                    self._calls.append(now)
-                    if self.daily_limit > 0:
-                        self._daily_calls.append(now)
-                    return True
-            
-            if time.monotonic() >= deadline:
+            if await self.try_acquire_nowait():
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 return False
-            await asyncio.sleep(2)
+            await asyncio.sleep(min(2.0, remaining))
 
     def release_last(self) -> None:
-        """Removes the most recent call record from the trackers."""
-        async def _sync_release() -> None:
-            async with self._lock:
-                if self._calls:
-                    self._calls.pop()
-                if self.daily_limit > 0 and self._daily_calls:
-                    self._daily_calls.pop()
-        asyncio.create_task(_sync_release())
+        """Synchronously remove the most recent call record.
+
+        This is intentionally synchronous so the count is accurate the instant
+        this method returns — no fire-and-forget task races.
+        """
+        if self._calls:
+            self._calls.pop()
+        if self.daily_limit > 0 and self._daily_calls:
+            self._daily_calls.pop()
 
     def current_usage(self) -> int:
-        """Returns the number of slots used in the last 60 seconds.
-
-        Returns:
-            Used RPM count.
-        """
         now = time.monotonic()
-        return len([t for t in self._calls if now - t < 60])
-    
+        return sum(1 for t in self._calls if now - t < 60)
+
     def daily_usage(self) -> int:
-        """Returns the total number of calls in the last 24 hours.
-
-        Returns:
-            Used RPD count.
-        """
         now = time.monotonic()
-        return len([t for t in self._daily_calls if now - t < 86400])
+        return sum(1 for t in self._daily_calls if now - t < 86400)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 
 class GeminiProcessor:
-    """Orchestrates AI analysis using various Gemini models with load balancing."""
+    """Orchestrates AI analysis using Gemini/Gemma models with balanced load."""
 
     def __init__(self) -> None:
         """Initializes the GeminiProcessor."""
         self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
         self._dedup_lock = asyncio.Lock()
 
+        # Both models get the same RPM limit (11 each = 22 total)
         self._slots: dict[str, _ModelSlot] = {
-            Config.MODEL_ID:           _ModelSlot(Config.MODEL_ID,           11),
-            Config.MODEL_FALLBACK:     _ModelSlot(Config.MODEL_FALLBACK,     11),
+            Config.MODEL_ID:       _ModelSlot(Config.MODEL_ID,       11),
+            Config.MODEL_FALLBACK: _ModelSlot(Config.MODEL_FALLBACK, 11),
         }
-        # Round-robin index (which primary model to try first)
-        self._rr_idx: int = 0
 
-        # Expose _model_stats compatible shape for heartbeat_job
-        self._model_stats: dict[str, _ModelSlot] = {
-            mid: slot for mid, slot in self._slots.items()
-        }
+        # Strict round-robin index — incremented BEFORE use
+        self._rr_idx: int = 0
+        self._rr_lock: asyncio.Lock = asyncio.Lock()
+
+        # Expose _model_stats for heartbeat_job compatibility
+        self._model_stats: dict[str, _ModelSlot] = dict(self._slots)
 
     @staticmethod
     def _estimate_tokens(text: str | list[Any]) -> int:
-        """Roughly estimates token count for rate-limit awareness.
-
-        Args:
-            text: Input text or list of strings.
-
-        Returns:
-            Estimated token count.
-        """
+        """Roughly estimates token count for rate-limit awareness."""
         chars = sum(len(str(p)) for p in text) if isinstance(text, list) else len(str(text))
         return int(chars / 3.5) + 200
 
     async def _pick_model(self) -> str:
-        """Round-robin across primary models, picking the one with most headroom.
+        """Strictly alternating round-robin with fallback to the other model.
 
-        Acquires a slot atomically so it can never double-count.
-
-        Returns:
-            Model identifier of the slot that was acquired.
+        Returns the model_id whose slot has been acquired.
         """
         primaries = [Config.MODEL_ID, Config.MODEL_FALLBACK]
-        # Try both in round-robin order, non-blocking check first
-        for _ in range(2):
-            self._rr_idx = (self._rr_idx + 1) % len(primaries)
-            mid = primaries[self._rr_idx]
-            slot = self._slots[mid]
-            now = time.monotonic()
-            async with slot._lock:
-                slot._calls = [t for t in slot._calls if now - t < 60]
-                if len(slot._calls) < slot.limit:
-                    slot._calls.append(now)
-                    return mid
 
-        # Both full — concurrent wait:
-        logger.debug("Models at capacity, waiting for an available slot...")
-        tasks = []
-        for mid in primaries:
-            tasks.append(asyncio.create_task(self._slots[mid].acquire(timeout=45.0)))
-        
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        
-        # Cancel any pending acquires
-        for p in pending:
-            p.cancel()
-            
-        for task, mid in zip(tasks, primaries):
-            if task in done:
-                try:
-                    acquired = task.result()
-                    if acquired:
-                        return mid
-                except Exception:
-                    pass
-        
-        logger.warning("All models at capacity and timeout reached.")
-        raise TimeoutError("Model rate limits exhausted")
+        async with self._rr_lock:
+            self._rr_idx = (self._rr_idx + 1) % len(primaries)
+            primary_idx = self._rr_idx
+
+        primary = primaries[primary_idx]
+        secondary = primaries[1 - primary_idx]
+
+        # 1. Try primary non-blocking
+        if await self._slots[primary].try_acquire_nowait():
+            return primary
+
+        # 2. Try secondary non-blocking
+        if await self._slots[secondary].try_acquire_nowait():
+            return secondary
+
+        # 3. Both full — wait on whichever has more headroom (or primary if equal)
+        now = time.monotonic()
+        p_avail = self._slots[primary].available(now)
+        s_avail = self._slots[secondary].available(now)
+        wait_on = primary if p_avail >= s_avail else secondary
+
+        logger.debug(f"Both models at capacity, waiting on {wait_on}...")
+        acquired = await self._slots[wait_on].acquire(timeout=45.0)
+        if acquired:
+            return wait_on
+
+        # Last resort: wait on the other one
+        other = secondary if wait_on == primary else primary
+        acquired = await self._slots[other].acquire(timeout=45.0)
+        if acquired:
+            return other
+
+        raise TimeoutError("Both model slots exhausted — rate limit exceeded")
 
     async def _call(self, contents: Any, config: dict[str, Any], model_id: str, retries: int = 2) -> Any:
-        """Single-responsibility caller: takes an already-acquired model_id.
-
-        Retries on 429 by switching to the other primary, then last-resort.
-
-        Args:
-            contents: Content parts for the AI.
-            config: Model configuration.
-            model_id: Target model ID.
-            retries: Max retries on failure.
-
-        Returns:
-            The AI response or None on failure.
-        """
+        """Execute an AI call on an already-acquired model slot."""
         primaries = [Config.MODEL_ID, Config.MODEL_FALLBACK]
         target = model_id
+        slot_acquired = target  # track which slot we're holding
 
         for attempt in range(retries + 1):
             try:
-                logger.info(f"🤖 [AI] Requesting Gemini ({target})...")
+                logger.info(f"🤖 [AI] Requesting {target} (attempt {attempt + 1})...")
                 res = await self.client.aio.models.generate_content(
                     model=target, contents=contents, config=config
                 )
-                logger.info(f"✨ [AI] Received response from {target}")
+                logger.info(f"✨ [AI] Response from {target}")
                 return res
             except Exception as e:
                 err = str(e)
-                # Check for rate limit or internal errors
                 is_rate = "429" in err or "resource_exhausted" in err.lower()
                 is_internal = "500" in err or "internal" in err.lower()
 
                 if (is_rate or is_internal) and attempt < retries:
-                    # Log detail
-                    reason = "Rate-limited" if is_rate else "Internal Server Error"
-                    logger.warning(f"AI ({target}) {reason}: {err}. Attempt {attempt+1}/{retries+1}")
+                    reason = "Rate-limited" if is_rate else "Internal error"
+                    logger.warning(f"AI ({target}) {reason}: {err[:120]}. Retrying...")
 
-                    # Switch to the other primary if available
+                    # Release current slot synchronously
+                    self._slots[slot_acquired].release_last()
+
+                    # Try the other model
                     other = [m for m in primaries if m != target]
                     if other:
-                        if target in self._slots:
-                            self._slots[target].release_last()
-
-                        slot = self._slots[other[0]]
-                        # Shorter timeout for secondary acquisition
-                        acquired = await slot.acquire(timeout=10.0)
+                        acquired = await self._slots[other[0]].try_acquire_nowait()
+                        if not acquired:
+                            await asyncio.sleep(2.0)
+                            acquired = await self._slots[other[0]].acquire(timeout=10.0)
                         if acquired:
                             target = other[0]
-                            logger.info(f"Switched to {target} for retry.")
+                            slot_acquired = target
                             continue
-                    
-                    # If can't switch or switch also failed, back off
-                    wait = (3 * (attempt + 1)) if is_internal else (1.5 ** attempt)
+
+                    # Can't switch — back off and retry same model
+                    wait = (3.0 * (attempt + 1)) if is_internal else (1.5 ** attempt)
                     await asyncio.sleep(wait)
+                    # Re-acquire the original slot before retrying
+                    acquired = await self._slots[target].acquire(timeout=15.0)
+                    if acquired:
+                        slot_acquired = target
+                    else:
+                        logger.error(f"Could not re-acquire slot for {target}")
+                        return None
                     continue
 
                 if attempt == retries:
-                    logger.error(f"AI call failed in batch process after {retries} retries: {err}")
-                    if target in self._slots:
-                        self._slots[target].release_last()
+                    logger.error(f"AI call failed after {retries + 1} attempts: {err[:200]}")
+                    self._slots[slot_acquired].release_last()
                     return None
 
                 await asyncio.sleep(1.5 ** attempt)
 
+        self._slots[slot_acquired].release_last()
         return None
 
     # ── Public interface ──────────────────────────────────────────────────────
 
     def _is_worth_checking(self, text: str | None) -> bool:
-        """Pre-filter — skip low-signal messages without any AI call.
-
-        Args:
-            text: Message text to check.
-
-        Returns:
-            True if high-signal, False otherwise.
-        """
+        """Pre-filter: skip low-signal messages without any AI call."""
         if not text or not text.strip():
             return False
         t = text.strip().lower()
         if "saya membisukan dia" in t or "@dfautokick_bot" in t:
             return False
-
-        # Ignore common very short noise
         if len(t) < 4:
             return False
 
@@ -443,35 +396,22 @@ class GeminiProcessor:
         return bool(_PROMO.search(t))
 
     async def process_batch(self, messages: Sequence[dict[str, Any]], db: Any = None) -> list[PromoExtraction] | None:
-        """Extracts promos from a batch of messages using AI.
-
-        Args:
-            messages: List of message records.
-            db: Optional Database instance for context.
-
-        Returns:
-            List of extracted promos or None if AI failed.
-        """
+        """Extracts promos from a batch of messages using AI."""
         if not messages:
             return []
 
-        logger.debug(f"AI Batch: {len(messages)} messages")
         filtered = [m for m in messages if self._is_worth_checking(m.get('text'))]
-
         if not filtered:
-            logger.debug("All messages filtered as noise.")
             return []
 
         # Enrich with reply context
         if db:
             chat_id  = filtered[0]['chat_id']
             reply_ids = [m['reply_to_msg_id'] for m in filtered if m.get('reply_to_msg_id')]
-            # Use deep context (3 levels) to catch brand mentions further up the chain
             reply_map = await db.get_deep_context_bulk(reply_ids, chat_id, max_depth=3) if reply_ids else {}
             for m in filtered:
                 if m.get('reply_to_msg_id') and m['reply_to_msg_id'] in reply_map:
                     ctx_text = reply_map[m['reply_to_msg_id']]
-                    # Take last 150 chars of context to stay lean but capture recent details
                     m['context'] = f"[context: {ctx_text[-150:]}] "
                 else:
                     m['context'] = ""
@@ -499,19 +439,24 @@ class GeminiProcessor:
         )
 
         if response is None:
-            logger.error("AI call failed in batch process.")
             return None
 
         if not response.parsed:
             return []
 
-        valid = [
-            p for p in response.parsed.promos
-            if (p.summary or '').strip()
-               and len((p.summary or '').strip()) >= 8
-               and (p.summary or '').strip().lower() not in _JUNK_SUMMARIES
-        ]
-        logger.info(f"Extracted {len(valid)} promos from batch.")
+        valid = []
+        for p in response.parsed.promos:
+            summary = (p.summary or "").strip()
+            if not summary or len(summary) < 8:
+                continue
+            if summary.lower() in _JUNK_SUMMARIES:
+                continue
+            if _META_SUMMARY_PATTERN.search(summary):
+                logger.debug(f"Rejected meta-summary: {summary[:60]}")
+                continue
+            valid.append(p)
+
+        logger.info(f"Extracted {len(valid)} promos from batch of {len(filtered)} msgs.")
         return valid
 
     async def filter_duplicates(self, new_promos: Sequence[PromoExtraction],
@@ -527,13 +472,14 @@ class GeminiProcessor:
                 f"{normalize_brand(r.get('brand', '')).lower()}:{r.get('summary', '')[:35].lower()}"
                 for r in recent_alerts
             }
-            recent_alerts = list(recent_alerts)   # snapshot inside lock
+            recent_alerts_list = list(recent_alerts)   # snapshot inside lock
+        
         recent_brands_tail = [
             normalize_brand(r.get('brand', '')).lower()
-            for r in recent_alerts[-50:]
+            for r in recent_alerts_list[-50:]
         ]
         recent_brands_set = set(recent_brands_tail)
-        history_tail = list(recent_alerts[-50:])
+        history_tail = list(recent_alerts_list[-50:])
 
         unique: list[PromoExtraction] = []
         for p in new_promos:
@@ -562,14 +508,7 @@ class GeminiProcessor:
         return unique
 
     async def summarize_raw(self, texts: Sequence[str]) -> str:
-        """Summarizes a set of raw chat messages.
-
-        Args:
-            texts: Raw message strings.
-
-        Returns:
-            The AI-generated summary.
-        """
+        """Summarizes a set of raw chat messages."""
         if not texts:
             return "Tidak ada pesan."
         context  = "\n---\n".join(texts)
@@ -583,16 +522,7 @@ class GeminiProcessor:
 
     async def summarize_thread(self, parent_text: str, replies: Sequence[str],
                                 parent_photo: bytes | None = None) -> str:
-        """Summarizes a specific conversation thread.
-
-        Args:
-            parent_text: The root message.
-            replies: List of reply texts.
-            parent_photo: Optional photo attached to parent.
-
-        Returns:
-            The thread summary.
-        """
+        """Summarizes a specific conversation thread."""
         if not replies:
             return "Thread ini sedang ramai dibicarakan."
         reply_context = "\n- ".join(replies[:20])
@@ -601,7 +531,7 @@ class GeminiProcessor:
             f"BEBERAPA BALASAN DARI USER LAIN:\n- {reply_context}\n\n"
             "TUGASMU: Rangkum diskusi ini dalam 1-2 kalimat informatif."
         )
-        contents = [prompt]
+        contents: list[Any] = [prompt]
         if parent_photo:
             contents.append(genai.types.Part.from_bytes(data=parent_photo, mime_type="image/jpeg"))
 
@@ -614,15 +544,7 @@ class GeminiProcessor:
         return cast(str, response.text) if response else "Thread ini sedang ramai dibicarakan."
 
     async def answer_question(self, question: str, context: str) -> str:
-        """Answers a specific user inquiry based on provided context.
-
-        Args:
-            question: User question.
-            context: Contextual data.
-
-        Returns:
-            AI response.
-        """
+        """Answers a specific user inquiry based on provided context."""
         target = await self._pick_model()
         response = await self._call(
             contents=f"Pertanyaan: {question}\n\nKonteks:\n{context}",
@@ -633,16 +555,7 @@ class GeminiProcessor:
 
     async def process_image(self, image_bytes: bytes, caption: str | None,
                              original_msg_id: int) -> PromoExtraction | None:
-        """Processes an image to extract promotional info.
-
-        Args:
-            image_bytes: Raw image data.
-            caption: Optional text caption.
-            original_msg_id: Original Telegram message ID.
-
-        Returns:
-            Extraction data or None.
-        """
+        """Processes an image to extract promotional info."""
         has_promo   = bool(_PROMO.search(caption))  if caption else False
         has_nonpro  = bool(_NON_PROMO.search(caption)) if caption else False
         if has_nonpro and not has_promo:
@@ -673,14 +586,7 @@ class GeminiProcessor:
         return res
 
     async def generate_narrative(self, messages: Sequence[dict[str, Any]]) -> list[TrendItem]:
-        """Generates structured trend narratives for recent traffic.
-
-        Args:
-            messages: List of message records.
-
-        Returns:
-            List of TrendItem objects.
-        """
+        """Generates structured trend narratives for recent traffic."""
         if not messages:
             return []
         context = "\n- ".join([f"ID:{m['tg_msg_id']} {m['sender_name']}: {m['text']}" for m in messages[:50]])
@@ -695,16 +601,7 @@ class GeminiProcessor:
 
     async def interpret_keywords(self, hot_words: Sequence[str], window: int,
                                   context_msgs: Sequence[str]) -> str | None:
-        """Interprets the context behind a burst of specific keywords.
-
-        Args:
-            hot_words: Frequent words detected.
-            window: Time window.
-            context_msgs: Full messages for context.
-
-        Returns:
-            Brief explanation or None.
-        """
+        """Interprets the context behind a burst of specific keywords."""
         if not context_msgs:
             return None
         system = f"Ada kenaikan penggunaan kata: {', '.join(hot_words)} dlm {window} menit. Jelaskan singkat."

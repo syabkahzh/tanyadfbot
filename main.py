@@ -64,8 +64,15 @@ _in_progress_lock: asyncio.Lock = asyncio.Lock()
 _alerted_hot_threads: dict[int, tuple[int, datetime]] = {}
 _triage_cycle_counter: int   = 0
 
-# ── FIXED: Reduced to 5 concurrent AI batches to prevent head-of-line blocking.
-_AI_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(5)
+# ── FIXED: Reduced to 4 concurrent AI batches (2 models x 11 RPM = 22 RPM total capacity)
+_AI_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(4)
+
+_META_PATTERNS = re.compile(
+    r"(user bertanya|tidak ada informasi|tidak disebutkan|no information|"
+    r"pesan ini|pertanyaan tentang|menanyakan|mencari tahu|"
+    r"meminta konfirmasi|menginformasikan bahwa)",
+    re.IGNORECASE,
+)
 
 
 # ── Queue triage ───────────────────────────────────────────────────────────────
@@ -93,12 +100,12 @@ async def _auto_triage_queue() -> None:
         return
 
     async with _in_progress_lock:
-        current_in_progress = set(_in_progress_ids)
+        current_in_progress = frozenset(_in_progress_ids)
 
     async with db.conn.execute(
         "SELECT id, text, reply_to_msg_id FROM messages "
         "WHERE processed=0 ORDER BY id ASC LIMIT ?",
-        (triage_limit + 200,)
+        (triage_limit + 500,)
     ) as cur:
         rows = await cur.fetchall()
 
@@ -107,12 +114,13 @@ async def _auto_triage_queue() -> None:
         if r['id'] in current_in_progress:
             continue
         text = r['text'] or ''
-        # Replies always worth checking (parent context might have signal)
-        if r['reply_to_msg_id']:
+        
+        # FIX: replies are no longer unconditionally preserved.
+        # A reply with no promo signal is still noise.
+        if not text:
             continue
-        if gemini._is_worth_checking(text):
-            continue
-        discard_ids.append(r['id'])
+        if not gemini._is_worth_checking(text):
+            discard_ids.append(r['id'])
         if len(discard_ids) >= triage_limit:
             break
 
@@ -196,13 +204,7 @@ async def processing_loop() -> None:
                     if brand_norm == "Unknown" and len(summary_stripped) < 30:
                         continue
 
-                    # Never alert meta-commentary ("user bertanya tentang...")
-                    _META_PATTERNS = re.compile(
-                        r"(user bertanya|tidak ada informasi|tidak disebutkan"
-                        r"|no information|pesan ini|pertanyaan tentang|"
-                        r"menanyakan|mencari tahu)",
-                        re.IGNORECASE,
-                    )
+                    # Never alert meta-commentary
                     if _META_PATTERNS.search(summary_stripped):
                         continue
 
@@ -307,22 +309,18 @@ async def processing_loop() -> None:
         try:
             await db.ensure_connection()
 
-            _triage_cycle_counter += 1
             queue_size = await db.get_queue_size()
 
             # ── FIXED: Triage every cycle when queue is pressured
             if queue_size > 20:
                 await _auto_triage_queue()
+                queue_size = await db.get_queue_size()
 
             # ── FIXED: Cap maximum concurrent AI tasks strictly.
             current_tasks = shared._active_ai_tasks
-            if current_tasks >= 5:
-                logger.debug(f"AI saturated ({current_tasks} tasks). Sleeping 2s.")
-                await asyncio.sleep(2)
+            if current_tasks >= 4:
+                await asyncio.sleep(1.0)
                 continue
-
-            # Slots available: how many more batches can we start?
-            slots_free = 5 - current_tasks
 
             # Dynamic drain size based on pressure
             now_m = time.monotonic()
@@ -333,26 +331,29 @@ async def processing_loop() -> None:
             total_cap    = sum(s.limit for s in gemini._slots.values())
             headroom_pct = max(0.0, 1.0 - (total_used / max(total_cap, 1)))
 
-            if _queue_emergency_mode or queue_size > 100:
-                batch_size = int(40 + 40 * headroom_pct)   # 40–80
+            if _queue_emergency_mode:
+                batch_size = int(30 + 20 * headroom_pct)   # 30-50
             else:
-                batch_size = int(20 + 30 * headroom_pct)    # 20–50
+                batch_size = int(15 + 15 * headroom_pct)    # 15-30
 
-            # Limit by available AI slots
-            max_msgs = batch_size * slots_free
-
-            # Priority: very recent messages first
+            # ── CORE FIX: fetch AND claim inside the same lock acquisition ──────
+            combined: list[Any] = []
             async with _in_progress_lock:
-                current_in_progress = set(_in_progress_ids)
+                priority_raw = await db.get_unprocessed_recent(minutes=2, batch_size=batch_size + 20)
+                priority = [r for r in priority_raw if r['id'] not in _in_progress_ids]
 
-            priority_raw = await db.get_unprocessed_recent(minutes=2, batch_size=50)
-            priority = [r for r in priority_raw if r['id'] not in current_in_progress]
+                backlog_size = max(0, batch_size - len(priority))
+                if backlog_size > 0:
+                    old_raw = await db.get_unprocessed_batch(batch_size=backlog_size + 20)
+                    seen = {r['id'] for r in priority}
+                    old_batch = [r for r in old_raw if r['id'] not in seen and r['id'] not in _in_progress_ids]
+                else:
+                    old_batch = []
 
-            old_raw = await db.get_unprocessed_batch(batch_size=max_msgs + 50)
-            seen_ids = {m['id'] for m in priority}
-            old_batch = [r for r in old_raw if r['id'] not in seen_ids and r['id'] not in current_in_progress]
-
-            combined = (priority + old_batch)[:max_msgs]
+                combined = (priority + old_batch)[:batch_size]
+                if combined:
+                    for r in combined:
+                        _in_progress_ids.add(r['id'])
 
             if not combined:
                 await asyncio.sleep(2)
@@ -376,35 +377,26 @@ async def processing_loop() -> None:
 
             if noise_ids:
                 await db.mark_batch_processed(noise_ids)
+                async with _in_progress_lock:
+                    _in_progress_ids.difference_update(noise_ids)
                 logger.debug(f"🧹 Filtered {len(noise_ids)} noise messages from batch.")
 
             if not to_ai:
-                await asyncio.sleep(1)
-                continue
-
-            # ── FIXED: Claim IDs *before* spawning tasks to prevent double-processing
-            async with _in_progress_lock:
-                # Re-check — some may have been claimed by a concurrent iteration
-                unclaimed = [m for m in to_ai if m["id"] not in _in_progress_ids]
-                for m in unclaimed:
-                    _in_progress_ids.add(m['id'])
-
-            if not unclaimed:
                 await asyncio.sleep(0.5)
                 continue
 
-            # Split into batches of batch_size and spawn one task per batch
-            for i in range(0, len(unclaimed), batch_size):
-                chunk = unclaimed[i : i + batch_size]
-                if chunk:
-                    asyncio.create_task(process_one_batch(chunk))
-                    logger.info(f"🧬 Spawned batch task: {len(chunk)} msgs "
-                                f"(headroom: {headroom_pct:.0%}, queue: {queue_size})")
+            logger.info(f"🧬 Spawning batch: {len(to_ai)} msgs "
+                        f"(tasks={shared._active_ai_tasks}, headroom={headroom_pct:.0%}, queue={queue_size})")
 
-            await asyncio.sleep(0.1)
+            # ONE task per iteration. Sleep briefly so task registers in _active_ai_tasks.
+            asyncio.create_task(process_one_batch(to_ai))
+            await asyncio.sleep(0.3)
         except Exception as e:
             logger.error(f"processing_loop error: {e}", exc_info=True)
-            await bot.alert_error("processing_loop", e)
+            try:
+                await bot.alert_error("processing_loop", e)
+            except Exception:
+                pass
             await asyncio.sleep(5)
 
 # ── Alert watchdog (runtime) ───────────────────────────────────────────────────
