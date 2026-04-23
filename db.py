@@ -21,10 +21,10 @@ logger = logging.getLogger(__name__)
 _BRAND_CANON: dict[str, str] = {
     'hokben': 'HokBen', 'hoka ben': 'HokBen', 'h+k+b+n': 'HokBen', 'h+o+k+b+e+n': 'HokBen',
     'hophop': 'HopHop', 'hop hop': 'HopHop', 'h+p+h+p': 'HopHop',
-    'shopeefood': 'ShopeeFood', 'shopee food': 'ShopeeFood',
+    'sfood': 'ShopeeFood', 'shopeefood': 'ShopeeFood', 'shopee food': 'ShopeeFood',
     's+f+d': 'ShopeeFood', 'sfud': 'ShopeeFood',
     'sopifut': 'ShopeeFood', 'sopifud': 'ShopeeFood', 's+p+f+d': 'ShopeeFood',
-    'gofood': 'GoFood', 'go food': 'GoFood', 'g+f+d': 'GoFood', 'g+o+f+o+o+d': 'GoFood',
+    'gfood': 'GoFood', 'gofood': 'GoFood', 'go food': 'GoFood', 'g+f+d': 'GoFood', 'g+o+f+o+o+d': 'GoFood',
     'gopay': 'GoPay', 'gpy': 'GoPay', 'g+p+y': 'GoPay', 'g+o+p+a+y': 'GoPay',
     'kopken': 'Kopi Kenangan', 'kopi kenangan': 'Kopi Kenangan',
     'kenangan': 'Kopi Kenangan', 'k+p+k+n': 'Kopi Kenangan',
