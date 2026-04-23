@@ -117,7 +117,7 @@ async def commit_worker() -> None:
     logger.info("🗄️ Commit Worker started.")
     while not shared.get_stop_event().is_set():
         try:
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(3.0)
             if db.conn:
                 await db.conn.commit()
         except Exception as e:
@@ -395,53 +395,54 @@ async def main() -> None:
     )
 
     # ── Scheduled jobs ─────────────────────────────────────────────────────────
+    # Relaxed schedule to reduce event loop congestion
     scheduler.add_job(
-        jobs.image_processing_job, "interval", minutes=3,
+        jobs.image_processing_job, "interval", minutes=5,
         id="images", args=[db, gemini, listener]
     )
     scheduler.add_job(
-        jobs.hourly_digest_job, "cron", minute=0, hour="0,1,5-23",
+        jobs.hourly_digest_job, "cron", minute=1, hour="0,1,5-23", # offset by 1m
         id="digest", args=[db, gemini, bot, WIB]
     )
     scheduler.add_job(
-        jobs.midnight_digest_job, "cron", hour=5, minute=0,
+        jobs.midnight_digest_job, "cron", hour=5, minute=1, # offset by 1m
         id="midnight_digest", args=[db, gemini, bot]
     )
     scheduler.add_job(
-        jobs.halfhour_digest_job, "cron", minute="15,45",
+        jobs.halfhour_digest_job, "cron", minute="16,46", # offset by 1m
         id="halfhour_digest", args=[db, gemini, bot, WIB]
     )
     scheduler.add_job(
-        jobs.heartbeat_job, "cron", minute=30,
+        jobs.heartbeat_job, "cron", minute=31, # offset by 1m
         id="heartbeat", args=[db, gemini, bot, WIB]
     )
     scheduler.add_job(
-        jobs.hot_thread_job, "interval", minutes=8,
+        jobs.hot_thread_job, "interval", minutes=15,
         id="hot_threads",
         args=[db, gemini, listener, bot, WIB, _alerted_hot_threads]
     )
     scheduler.add_job(
-        jobs.time_mention_job, "interval", minutes=2,
+        jobs.time_mention_job, "interval", minutes=5,
         id="time_mentions", args=[db, bot]
     )
     scheduler.add_job(
-        jobs.trend_job, "interval", minutes=10,
+        jobs.trend_job, "interval", minutes=20,
         id="trend_job", args=[db, gemini, bot]
     )
     scheduler.add_job(
-        jobs.spike_detection_job, "interval", minutes=1,
+        jobs.spike_detection_job, "interval", minutes=5,
         id="spike", args=[db, gemini, bot]
     )
     scheduler.add_job(
-        jobs.dead_promo_reaper_job, "interval", minutes=15,
+        jobs.dead_promo_reaper_job, "interval", minutes=20,
         id="reaper", args=[db, bot]
     )
     scheduler.add_job(
-        jobs.confirmation_gate_job, "interval", minutes=3,
+        jobs.confirmation_gate_job, "interval", minutes=4,
         id="confirm_gate", args=[db]
     )
     scheduler.add_job(
-        jobs.db_maintenance_job, "cron", hour="*/4", minute=0,
+        jobs.db_maintenance_job, "cron", hour="*/4", minute=5,
         id="db_maint", args=[db, bot]
     )
     # NEW: runtime watchdog for stuck pending_alerts

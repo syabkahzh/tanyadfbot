@@ -245,7 +245,7 @@ class TelegramBot:
             latest_ts = (await cur.fetchone())[0]
 
         import os
-        db_size_mb = os.path.getsize(Config.DB_PATH) / (1024 * 1024)
+        db_size_mb = await asyncio.to_thread(os.path.getsize, Config.DB_PATH) / (1024 * 1024)
 
         # 2. System Resource Usage
         import psutil
@@ -870,7 +870,11 @@ class TelegramBot:
         """
         import subprocess
         try:
-            res = subprocess.check_output(["journalctl", "-u", "tanyadfbot", "-n", "20", "--no-pager"], text=True)
+            res = await asyncio.to_thread(
+                subprocess.check_output,
+                ["journalctl", "-u", "tanyadfbot", "-n", "20", "--no-pager"], 
+                text=True
+            )
             lines = res.split("\n")
             clean_log = "\n".join(lines[-20:])
             if update.message:

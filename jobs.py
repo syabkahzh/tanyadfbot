@@ -592,44 +592,34 @@ async def dead_promo_reaper_job(db: Database, bot: TelegramBot) -> None:
             return
             
         async with db.conn.execute("""
-            SELECT p.id, p.source_msg_id, p.brand, p.summary,
-                   m.tg_msg_id, m.chat_id
-            FROM promos p
-            LEFT JOIN messages m ON p.source_msg_id = m.id
-            WHERE p.status = 'active'
-              AND p.created_at >= strftime('%Y-%m-%d %H:%M:%S+00:00','now','-6 hours')
+            WITH ActivePromos AS (
+                SELECT p.id, m.tg_msg_id, m.chat_id
+                FROM promos p
+                JOIN messages m ON p.source_msg_id = m.id
+                WHERE p.status = 'active'
+                  AND p.created_at >= strftime('%Y-%m-%d %H:%M:%S+00:00','now','-6 hours')
+            ),
+            ReplySignals AS (
+                SELECT
+                    ap.id AS promo_id,
+                    SUM(CASE WHEN mrt.text LIKE '%nt%' OR mrt.text LIKE '%abis%' OR mrt.text LIKE '%habis%' OR mrt.text LIKE '%sold out%' OR mrt.text LIKE '%expired%' OR mrt.text LIKE '%kehabisan%' OR mrt.text LIKE '%ga bisa%' OR mrt.text LIKE '%gabisa%' OR mrt.text LIKE '%mati%' OR mrt.text LIKE '%hangus%' OR mrt.text LIKE '%ga work%' OR mrt.text LIKE '%off%' THEN 1 ELSE 0 END) AS expiry_votes,
+                    SUM(CASE WHEN mrt.text LIKE '%aman%' OR mrt.text LIKE '%on%' OR mrt.text LIKE '%work%' OR mrt.text LIKE '%jp%' OR mrt.text LIKE '%masih%' OR mrt.text LIKE '%bisa%' THEN 1 ELSE 0 END) AS active_votes
+                FROM ActivePromos ap
+                JOIN messages mrt ON mrt.reply_to_msg_id = ap.tg_msg_id AND mrt.chat_id = ap.chat_id
+                GROUP BY ap.id
+            )
+            SELECT promo_id FROM ReplySignals
+            WHERE expiry_votes >= 2 AND expiry_votes > active_votes
         """) as cur:
-            active_promos = await cur.fetchall()
-        if not active_promos:
-            return
+            promo_ids_to_reap = [r[0] for r in await cur.fetchall()]
 
-        reaped = 0
-        for promo in active_promos:
-            if not promo['tg_msg_id'] or not promo['chat_id']:
-                continue
-
-            reply_rows = await db.get_thread_replies(
-                promo['tg_msg_id'], promo['chat_id'], limit=30
+        if promo_ids_to_reap:
+            logger.info(f"💀 Reaper: found {len(promo_ids_to_reap)} promos to mark as expired.")
+            placeholders = ','.join('?' * len(promo_ids_to_reap))
+            await db.conn.execute(
+                f"UPDATE promos SET status='expired' WHERE id IN ({placeholders})",
+                promo_ids_to_reap
             )
-
-            if not reply_rows:
-                continue
-            expiry_votes = sum(
-                1 for r in reply_rows if EXPIRY_SIGNALS.search(r['text'] or '')
-            )
-            active_votes = sum(
-                1 for r in reply_rows
-                if re.search(r'\b(aman|on|work|jp|masih|masih bisa)\b',
-                             r['text'] or '', re.IGNORECASE)
-            )
-            if expiry_votes >= 2 and expiry_votes > active_votes:
-                await db.conn.execute(
-                    "UPDATE promos SET status='expired' WHERE id=?", (promo['id'],)
-                )
-                reaped += 1
-                logger.info(f"💀 Reaper: expired '{promo['brand']} — {promo['summary'][:40]}'")
-                
-        if reaped:
             await db.conn.commit()
         logger.info("✅ [Job] Finished dead_promo_reaper_job")
     except Exception as e:
