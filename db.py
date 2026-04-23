@@ -452,6 +452,8 @@ class Database:
             
         try:
             cutoff = _ts_str(datetime.now(timezone.utc) - timedelta(minutes=minutes))
+            # FIFO within the priority window: oldest-first so new arrivals can't
+            # starve a message that's been sitting for 9 minutes.
             async with self.conn.execute(
                 "SELECT id, text, timestamp, tg_msg_id, chat_id, reply_to_msg_id "
                 "FROM messages WHERE processed=0 AND timestamp >= ? ORDER BY timestamp ASC LIMIT ?",

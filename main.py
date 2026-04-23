@@ -152,7 +152,17 @@ async def processing_loop() -> None:
         """
         msg_ids = [m['id'] for m in msgs]
         ai_start = time.monotonic()
-        
+
+        async def _release_claims() -> None:
+            """Clear this batch from _in_progress_ids so the rows are fetchable again.
+
+            MUST be called on every exit path — leaving IDs stuck here is what
+            caused the major-latency bug: stuck IDs at the head of the queue
+            blocked `get_unprocessed_batch` from ever surfacing fresher backlog.
+            """
+            async with _in_progress_lock:
+                _in_progress_ids.difference_update(msg_ids)
+
         # SCOPE FIX: Semaphore only for the actual AI call
         async with _AI_SEMAPHORE:
             shared._active_ai_tasks += 1
@@ -160,10 +170,12 @@ async def processing_loop() -> None:
                 promos = await gemini.process_batch(msgs, db)
             except TimeoutError:
                 logger.warning(f"AI rate limits exhausted — requeuing {len(msgs)} msgs for later.")
+                await _release_claims()
                 return
             except Exception as e:
                 logger.error(f"AI processing error: {e}", exc_info=True)
                 await db.increment_ai_failure_count(msg_ids)
+                await _release_claims()
                 return
             finally:
                 shared._active_ai_tasks -= 1
@@ -173,6 +185,7 @@ async def processing_loop() -> None:
         if promos is None:
             logger.warning(f"AI returned None — incrementing failure count for {len(msgs)} msgs.")
             await db.increment_ai_failure_count(msg_ids)
+            await _release_claims()
             return
 
         try:
@@ -299,8 +312,7 @@ async def processing_loop() -> None:
             logger.error(f"Post-AI processing error: {e}", exc_info=True)
             await db.mark_batch_processed(msg_ids)
         finally:
-            async with _in_progress_lock:
-                _in_progress_ids.difference_update(msg_ids)
+            await _release_claims()
 
         logger.debug(f"Batch completed: {len(msgs)} messages.")
 
@@ -348,9 +360,14 @@ async def processing_loop() -> None:
 
                 backlog_needed = batch_size - len(priority)
                 if backlog_needed > 0:
-                    old_raw = await db.get_unprocessed_batch(batch_size=backlog_needed + 20)
+                    # Oversample generously so any residual stuck rows in
+                    # `_in_progress_ids` can't drown out fresher backlog.
+                    old_raw = await db.get_unprocessed_batch(batch_size=backlog_needed + 200)
                     seen = {r['id'] for r in priority}
-                    old_batch = [r for r in old_raw if r['id'] not in seen and r['id'] not in _in_progress_ids][:backlog_needed]
+                    old_batch = [
+                        r for r in old_raw
+                        if r['id'] not in seen and r['id'] not in _in_progress_ids
+                    ][:backlog_needed]
                 else:
                     old_batch = []
 
