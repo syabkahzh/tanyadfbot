@@ -301,9 +301,9 @@ async def processing_loop() -> None:
             # Dynamically adjust drain size based on AI headroom and queue pressure
             queue_size = await db.get_queue_size()
             if _queue_emergency_mode or queue_size > 100:
-                drain_size = int(80 + 100 * headroom_pct)   # 80–180
+                drain_size = int(60 + 80 * headroom_pct)   # 60–140
             else:
-                drain_size = int(35 + 65 * headroom_pct)    # 35–100
+                drain_size = int(30 + 50 * headroom_pct)    # 30–80
 
             old_raw = await db.get_unprocessed_batch(batch_size=drain_size + 100)
             seen_ids = {m['id'] for m in priority}

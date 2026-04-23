@@ -307,17 +307,29 @@ class GeminiProcessor:
                     slot._calls.append(now)
                     return mid
 
-        # Both full — sequential wait:
+        # Both full — concurrent wait:
+        logger.debug("Models at capacity, waiting for an available slot...")
+        tasks = []
         for mid in primaries:
-            slot = self._slots[mid]
-            acquired = await slot.acquire(timeout=45.0)
-            if acquired:
-                return mid
+            tasks.append(asyncio.create_task(self._slots[mid].acquire(timeout=45.0)))
         
-        return Config.MODEL_ID
-
-        logger.warning("All models at capacity or quota exhausted. Falling back to primary.")
-        return primaries[0]
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        
+        # Cancel any pending acquires
+        for p in pending:
+            p.cancel()
+            
+        for task, mid in zip(tasks, primaries):
+            if task in done:
+                try:
+                    acquired = task.result()
+                    if acquired:
+                        return mid
+                except Exception:
+                    pass
+        
+        logger.warning("All models at capacity and timeout reached.")
+        raise TimeoutError("Model rate limits exhausted")
 
     async def _call(self, contents: Any, config: dict[str, Any], model_id: str, retries: int = 2) -> Any:
         """Single-responsibility caller: takes an already-acquired model_id.
