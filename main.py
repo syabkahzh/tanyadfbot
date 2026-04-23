@@ -224,7 +224,7 @@ async def processing_loop() -> None:
                             if existing:
                                 try:
                                     texts = json.loads(existing['corroboration_texts'])
-                                except:
+                                except (json.JSONDecodeError, TypeError, ValueError):
                                     texts = []
                                 if snippet and snippet not in texts:
                                     texts.append(snippet)

@@ -6,6 +6,7 @@ and reliable message delivery with retry logic.
 
 import asyncio
 import html
+import json
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Sequence, Callable, TypeVar, cast
@@ -655,11 +656,10 @@ class TelegramBot:
         if corroborations > 0:
             alert_text += f"\n✅ <b>Confirmed by {corroborations} users</b>\n"
             try:
-                import json
                 snippets = json.loads(corroboration_texts)
                 for snip in snippets[:3]: # Show up to 3
                     alert_text += f"🔥 <i>\"{html.escape(snip)}\"</i>\n"
-            except:
+            except (json.JSONDecodeError, TypeError, ValueError):
                 pass
 
         for uid in self.auth_ids:
@@ -712,12 +712,11 @@ class TelegramBot:
             if p.links:
                 all_ext_links.extend(p.links)
             try:
-                import json
                 snips = json.loads(ctexts)
                 for s in snips:
                     if s not in all_snippets:
                         all_snippets.append(s)
-            except:
+            except (json.JSONDecodeError, TypeError, ValueError):
                 pass
 
         lines_block = "\n".join(lines)
