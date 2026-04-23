@@ -1,37 +1,61 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
 
-def get_int(key, default=0):
+def get_int(key: str, default: int = 0) -> int:
+    """Safely retrieves an integer from environment variables.
+
+    Args:
+        key: The environment variable key.
+        default: The default value if not found or invalid.
+
+    Returns:
+        The integer value.
+    """
     val = os.getenv(key)
     if not val or not val.strip():
         return default
-    return int(val)
+    try:
+        return int(val)
+    except ValueError:
+        return default
 
 class Config:
-    API_ID = get_int("TG_API_ID", 0)
-    API_HASH = os.getenv("TG_API_HASH", "")
-    BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-    OWNER_ID = get_int("MY_TELEGRAM_ID", 0)
-    EXTRA_AUTH_ID = get_int("EXTRA_AUTH_ID", 0)
-    TARGET_GROUP = os.getenv("TARGET_GROUP", "")
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+    """Application configuration management using environment variables."""
+    
+    API_ID: int = get_int("TG_API_ID", 0)
+    API_HASH: str = os.getenv("TG_API_HASH", "")
+    BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
+    OWNER_ID: int = get_int("MY_TELEGRAM_ID", 0)
+    EXTRA_AUTH_ID: int = get_int("EXTRA_AUTH_ID", 0)
+    TARGET_GROUP: str = os.getenv("TARGET_GROUP", "")
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 
-    DB_PATH = "tanya_main.db"
-    SESSION_NAME = "tg_session"
-    MODEL_ID = "gemma-4-31b-it"
-    MODEL_FALLBACK = "gemma-4-26b-a4b-it"
-    MODEL_LAST_RESORT = "gemini-3.1-flash-lite-preview"
-    MODEL_FAST = "gemma-4-26b-a4b-it"
+    # Paths using pathlib
+    BASE_DIR: Path = Path(__file__).parent
+    DB_PATH: str = "tanya_main.db"
+    SESSION_NAME: str = "tg_session"
+    
+    # Models
+    MODEL_ID: str = "gemma-4-31b-it"
+    MODEL_FALLBACK: str = "gemma-4-26b-a4b-it"
+    MODEL_LAST_RESORT: str = "gemini-1.5-flash-lite-preview"
+    MODEL_LAST_RESORT_RPD: int = 450
 
-    # Your timezone: WIB = UTC+7
-    TIMEZONE = "Asia/Jakarta"
-    UTC_OFFSET_HOURS = 7
+    # Timezone: WIB = UTC+7
+    TIMEZONE: str = "Asia/Jakarta"
+    UTC_OFFSET_HOURS: int = 7
 
     @classmethod
-    def validate(cls):
-        missing = []
+    def validate(cls) -> bool:
+        """Validates that all required configuration values are present.
+
+        Returns:
+            True if configuration is valid, False otherwise.
+        """
+        missing: list[str] = []
         if not cls.API_ID: missing.append("TG_API_ID")
         if not cls.API_HASH: missing.append("TG_API_HASH")
         if not cls.BOT_TOKEN: missing.append("BOT_TOKEN")
