@@ -343,6 +343,11 @@ async def processing_loop() -> None:
             total_cap    = sum(s.limit for s in gemini._slots.values())
             headroom_pct = max(0.0, 1.0 - (total_used / max(total_cap, 1)))
 
+            # Larger batches so the loop actually keeps up with deal-hunter
+            # group bursts (~150 msgs/min per HANDOVER.md). The previous
+            # 15–30 ceiling made the processing queue balloon under load,
+            # which (combined with the DESC priority ordering fixed in db.py)
+            # was the root cause of the 10–30-min alert latencies.
             if _queue_emergency_mode:
                 batch_size = int(50 + 50 * headroom_pct)   # 50-100
             else:

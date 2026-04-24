@@ -438,18 +438,23 @@ class Database:
             return []
 
     async def get_unprocessed_recent(self, minutes: int = 3, batch_size: int = 20) -> list[aiosqlite.Row]:
-        """Retrieves recent unprocessed messages within a time window.
+        """Retrieves recent unprocessed messages within a time window, oldest-first.
+
+        FIFO ordering (``ORDER BY timestamp ASC``) is intentional: processing
+        newest-first under bursty load starves messages that arrived 5–10 minutes
+        ago until they age out of the priority window entirely, causing the
+        multi-minute alert latencies observed in production.
 
         Args:
             minutes: Time window in minutes.
             batch_size: Maximum number of messages to retrieve.
 
         Returns:
-            A list of database rows for recent unprocessed messages.
+            A list of database rows for recent unprocessed messages, oldest first.
         """
         if not self.conn:
             return []
-            
+
         try:
             cutoff = _ts_str(datetime.now(timezone.utc) - timedelta(minutes=minutes))
             # FIFO within the priority window: oldest-first so new arrivals can't
