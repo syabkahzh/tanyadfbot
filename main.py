@@ -5,24 +5,19 @@ and alert broadcasting.
 """
 
 import asyncio
-import html
 import json
-import uuid
 import re
 import sys
 import time
 import logging
-from collections import deque
 from datetime import datetime, timezone, timedelta
 from typing import Any, Sequence
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import pytz
 
-from db import Database, normalize_brand
-from processor import GeminiProcessor, PromoExtraction, TrendItem
-from listener import TelethonListener
-from bot import TelegramBot
+from db import normalize_brand
+from processor import PromoExtraction
 from config import Config
 import jobs
 import shared
@@ -31,18 +26,14 @@ from shared import (
     db, gemini, bot, listener,
     _recent_alerts_history, _recent_alerts_lock,
     _parse_ts,
-    _alerted_aman_parents_deque, _aman_lock,
-    _BRAND_KEYWORDS, _make_tg_link, _guess_brand,
-    _flush_alert_buffer, _score_confidence,
-    _listener_reconnecting, _last_trend_alert, _last_spike_alert,
+    _make_tg_link, _flush_alert_buffer, _score_confidence,
     _reconnect_listener
 )
-from utils import _esc
 
 logger = logging.getLogger(__name__)
 
-listener: TelethonListener = TelethonListener(db)
-bot: TelegramBot           = TelegramBot(db, gemini)
+
+
 
 # Assign to shared for cross-module access
 shared.listener = listener

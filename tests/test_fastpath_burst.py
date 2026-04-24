@@ -14,7 +14,6 @@ messages that produced *zero* alerts. The cause was in `listener.py`:
 This module pins down the new, fixed semantics with unit tests that do not
 require network / DB / Telethon.
 """
-import re
 
 from listener import INSTANT_PATTERN, NEG_PATTERN, FAST_ALLCAPS
 from shared import _guess_brand

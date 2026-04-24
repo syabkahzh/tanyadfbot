@@ -1,4 +1,3 @@
-import pytest
 from utils import _esc
 
 def test_esc_none():

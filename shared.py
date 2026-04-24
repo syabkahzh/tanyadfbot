@@ -1,17 +1,15 @@
 import asyncio
 import difflib
-import html
 import logging
 import re
 import time as _time_mod
 import uuid
 from collections import OrderedDict, deque
 from datetime import datetime, timedelta, timezone
-from typing import Any, Sequence, cast
+from typing import Any
 
 from db import Database, normalize_brand
 from processor import GeminiProcessor, PromoExtraction, _CURRENCY_DISCOUNT_PATTERN
-from utils import _esc
 
 logger = logging.getLogger(__name__)
 
@@ -515,7 +513,8 @@ def _score_confidence(p: PromoExtraction, msg: dict, recently_alerted_brands: se
         Confidence score from 0 to 100.
     """
     score = 0
-    if normalize_brand(p.brand) != "Unknown": score += 30
+    if normalize_brand(p.brand) != "Unknown":
+        score += 30
     if _CURRENCY_DISCOUNT_PATTERN.search(p.summary):
         score += 30
         
@@ -523,8 +522,10 @@ def _score_confidence(p: PromoExtraction, msg: dict, recently_alerted_brands: se
     if _ACTIVE_SLANG.search(p.summary or ''):
         score += 15
         
-    if p.status == 'active': score += 15
-    if msg.get('reply_to_msg_id'): score += 5
+    if p.status == 'active':
+        score += 15
+    if msg.get('reply_to_msg_id'):
+        score += 5
 
     brand_key = normalize_brand(p.brand).lower()
     if brand_key in recently_alerted_brands:

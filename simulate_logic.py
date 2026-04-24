@@ -30,19 +30,27 @@ _SOCIAL_FILLER = re.compile(
 )
 
 def is_worth_checking(text: str) -> bool:
-    if not text or not text.strip(): return False
+    if not text or not text.strip():
+        return False
     t = text.strip().lower()
-    if "saya membisukan dia" in t or "@dfautokick_bot" in t: return False
+    if "saya membisukan dia" in t or "@dfautokick_bot" in t:
+        return False
     
     words = t.split()
-    if len(words) < 2: return False
+    if len(words) < 2:
+        return False
 
     question_words = {'ga','gak','nggak','apa','gimana','berapa','kapan','dimana','kenapa'}
-    if t.endswith('?') and words and words[0] in question_words: return False
-    if len(words) <= 3 and t.endswith('?'): return False
-    if _SOCIAL_FILLER.match(t): return False
-    if any(kw in t for kw in _STRONG_KEYWORDS): return True
-    if _WORD_BOUNDARY_KEYWORDS.search(t): return True
+    if t.endswith('?') and words and words[0] in question_words:
+        return False
+    if len(words) <= 3 and t.endswith('?'):
+        return False
+    if _SOCIAL_FILLER.match(t):
+        return False
+    if any(kw in t for kw in _STRONG_KEYWORDS):
+        return True
+    if _WORD_BOUNDARY_KEYWORDS.search(t):
+        return True
     return False
 
 # --- FROM listener.py ---
@@ -71,12 +79,17 @@ TRANSIT_NOISE_PATTERN = re.compile(
 FAST_ALLCAPS = re.compile(r'^[^a-z]*[A-Z][^a-z]*$')
 
 def check_fast_path(text: str) -> bool:
-    if not text: return False
-    if FAST_ALLCAPS.match(text) and len(text) > 3: return True
-    if NEG_PATTERN.search(text): return False
+    if not text:
+        return False
+    if FAST_ALLCAPS.match(text) and len(text) > 3:
+        return True
+    if NEG_PATTERN.search(text):
+        return False
     # Transit-noise gate: "aman kak rutenya" is NOT a deal signal
-    if 'aman' in text.lower() and TRANSIT_NOISE_PATTERN.search(text): return False
-    if INSTANT_PATTERN.search(text): return True
+    if 'aman' in text.lower() and TRANSIT_NOISE_PATTERN.search(text):
+        return False
+    if INSTANT_PATTERN.search(text):
+        return True
     return False
 
 # --- SAMPLES BATCH 3 ---
