@@ -295,6 +295,14 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_promo_brand "
             "ON promos(brand)"
         )
+
+        # ⚡ Bolt Optimization: Add index to pending_confirmations(brand)
+        # This speeds up the frequent lookup in main.py:
+        # "SELECT id, corroboration_texts FROM pending_confirmations WHERE brand=? LIMIT 1"
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_conf_brand "
+            "ON pending_confirmations(brand)"
+        )
         await self.conn.commit()
 
         # ── BUG D FIX: Recover stuck pending_alerts on every boot ─────────────
