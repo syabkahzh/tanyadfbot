@@ -247,11 +247,6 @@ async def processing_loop() -> None:
             async with _recent_alerts_lock:
                 history_snapshot = list(_recent_alerts_history)
                 filtered = await gemini.filter_duplicates(promos, history_snapshot)
-                for _p in filtered:
-                    _recent_alerts_history.append({
-                        "brand":   normalize_brand(_p.brand),
-                        "summary": _p.summary,
-                    })
 
             if filtered:
                 promos_to_save: list[tuple[int, PromoExtraction, str]] = []
@@ -309,8 +304,16 @@ async def processing_loop() -> None:
                                 brand_key, p.model_dump_json(), tg_link, m['timestamp'],
                                 source='ai', commit=False # commit=False + single commit at end
                             )
-                            # History was already appended inside the dedup
-                            # critical section above — don't double-append.
+                            t = shared.get_buffer_flush_task()
+                            if t is None or t.done():
+                                shared.set_buffer_flush_task(
+                                    asyncio.create_task(_flush_alert_buffer(delay=0.8))
+                                )
+                            async with _recent_alerts_lock:
+                                _recent_alerts_history.append({
+                                    "brand":   brand_key,
+                                    "summary": p.summary,
+                                })
                             recently_alerted_brands.add(brand_key.lower())
                         else:
                             if brand_norm == "Unknown":
