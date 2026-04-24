@@ -330,18 +330,20 @@ async def processing_loop() -> None:
             else:
                 batch_size = int(10 + 10 * headroom_pct)
 
+            # Optimization: Fetch candidates OUTSIDE of the lock to minimize contention
+            ancient_reserve = int(batch_size * 0.3)
+            if queue_size > 200: backlog_reserve = int(batch_size * 0.3)
+            elif queue_size > 50: backlog_reserve = int(batch_size * 0.2)
+            else: backlog_reserve = 0
+            priority_cap = max(1, batch_size - ancient_reserve - backlog_reserve)
+
+            # Query DB (can be slow under load)
+            ancient_raw = await db.get_unprocessed_ancient(min_age_minutes=15, batch_size=ancient_reserve + 100)
+            priority_raw = await db.get_unprocessed_recent(minutes=10, batch_size=priority_cap + 50)
+
             combined: list[Any] = []
             async with _in_progress_lock:
-                ancient_reserve = int(batch_size * 0.3)
-                if queue_size > 200: backlog_reserve = int(batch_size * 0.3)
-                elif queue_size > 50: backlog_reserve = int(batch_size * 0.2)
-                else: backlog_reserve = 0
-
-                priority_cap = max(1, batch_size - ancient_reserve - backlog_reserve)
-                ancient_raw = await db.get_unprocessed_ancient(min_age_minutes=15, batch_size=ancient_reserve + 100)
                 ancient = [r for r in ancient_raw if r['id'] not in _in_progress_ids][:ancient_reserve]
-
-                priority_raw = await db.get_unprocessed_recent(minutes=10, batch_size=priority_cap + 20)
                 seen_ids = {r['id'] for r in ancient}
                 priority = [r for r in priority_raw if r['id'] not in _in_progress_ids and r['id'] not in seen_ids][:priority_cap]
 
@@ -354,6 +356,7 @@ async def processing_loop() -> None:
                 else: old_batch = []
 
                 combined = ancient + priority + old_batch
+
                 if combined:
                     claim_ts = time.monotonic()
                     for r in combined: _in_progress_ids[r['id']] = claim_ts
@@ -383,13 +386,14 @@ async def processing_loop() -> None:
             candidates = []
             for r in combined:
                 text = r['text'] or ""
+                has_photo = bool(r['has_photo'])
                 # Tier 1: Dumb Regex (Zero cost)
-                if not gemini._is_worth_checking(text):
+                if not gemini._is_worth_checking(text, has_photo):
                     regex_noise_ids.append(r['id'])
                     continue
                 
-                # Safeguard: ALWAYS pass holy-grail keywords to AI
-                if _PROTECTED_SIGNALS.search(text):
+                # Safeguard: ALWAYS pass holy-grail keywords or photos to AI
+                if has_photo or _PROTECTED_SIGNALS.search(text):
                     to_ai.append({
                         "id":               r['id'],
                         "text":             r['text'],
@@ -397,6 +401,7 @@ async def processing_loop() -> None:
                         "tg_msg_id":        r['tg_msg_id'],
                         "chat_id":          r['chat_id'],
                         "reply_to_msg_id":  r['reply_to_msg_id'],
+                        "has_photo":        has_photo,
                     })
                     continue
 

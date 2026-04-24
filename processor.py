@@ -488,7 +488,7 @@ class GeminiProcessor:
         if not messages:
             return []
 
-        filtered = [m for m in messages if self._is_worth_checking(m.get('text'), bool(m.get('has_photo')))]
+        filtered = [m for m in messages if self._is_worth_checking(m.get('text'), bool(m['has_photo']))]
         if not filtered:
             return []
 
