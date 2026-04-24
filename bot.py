@@ -73,6 +73,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("status", self.cmd_status))
         self.app.add_handler(CommandHandler("diag", self.cmd_diag))
         self.app.add_handler(CommandHandler("today", self.cmd_today))
+        self.app.add_handler(CommandHandler("chart", self.cmd_chart))
         self.app.add_handler(CommandHandler("clear", self.cmd_clear))
         self.app.add_handler(CommandHandler("debug", self.cmd_debug))
         self.app.add_handler(CallbackQueryHandler(self.handle_callback))
@@ -309,6 +310,13 @@ class TelegramBot:
         """Summary of promos from the start of the current day (WIB) with pagination."""
         await self._render_today_page(update, page=1)
 
+    @_owner_only
+    async def cmd_chart(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Manually triggers a visual trend chart."""
+        import jobs
+        await update.message.reply_text("📊 *Generating chart...*", parse_mode=ParseMode.MARKDOWN)
+        await jobs.visual_trend_job(self.db, self)
+
     async def _render_today_page(self, update: Update | object, page: int = 1) -> None:
         """Helper to render a specific page of today's promos."""
         WIB = pytz.timezone("Asia/Jakarta")
@@ -406,16 +414,58 @@ class TelegramBot:
         
         if data.startswith("feed_"):
             orig_msg_id = int(data.split("_")[1])
-            user_id = update.effective_user.id
-            self._awaiting_feedback[user_id] = orig_msg_id
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("🏷 Wrong Brand", callback_data=f"fopt_{orig_msg_id}_brand"),
+                    InlineKeyboardButton("⏰ Expired", callback_data=f"fopt_{orig_msg_id}_expired")
+                ],
+                [
+                    InlineKeyboardButton("👯 Duplicate", callback_data=f"fopt_{orig_msg_id}_dup"),
+                    InlineKeyboardButton("⌨️ Custom Text", callback_data=f"fopt_{orig_msg_id}_custom")
+                ]
+            ]
             
             await self._send_markdown(
                 query,
-                "📝 **Correction Mode**\n\n"
-                "What's wrong with this promo? Send me the correct details "
-                "(e.g., 'Wrong brand, it should be McD' or 'Expired').\n\n"
-                "I will learn from this!"
+                "📝 **Feedback Mode**\n\n"
+                "What's wrong with this promo? Choose a quick option or select Custom to type it out.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
             )
+            return
+
+        elif data.startswith("fopt_"):
+            parts = data.split("_")
+            orig_msg_id = int(parts[1])
+            option = parts[2]
+            
+            if option == "custom":
+                user_id = update.effective_user.id
+                self._awaiting_feedback[user_id] = orig_msg_id
+                await query.message.reply_text(
+                    "⌨️ **Please type your correction now:**",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                # Instant save for structured options
+                mapping = {
+                    "brand": "Wrong brand identified",
+                    "expired": "Promo is already expired",
+                    "dup": "Duplicate of another alert"
+                }
+                correction = mapping.get(option, "Other error")
+                try:
+                    await self.db.conn.execute(
+                        "INSERT INTO ai_corrections (original_msg_id, correction) VALUES (?, ?)",
+                        (orig_msg_id, correction)
+                    )
+                    await self.db.conn.commit()
+                    await query.edit_message_text(
+                        text=f"✅ **Feedback Saved: {correction}**\n\nThank you, mawmaw!",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to save structured feedback: {e}")
             return
 
         elif data.startswith("fix_"):
@@ -606,6 +656,18 @@ class TelegramBot:
                     )
         except Exception as e:
             logger.error(f"Failed to send plain msg: {e}")
+
+    async def send_photo(self, photo: bytes, caption: str | None = None) -> None:
+        """Sends a photo to the owner."""
+        try:
+            await self.app.bot.send_photo(
+                chat_id=Config.OWNER_ID,
+                photo=photo,
+                caption=caption,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logger.error(f"Failed to send photo: {e}")
 
     async def alert_error(self, component: str, error: Exception, source_msg_id: int | None = None) -> None:
         """Alerts the owner about a system error (rate-limited)."""
