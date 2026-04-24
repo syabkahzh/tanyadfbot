@@ -766,10 +766,14 @@ async def time_mention_job(db: Database, bot: TelegramBot) -> None:
         noise_count = 0
         for r in rows:
             text  = r['text'] or ""
-            
-            # ALL IDs in the batch will be marked as "processed" by this job
-            # to avoid infinite scanning of the same old messages.
-            all_ids.append(r['id'])
+            msg_id = r['id']
+            all_ids.append(msg_id)
+
+            # FastText weighting: skip noise
+            ft_label, ft_conf = await shared.classify_one(text)
+            if ft_label == "__label__JUNK" and ft_conf > 0.85:
+                noise_count += 1
+                continue
 
             if not _is_time_signal_worthy(text):
                 noise_count += 1
@@ -777,12 +781,34 @@ async def time_mention_job(db: Database, bot: TelegramBot) -> None:
 
             link  = _make_tg_link(r['chat_id'], r['tg_msg_id'])
             now_str = datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%H:%M:%S')
+            
+            # Fetch parent context
+            context_header = ""
+            async with db.conn.execute(
+                "SELECT reply_to_msg_id FROM messages WHERE id = ?", (msg_id,)
+            ) as cur:
+                m_row = await cur.fetchone()
+                reply_to = m_row[0] if m_row else None
+            
+            if reply_to:
+                async with db.conn.execute(
+                    "SELECT text FROM messages WHERE tg_msg_id = ? AND chat_id = ? LIMIT 1",
+                    (reply_to, r['chat_id'])
+                ) as ccur:
+                    prow = await ccur.fetchone()
+                    if prow and prow[0]:
+                        p_text = prow[0].replace('\n', ' ')[:100]
+                        context_header = f"💬 _Balasan untuk: \"{p_text}...\"_\n\n"
+
             alert = (
-                f"🕒 <b>Sinyal Waktu:</b>\n{_esc(text)}\n"
-                f"⏰ Waktu: <code>{now_str}</code>\n\n"
-                f"🔗 <a href='{link}'>Lihat Pesan</a>"
+                f"🕒 **Sinyal Waktu:**\n"
+                f"{context_header}"
+                f"{text}\n"
+                f"⏰ Waktu: `{now_str}`\n\n"
+                f"🛡️ FT: `{ft_label.replace('__label__', '')} ({ft_conf:.2f})`"
+                f"\n\n🔗 Lihat Pesan:\n{link}"
             )
-            await bot.send_plain(alert, parse_mode=ParseMode.HTML)
+            await bot.send_plain(alert)
 
         if all_ids:
             # Chunk updates to avoid SQLite variable limits (standard is 999)
@@ -801,7 +827,9 @@ async def time_mention_job(db: Database, bot: TelegramBot) -> None:
         logger.info("✅ [Job] Finished time_mention_job")
     except Exception as e:
         logger.error(f"time_mention_job error: {e}", exc_info=True)
-        await bot.alert_error("time_mention_job", e)
+        # Attempt to find a reference ID if we crashed inside the loop
+        ref_id = locals().get('msg_id')
+        await bot.alert_error("time_mention_job", e, source_msg_id=ref_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

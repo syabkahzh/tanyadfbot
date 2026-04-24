@@ -240,6 +240,7 @@ class Database:
                 component    TEXT NOT NULL,
                 error_msg    TEXT,
                 traceback    TEXT,
+                source_msg_id INTEGER, -- Optional: link to a specific message
                 fixed        INTEGER DEFAULT 0, -- 1 if a fix was applied
                 retried      INTEGER DEFAULT 0, -- 1 if already retried
                 created_at   TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S+00:00','now'))
@@ -272,12 +273,9 @@ class Database:
             "ALTER TABLE pending_alerts ADD COLUMN corroboration_texts TEXT DEFAULT '[]'",
             "ALTER TABLE pending_alerts ADD COLUMN source TEXT DEFAULT 'ai'",
             "ALTER TABLE pending_confirmations ADD COLUMN corroboration_texts TEXT DEFAULT '[]'",
-            "ALTER TABLE promos ADD COLUMN valid_until TEXT DEFAULT ''",
-            "ALTER TABLE promos ADD COLUMN status_history TEXT DEFAULT '[]'",
-            "ALTER TABLE promos ADD COLUMN via_fastpath INTEGER DEFAULT 0",
             "ALTER TABLE promos ADD COLUMN reminder_fired INTEGER DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN skip_reason TEXT",
-            # created_at format fix for older rows
+            "ALTER TABLE failures ADD COLUMN source_msg_id INTEGER",
         ]
         for sql in migrations:
             try:
@@ -350,13 +348,14 @@ class Database:
 
     # ── Failures (Error Tracking) ─────────────────────────────────────────────
 
-    async def log_failure(self, component: str, error_msg: str, traceback: str) -> int:
+    async def log_failure(self, component: str, error_msg: str, traceback: str, source_msg_id: int | None = None) -> int:
         """Logs a system failure to the database.
 
         Args:
             component: The component that failed.
             error_msg: The error message.
             traceback: Full traceback string.
+            source_msg_id: Optional ID of the message that caused the failure.
 
         Returns:
             The ID of the logged failure.
@@ -364,9 +363,9 @@ class Database:
         if not self.conn: return 0
         try:
             cursor = await self.conn.execute("""
-                INSERT INTO failures (component, error_msg, traceback)
-                VALUES (?, ?, ?)
-            """, (component, error_msg, traceback))
+                INSERT INTO failures (component, error_msg, traceback, source_msg_id)
+                VALUES (?, ?, ?, ?)
+            """, (component, error_msg, traceback, source_msg_id))
             fid = cursor.lastrowid or 0
             await self.conn.commit()
             return fid
@@ -401,6 +400,29 @@ class Database:
             "UPDATE failures SET retried = 1 WHERE id = ?", (failure_id,)
         )
         await self.conn.commit()
+
+    async def requeue_message(self, msg_id: int) -> bool:
+        """Resets a message's state so it can be re-processed by AI.
+        
+        Args:
+            msg_id: The internal database ID of the message.
+            
+        Returns:
+            True if the message was found and reset, False otherwise.
+        """
+        if not self.conn: return False
+        try:
+            # Reset processed flag and failure count to allow re-pickup
+            await self.conn.execute("""
+                UPDATE messages 
+                SET processed = 0, ai_failure_count = 0, skip_reason = NULL
+                WHERE id = ?
+            """, (msg_id,))
+            await self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to requeue message {msg_id}: {e}")
+            return False
 
     # ── Messages ──────────────────────────────────────────────────────────────
 

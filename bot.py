@@ -429,13 +429,24 @@ class TelegramBot:
 
         elif data.startswith("retry_"):
             fid = int(data.split("_")[1])
-            # Mark failure as retried in DB
+            
+            # 1. Mark failure as retried in DB
             await self.db.mark_failure_retried(fid)
             
-            # Update original message to show it's retrying
+            # 2. Find the associated message ID and re-queue it
+            async with self.db.conn.execute("SELECT source_msg_id FROM failures WHERE id = ?", (fid,)) as cur:
+                row = await cur.fetchone()
+                msg_id = row[0] if row else None
+            
+            requeued = False
+            if msg_id:
+                requeued = await self.db.requeue_message(msg_id)
+            
+            # 3. Update original message to show it's retrying
             if query.message:
                 reply_markup = query.message.reply_markup
-                new_text = f"{query.message.text}\n\n🔄 **Retry Marked!** Re-queueing..."
+                status_text = "🔄 **Retry Marked!** Re-queueing..." if requeued else "🔄 **Retry Marked!** (No specific message found to re-queue)"
+                new_text = f"{query.message.text}\n\n{status_text}"
                 safe_text, entities = convert(new_text)
                 await query.edit_message_text(
                     text=safe_text,
@@ -590,14 +601,14 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Failed to send plain msg: {e}")
 
-    async def alert_error(self, component: str, error: Exception) -> None:
+    async def alert_error(self, component: str, error: Exception, source_msg_id: int | None = None) -> None:
         """Alerts the owner about a system error (rate-limited)."""
         err_msg = str(error)
         
         # Save to DB first
         import traceback
         tb = traceback.format_exc()
-        fid = await self.db.log_failure(component, err_msg, tb)
+        fid = await self.db.log_failure(component, err_msg, tb, source_msg_id=source_msg_id)
 
         # Rate-limit notifications: 120s per component
         import time; now = time.monotonic()
