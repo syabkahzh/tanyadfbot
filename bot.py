@@ -468,24 +468,32 @@ class TelegramBot:
             orig_msg_id = int(parts[1])
             vote = parts[2]
             
-            mapping = {"yes": "VERIFIED_PROMO", "no": "NOT_A_PROMO", "spam": "SPAM_OR_NOISE"}
-            correction = mapping.get(vote, "VOTED")
-            
-            try:
-                if vote in ("no", "spam"):
-                    await self.db.conn.execute(
-                        "INSERT INTO ai_corrections (original_msg_id, correction) VALUES (?, ?)",
-                        (orig_msg_id, correction)
-                    )
-                    await self.db.conn.commit()
-                
-                status_emoji = "✅" if vote == "yes" else ("❌" if vote == "no" else "🚫")
-                await query.edit_message_text(
-                    text=f"{query.message.text}\n\n{status_emoji} **Verdict: {vote.upper()}**",
+            if vote == "custom":
+                user_id = update.effective_user.id
+                self._awaiting_feedback[user_id] = orig_msg_id
+                await query.message.reply_text(
+                    "⌨️ **Please type your correction for this poll now:**",
                     parse_mode=ParseMode.MARKDOWN
                 )
-            except Exception as e:
-                logger.error(f"Failed poll vote: {e}")
+            else:
+                mapping = {"yes": "VERIFIED_PROMO", "no": "NOT_A_PROMO", "spam": "SPAM_OR_NOISE"}
+                correction = mapping.get(vote, "VOTED")
+                
+                try:
+                    if vote in ("no", "spam"):
+                        await self.db.conn.execute(
+                            "INSERT INTO ai_corrections (original_msg_id, correction) VALUES (?, ?)",
+                            (orig_msg_id, correction)
+                        )
+                        await self.db.conn.commit()
+                    
+                    status_emoji = "✅" if vote == "yes" else ("❌" if vote == "no" else "🚫")
+                    await query.edit_message_text(
+                        text=f"{query.message.text}\n\n{status_emoji} **Verdict: {vote.upper()}**",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception as e:
+                    logger.error(f"Failed poll vote: {e}")
             return
 
         elif data.startswith("fix_"):
@@ -689,8 +697,11 @@ class TelegramBot:
         keyboard = [
             [
                 InlineKeyboardButton("✅ Deal", callback_data=f"poll_{p_data.original_msg_id}_yes"),
-                InlineKeyboardButton("❌ No Deal", callback_data=f"poll_{p_data.original_msg_id}_no"),
-                InlineKeyboardButton("🚫 Spam", callback_data=f"poll_{p_data.original_msg_id}_spam")
+                InlineKeyboardButton("❌ No Deal", callback_data=f"poll_{p_data.original_msg_id}_no")
+            ],
+            [
+                InlineKeyboardButton("🚫 Spam", callback_data=f"poll_{p_data.original_msg_id}_spam"),
+                InlineKeyboardButton("⌨️ Custom", callback_data=f"poll_{p_data.original_msg_id}_custom")
             ],
             [InlineKeyboardButton("🛒 Buka Pesan", url=tg_link)]
         ]

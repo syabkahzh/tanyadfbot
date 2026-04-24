@@ -41,11 +41,13 @@ def export_v2():
     """)
     summaries = [clean_text(row['summary']) for row in cur.fetchall()]
     
-    # 1b. Fetch USER CORRECTIONS (Ground Truth - Force into PROMO)
+    # 1b. Fetch USER CORRECTIONS (Positive signals - still a promo)
+    # We exclude negative labels like NOT_A_PROMO or SPAM
     cur.execute("""
         SELECT DISTINCT m.text FROM messages m
         JOIN ai_corrections c ON m.id = c.original_msg_id
         WHERE m.text IS NOT NULL AND length(m.text) > 4
+        AND c.correction NOT IN ('NOT_A_PROMO', 'SPAM_OR_NOISE')
     """)
     corrections = [clean_text(row['text']) for row in cur.fetchall()]
     
@@ -84,6 +86,18 @@ def export_v2():
         AND id NOT IN (SELECT original_msg_id FROM ai_corrections)
     """, (modern_start_id,))
     modern_noise = [clean_text(row['text']) for row in cur.fetchall()]
+
+    # 2b. Fetch confirmed JUNK from user negative corrections
+    cur.execute("""
+        SELECT DISTINCT m.text FROM messages m
+        JOIN ai_corrections c ON m.id = c.original_msg_id
+        WHERE m.text IS NOT NULL AND length(m.text) > 4
+        AND c.correction IN ('NOT_A_PROMO', 'SPAM_OR_NOISE')
+    """)
+    negative_corrections = [clean_text(row['text']) for row in cur.fetchall()]
+    
+    # Merge and deduplicate modern noise
+    modern_noise = list(set(modern_noise + negative_corrections))
 
     # 3. Fetch Legacy REGEX Noise (to maintain volume)
     cur.execute("""
