@@ -40,6 +40,21 @@ def test_guess_brand():
     assert _guess_brand("halo apa kabar") == "Unknown"
     assert _guess_brand(None) == "Unknown"
 
+
+def test_guess_brand_alfamart_slang():
+    """Alfamart weekly-promo tags and receipt abbreviations should resolve to Alfamart."""
+    # Caption slang seen on struk confirmations
+    assert _guess_brand("aman jsm") == "Alfamart"
+    assert _guess_brand("Jsm alfa jam segini masih") == "Alfamart"
+    assert _guess_brand("jumat jsm luber") == "Alfamart"
+    assert _guess_brand("psm aja") == "Alfamart"
+    # Receipt header abbreviation
+    assert _guess_brand("AFM RAYA TUBAN") == "Alfamart"
+    assert _guess_brand("afm hero bogor") == "Alfamart"
+    # Must still require word boundary — no false positive on longer words
+    assert _guess_brand("tourism") == "Unknown"   # contains "sm" but not jsm/psm
+    assert _guess_brand("afmd cabang x") != "Alfamart"  # afmd is Alfamidi, not Alfamart
+
 def test_is_worth_checking():
     gp = GeminiProcessor()
     

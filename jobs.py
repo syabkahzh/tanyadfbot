@@ -263,6 +263,26 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                 promo = await gemini.process_image(photo_bytes, text or "", msg_id)
 
                 if promo:
+                    # Correct common mis-attribution where the vision model
+                    # latches onto a cross-promo PAYMENT banner (e.g.
+                    # "Cashback Saldo ShopeePay") instead of the MERCHANT
+                    # (the store where the deal redeems). If the caption
+                    # carries a merchant-specific slang tag (`jsm`/`psm`)
+                    # or a receipt abbreviation (`AFM`/`IDM`), trust that
+                    # over whatever payment-method brand the model returned.
+                    caption_l = (text or "").lower()
+                    PAY_BRANDS = {
+                        'shopeepay', 'spay', 'gopay', 'gpy', 'dana',
+                        'ovo', 'astrapay', 'aspay', 'linkaja', 'qris'
+                    }
+                    if promo.brand and promo.brand.lower().strip() in PAY_BRANDS:
+                        if re.search(r'\b(jsm|psm)\b', caption_l):
+                            promo.brand = 'Alfamart'
+                        elif re.search(r'\bafm\b', caption_l):
+                            promo.brand = 'Alfamart'
+                        elif re.search(r'\bidm\b', caption_l):
+                            promo.brand = 'Indomaret'
+
                     tg_link  = _make_tg_link(chat_id, tg_msg_id)
                     now_utc  = datetime.now(timezone.utc)
                     if (now_utc - shared._parse_ts(ts)).total_seconds() < 5400:
@@ -495,7 +515,7 @@ async def trend_job(db: Database, gemini: GeminiProcessor, bot: TelegramBot) -> 
         
         try:
             async with asyncio.timeout(60):
-                trends = await gemini.generate_narrative(msgs)
+                trends = await gemini.generate_narrative(msgs, db=db)
         except TimeoutError:
             logger.warning("AI timeout in trend_job. Skipping.")
             return
