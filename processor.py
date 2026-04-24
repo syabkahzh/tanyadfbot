@@ -477,13 +477,13 @@ class GeminiProcessor:
                 return list(new_promos)
 
             recent_keys = {
-                f"{normalize_brand(r.get('brand', '')).lower()}:{r.get('summary', '')[:35].lower()}"
+                f"{normalize_brand(r['brand']).lower()}:{r['summary'][:35].lower()}"
                 for r in recent_alerts
             }
             recent_alerts_list = list(recent_alerts)   # snapshot inside lock
         
         recent_brands_tail = [
-            normalize_brand(r.get('brand', '')).lower()
+            normalize_brand(r['brand']).lower()
             for r in recent_alerts_list[-50:]
         ]
         recent_brands_set = set(recent_brands_tail)
@@ -500,8 +500,8 @@ class GeminiProcessor:
                 p_words = set(re.findall(r'\w+', p.summary.lower())[:6])
                 is_dupe = False
                 for r in reversed(history_tail):
-                    if normalize_brand(r.get('brand', '')).lower() == brand_key:
-                        r_words = set(re.findall(r'\w+', r.get('summary', '').lower())[:6])
+                    if normalize_brand(r['brand']).lower() == brand_key:
+                        r_words = set(re.findall(r'\w+', r['summary'].lower())[:6])
                         if len(p_words & r_words) >= 2:
                             is_dupe = True
                             break
@@ -593,22 +593,19 @@ class GeminiProcessor:
         res.original_msg_id = original_msg_id
         return res
 
-    async def generate_narrative(self, messages: Sequence[dict[str, Any]],
+    async def generate_narrative(self, messages: Sequence[dict[str, Any] | Any],
                                   db: Any = None) -> list[TrendItem]:
         """Generates structured trend narratives for recent traffic."""
         if not messages:
             return []
 
         # Enrich with reply-parent text so the model can weight thread context.
-        # Without this the model reads "Bau" as a standalone complaint when in
-        # reality it's a reply to a `ywwa` (yang wangi-wangi aja) thread where
-        # `bau` is slang for an unlucky/stepchild account.
         parent_map: dict[int, str] = {}
         if db is not None:
             try:
-                chat_id = messages[0].get('chat_id')
-                reply_ids = [m.get('reply_to_msg_id') for m in messages
-                             if m.get('reply_to_msg_id')]
+                chat_id = messages[0]['chat_id']
+                reply_ids = [m['reply_to_msg_id'] for m in messages
+                             if m['reply_to_msg_id']]
                 if chat_id is not None and reply_ids:
                     parent_map = await db.get_deep_context_bulk(
                         reply_ids, chat_id, max_depth=2
@@ -619,7 +616,7 @@ class GeminiProcessor:
         lines: list[str] = []
         for m in messages[:50]:
             ctx = ""
-            rid = m.get('reply_to_msg_id')
+            rid = m['reply_to_msg_id']
             if rid and rid in parent_map:
                 parent_txt = (parent_map[rid] or "")[-120:].replace("\n", " ")
                 if parent_txt:
