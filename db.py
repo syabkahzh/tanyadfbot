@@ -273,6 +273,7 @@ class Database:
             "ALTER TABLE promos ADD COLUMN status_history TEXT DEFAULT '[]'",
             "ALTER TABLE promos ADD COLUMN via_fastpath INTEGER DEFAULT 0",
             "ALTER TABLE promos ADD COLUMN reminder_fired INTEGER DEFAULT 0",
+            "ALTER TABLE messages ADD COLUMN skip_reason TEXT",
             # created_at format fix for older rows
         ]
         for sql in migrations:
@@ -556,20 +557,27 @@ class Database:
             logger.error(f"DB get_unprocessed_recent error: {e}")
             return []
 
-    async def mark_batch_processed(self, ids: Sequence[int]) -> None:
-        """Marks a sequence of message IDs as processed.
+    async def mark_batch_processed(self, ids: Sequence[int], skip_reason: str | None = None) -> None:
+        """Marks a sequence of message IDs as processed with an optional skip reason.
 
         Args:
             ids: The sequence of internal database IDs to mark.
+            skip_reason: Optional reason for skipping (e.g., 'noise', 'regex', 'fasttext').
         """
         if not self.conn or not ids:
             return
             
         ph = ','.join('?' * len(ids))
         try:
-            await self.conn.execute(
-                f"UPDATE messages SET processed=1 WHERE id IN ({ph})", list(ids)
-            )
+            if skip_reason:
+                await self.conn.execute(
+                    f"UPDATE messages SET processed=1, skip_reason=? WHERE id IN ({ph})",
+                    [skip_reason, *list(ids)]
+                )
+            else:
+                await self.conn.execute(
+                    f"UPDATE messages SET processed=1 WHERE id IN ({ph})", list(ids)
+                )
             await self.conn.commit()
         except Exception as e:
             logger.error(f"DB mark_batch_processed error: {e}")
