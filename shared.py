@@ -364,6 +364,8 @@ async def _flush_alert_buffer(delay: float = 0.5) -> None:
         await db.conn.commit()
 
 
+_ACTIVE_SLANG = re.compile(r'\b(jp|aman|on|work|luber|pecah)\b', re.IGNORECASE)
+
 def _score_confidence(p: PromoExtraction, msg: dict, recently_alerted_brands: set[str]) -> int:
     """Calculates a confidence score for a promotion.
 
