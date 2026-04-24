@@ -65,7 +65,7 @@ NEG_PATTERN = re.compile(
     re.IGNORECASE
 )
 TRANSIT_NOISE_PATTERN = re.compile(
-    r'\b(rute|jalan|macet|kereta|stasiun|paket|kirim|kurir|perjalanan|nyampe)\b',
+    r'\b(rute|jalan|macet|kereta|stasiun|paket|kirim|kurir|perjalanan|nyampe)(nya|an)?\b',
     re.IGNORECASE
 )
 FAST_ALLCAPS = re.compile(r'^[^a-z]*[A-Z][^a-z]*$')

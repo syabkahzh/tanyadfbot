@@ -598,6 +598,99 @@ async def hot_thread_job(db: Database, gemini: GeminiProcessor, listener: Any, b
 # Time mentions
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Patterns for filtering "Sinyal Waktu" false positives.
+# Questions, speculation, retrospective, and OOT chatter should NOT fire alerts.
+_TIME_QUESTION_PATTERN = re.compile(
+    r'(\?'                                # ends/contains question mark
+    r'|^(apa|gimana|berapa|kapan|dimana|kenapa|mana|siapa|kok)\b'  # starts with question word
+    r'|\b(brp|jam brp|jam berapa|kah|ya\??)\s*$'  # trailing question markers
+    r'|\b(apa aja|apa saja|yg apa|yang apa|ada apa|war apa)\b'  # embedded question phrases
+    r'|\b(dong|dongg)\b'  # request/plea markers
+    r')',
+    re.IGNORECASE,
+)
+_TIME_SPECULATION_PATTERN = re.compile(
+    r'\b(kyny|kayaknya|kyknya|sepertinya|mungkin|entah|semoga|mudah.mudahan|'
+    r'klo gk slh|kalo ga salah|deh$|gatau|gak tau|ga tau|blm tau)\b',
+    re.IGNORECASE,
+)
+_TIME_RETROSPECTIVE_PATTERN = re.compile(
+    r'\b(tadi|kemarin|kemaren|semalam|tdi|pernah|waktu itu|dulu|barusan|'
+    r'td pagi|tadi pagi|tadi malem|kmrn|kmrin)\b',
+    re.IGNORECASE,
+)
+_TIME_COMPLAINT_FILLER = re.compile(
+    r'\b(males|lag mulu|lelet|lemot|kesel|sebel|nyesel|nyesek)\b|😭{2,}',
+    re.IGNORECASE,
+)
+# Actionable promo signals — stronger than generic _PROMO. A time-mention
+# should only fire if it indicates a concrete upcoming or active deal event.
+_TIME_STRONG_SIGNAL = re.compile(
+    r'\b(promo|diskon|cashback|voucher|gratis|flash|sale|deal|potongan|hemat|'
+    r'minbel|restock|ristok|limit|kuota|slot|claim|klaim|redeem|'
+    r'voc|vcr|cb|kesbek|cash back|ongkir|bonus)\b',
+    re.IGNORECASE,
+)
+_TIME_ACTIVE_STATUS = re.compile(
+    r'\b(on|aman|nyala|cair|masuk|berhasil|lancar|jp|work|luber|pecah|gacor)\b',
+    re.IGNORECASE,
+)
+_TIME_BRAND = re.compile(
+    r'\b(sfood|gfood|shopee|tokped|tokopedia|grab|gojek|alfamart|alfa|idm|indomaret|'
+    r'cgv|xxi|tsel|telkomsel|sopi|tukpo|gopay|spay|ovo|dana|'
+    r'solaria|kopken|chatime|gindaco|rotio|hero|tmrw|neo|seabank|saqu|'
+    r'shopee ?food|grab ?food|alfagift|alfamidi|hokben|mcd|kfc|jco)\b',
+    re.IGNORECASE,
+)
+
+
+def _is_time_signal_worthy(text: str) -> bool:
+    """Determine if a time-mentioning message deserves a Sinyal Waktu alert.
+
+    A worthy time signal is an *informational statement* about a future/current
+    promo event at a specific time. Reject:
+    - Questions about timing ("war apa jam 12?", "jam brp ya?")
+    - Speculation ("tengah malem on deh klo gk slh")
+    - Retrospective accounts ("tadi pagi", "kemarin", "semalam")
+    - Complaints/venting ("males bgt")
+    - Messages without both a brand AND an action/promo signal
+    """
+    if not text or not text.strip():
+        return False
+
+    t = text.strip()
+    tl = t.lower()
+
+    # ── Gate 1: reject questions ──
+    if _TIME_QUESTION_PATTERN.search(t):
+        return False
+
+    # ── Gate 2: reject speculation / uncertainty ──
+    if _TIME_SPECULATION_PATTERN.search(tl):
+        return False
+
+    # ── Gate 3: reject retrospective / past-tense ──
+    if _TIME_RETROSPECTIVE_PATTERN.search(tl):
+        return False
+
+    # ── Gate 4: reject complaints / emotional filler ──
+    if _TIME_COMPLAINT_FILLER.search(tl):
+        return False
+
+    # ── Gate 5: require BOTH a brand mention AND a promo/status signal ──
+    has_brand = bool(_TIME_BRAND.search(tl))
+    has_promo_signal = bool(_TIME_STRONG_SIGNAL.search(tl))
+    has_active_status = bool(_TIME_ACTIVE_STATUS.search(tl))
+
+    # Must have a brand AND at least one deal/status signal
+    if not has_brand:
+        return False
+    if not (has_promo_signal or has_active_status):
+        return False
+
+    return True
+
+
 async def time_mention_job(db: Database, bot: TelegramBot) -> None:
     """Monitors and alerts on relevant time-sensitive messages."""
     logger.info("⏰ [Job] Starting time_mention_job...")
@@ -613,14 +706,12 @@ async def time_mention_job(db: Database, bot: TelegramBot) -> None:
         if not rows:
             return
 
-        from processor import _PROMO
         from telegram.constants import ParseMode
 
         noise_ids = []
         for r in rows:
             text  = r['text'] or ""
-            # Only alert on time-mentions that also have deal signals
-            if not _PROMO.search(text):
+            if not _is_time_signal_worthy(text):
                 noise_ids.append(r['id'])
                 continue
 
