@@ -49,39 +49,16 @@ BOOT_CATCHUP_WINDOW: int       = 3600  # extended dynamically in main()
 
 _queue_emergency_mode: bool  = False
 
-# ── FIXED: Use a proper asyncio.Lock-guarded dict so tasks can safely
-#           claim IDs before yielding control. The value is the monotonic
-#           timestamp at claim time, used by the stuck-claim reaper below.
 _in_progress_ids: dict[int, float] = {}
 _in_progress_lock: asyncio.Lock = asyncio.Lock()
-
-# Claims older than this are considered stuck (AI crashed silently, task was
-# cancelled, etc.) and get evicted so the underlying message can be retried.
-#
-# Must be larger than the MAX total time an AI call can legitimately take,
-# INCLUDING inter-retry slot-acquisition overhead:
-#   3 attempts × 30s timeout
-# + 2 inter-retry slot acquires × 8s each (processor._call retry path)
-# + _pick_model overhead up to ~12s (two 8s slot.acquire() attempts)
-# = ~106s best case, up to 122s if both retry acquires fall through fallbacks.
-# 130s gives comfortable headroom while still recovering stuck claims in <2min.
 _IN_PROGRESS_MAX_AGE_SEC: float = 130.0
 
 _alerted_hot_threads: dict[int, tuple[int, datetime]] = {}
 _triage_cycle_counter: int   = 0
 
-# AI concurrency cap. Two Gemma models × 11 RPM = 22 RPM aggregate, and the
-# `_ModelSlot` limiter in `processor.py` already enforces that rate cap cleanly.
-# So this semaphore just exists to cap in-flight asyncio tasks (memory / event
-# loop scheduling pressure) — it is NOT the rate limit. Raised from 4 → 16 so
-# the pipeline can actually saturate 22 RPM during bursts. At ~1GB RAM / 2% CPU
-# budget, 16 in-flight batches is comfortably safe.
 _AI_MAX_INFLIGHT: int = 16
 _AI_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(_AI_MAX_INFLIGHT)
 
-# Strong references to spawned `process_one_batch` tasks. Without this set,
-# asyncio can GC a task whose only reference is the scheduler's weak queue
-# mid-flight, leaving claims stuck in `_in_progress_ids` until the reaper.
 _active_spawn_tasks: set[asyncio.Task] = set()
 
 _META_PATTERNS = re.compile(
@@ -95,11 +72,7 @@ _META_PATTERNS = re.compile(
 # ── Queue triage ───────────────────────────────────────────────────────────────
 
 async def _auto_triage_queue() -> None:
-    """Automated noise clearance for the message queue.
-
-    Triggers 'emergency mode' if queue size exceeds threshold, aggressively 
-    discarding low-signal messages to preserve processing bandwidth.
-    """
+    """Automated noise clearance for the message queue."""
     global _queue_emergency_mode
 
     queue = await db.get_queue_size()
@@ -131,9 +104,6 @@ async def _auto_triage_queue() -> None:
         if r['id'] in current_in_progress:
             continue
         text = r['text'] or ''
-        
-        # FIX: replies are no longer unconditionally preserved.
-        # A reply with no promo signal is still noise.
         if not gemini._is_worth_checking(text):
             discard_ids.append(r['id'])
         if len(discard_ids) >= triage_limit:
@@ -150,7 +120,6 @@ async def processing_loop() -> None:
     """Main background loop for message analysis and promotion extraction."""
     global _triage_cycle_counter, _queue_emergency_mode
 
-    # Seed dedup history from DB
     recent_promos = await db.get_recent_alert_brands(hours=6, limit=300)
     async with _recent_alerts_lock:
         for rp in recent_promos:
@@ -159,38 +128,19 @@ async def processing_loop() -> None:
                 "summary": rp['summary'],
             })
 
-    # Mark loop alive for the heartbeat watchdog below.
     shared.set_loop_tick()
 
     async def process_one_batch(msgs: Sequence[dict[str, Any]]) -> None:
-        """Processes a single batch of messages.
-
-        Args:
-            msgs: Sequence of message records to analyze.
-        """
+        """Processes a single batch of messages."""
         msg_ids = [m['id'] for m in msgs]
         ai_start = time.monotonic()
 
         async def _release_claims() -> None:
-            """Clear this batch from _in_progress_ids so the rows are fetchable again.
-
-            MUST be called on every exit path — leaving IDs stuck here is what
-            caused the major-latency bug: stuck IDs at the head of the queue
-            blocked `get_unprocessed_batch` from ever surfacing fresher backlog.
-            """
             async with _in_progress_lock:
                 for mid in msg_ids:
                     _in_progress_ids.pop(mid, None)
 
-        # Count this batch as in-flight from the moment it exists (including
-        # time spent waiting on the semaphore), so the processing_loop's
-        # spawn-gate accurately reflects total pending work — not just tasks
-        # that have already acquired the semaphore.
         shared._active_ai_tasks += 1
-        # Outer try/finally catches CancelledError / BaseException too, so a
-        # task that gets cancelled mid-AI-call still releases its claims.
-        # (Pre-fix: reaper had to mop up stuck claims every 5 min, causing
-        # multi-minute silences during API hiccups.)
         promos: list[Any] | None = None
         ai_failed = False
         try:
@@ -208,8 +158,6 @@ async def processing_loop() -> None:
             finally:
                 shared._active_ai_tasks -= 1
         except BaseException:
-            # CancelledError or any other BaseException: release claims so
-            # the rows become eligible for re-processing, then re-raise.
             await _release_claims()
             raise
 
@@ -227,23 +175,17 @@ async def processing_loop() -> None:
             await _release_claims()
             return
 
-        # AI call succeeded (promos is a list, possibly empty) — reset breaker.
         shared.record_ai_outcome(success=True)
 
         try:
-            # Atomically filter duplicates AND pre-reserve the surviving keys
-            # in `_recent_alerts_history` in a single critical section.
             async with _recent_alerts_lock:
                 history_snapshot = list(_recent_alerts_history)
                 filtered = await gemini.filter_duplicates(promos, history_snapshot)
 
-            # ── Training Data Collection: Identify what we skipped ──
+            # ── Training Data Collection ──
             success_ids_ai = {p.original_msg_id for p in promos}
-            # Definitive rejections by AI ("SKIP")
             ai_skip_ids = [mid for mid in msg_ids if mid not in success_ids_ai]
-            # Will collect IDs rejected by post-AI logic (meta, vague unknown)
             logic_skip_ids = []
-            # Will collect IDs that were found by AI but are duplicates
             filtered_ids = {p.original_msg_id for p in filtered}
             duplicate_ids = success_ids_ai - filtered_ids
 
@@ -252,7 +194,6 @@ async def processing_loop() -> None:
                 now_utc        = datetime.now(timezone.utc)
                 msg_id_map     = {m['id']: m for m in msgs}
 
-                # Pre-calculate recently alerted brands for confidence scoring
                 recently_alerted_brands = {
                     normalize_brand(r.get('brand', '')).lower()
                     for r in history_snapshot[-20:]
@@ -260,30 +201,22 @@ async def processing_loop() -> None:
 
                 for p in filtered:
                     m = msg_id_map.get(p.original_msg_id)
-                    if not m:
-                        continue
+                    if not m: continue
 
-                    # ── FIXED: Reject obviously bad extractions early ──────
                     brand_norm = normalize_brand(p.brand)
                     summary_stripped = (p.summary or "").strip()
 
-                    # Feed temporal context from AI-resolved brands
                     if brand_norm != "Unknown":
-                        await shared.context_tracker.update_brand(
-                            m['chat_id'], brand_norm
-                        )
+                        await shared.context_tracker.update_brand(m['chat_id'], brand_norm)
 
-                    # Never alert "Unknown" brand with vague summary
                     if brand_norm == "Unknown" and len(summary_stripped) < 30:
                         logic_skip_ids.append(m['id'])
                         continue
 
-                    # Never alert meta-commentary
                     if _META_PATTERNS.search(summary_stripped):
                         logic_skip_ids.append(m['id'])
                         continue
 
-                    # Supplement links from raw text
                     urls = re.findall(r'(https?://[^\s>]+)', m['text'] or "")
                     seen = set(p.links)
                     for url in urls:
@@ -298,7 +231,6 @@ async def processing_loop() -> None:
 
                     msg_time   = _parse_ts(m['timestamp'])
                     age_sec    = (now_utc - msg_time).total_seconds()
-                    
                     p.queue_time = age_sec - ai_duration
                     p.ai_time    = ai_duration
 
@@ -307,7 +239,6 @@ async def processing_loop() -> None:
                         confidence = _score_confidence(p, m, recently_alerted_brands)
 
                         if confidence >= 45:
-                            # Fuzzy dedup: skip near-identical alerts
                             if await shared.is_fuzzy_duplicate(brand_key, p.summary):
                                 continue
                             await db.save_pending_alert(
@@ -316,22 +247,13 @@ async def processing_loop() -> None:
                             )
                             t = shared.get_buffer_flush_task()
                             if t is None or t.done():
-                                shared.set_buffer_flush_task(
-                                    asyncio.create_task(_flush_alert_buffer(delay=0.8))
-                                )
+                                shared.set_buffer_flush_task(asyncio.create_task(_flush_alert_buffer(delay=0.8)))
                             async with _recent_alerts_lock:
-                                _recent_alerts_history.append({
-                                    "brand":   brand_key,
-                                    "summary": p.summary,
-                                })
+                                _recent_alerts_history.append({"brand": brand_key, "summary": p.summary})
                             recently_alerted_brands.add(brand_key.lower())
                         else:
-                            if brand_norm == "Unknown":
-                                # drop silently (but not logic skip, it's just low confidence)
-                                continue 
-
-                            if not db.conn:
-                                continue
+                            if brand_norm == "Unknown": continue
+                            if not db.conn: continue
                             async with db.conn.execute(
                                 "SELECT id, corroboration_texts FROM pending_confirmations WHERE brand=? LIMIT 1",
                                 (brand_key,)
@@ -342,50 +264,33 @@ async def processing_loop() -> None:
                             if existing:
                                 try:
                                     texts = json.loads(existing['corroboration_texts'])
-                                except (json.JSONDecodeError, TypeError, ValueError):
-                                    texts = []
-                                if snippet and snippet not in texts:
-                                    texts.append(snippet)
-                                
+                                except: texts = []
+                                if snippet and snippet not in texts: texts.append(snippet)
                                 await db.conn.execute(
-                                    "UPDATE pending_confirmations "
-                                    "SET corroborations=corroborations+1, corroboration_texts=? WHERE id=?",
+                                    "UPDATE pending_confirmations SET corroborations=corroborations+1, corroboration_texts=? WHERE id=?",
                                     (json.dumps(texts), existing['id'])
                                 )
                             else:
-                                expires_at = (
-                                    datetime.now(timezone.utc) + timedelta(minutes=5)
-                                ).strftime('%Y-%m-%d %H:%M:%S')
+                                expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')
                                 texts = [snippet] if snippet else []
                                 await db.conn.execute(
-                                    "INSERT INTO pending_confirmations "
-                                    "(brand, p_data_json, tg_link, timestamp, confidence, corroboration_texts, expires_at) "
-                                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                    (brand_key, p.model_dump_json(), tg_link,
-                                     m['timestamp'], confidence, json.dumps(texts), expires_at)
+                                    "INSERT INTO pending_confirmations (brand, p_data_json, tg_link, timestamp, confidence, corroboration_texts, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                    (brand_key, p.model_dump_json(), tg_link, m['timestamp'], confidence, json.dumps(texts), expires_at)
                                 )
 
-                # Commit all pending_alerts and confirmations in one shot
-                if db.conn:
-                    await db.conn.commit()
+                if db.conn: await db.conn.commit()
 
-                # Trigger flush for any new pending alerts
                 t = shared.get_buffer_flush_task()
                 if t is None or t.done():
-                    shared.set_buffer_flush_task(
-                        asyncio.create_task(_flush_alert_buffer(delay=0.6))
-                    )
+                    shared.set_buffer_flush_task(asyncio.create_task(_flush_alert_buffer(delay=0.6)))
 
-                # Final batch save and mark remaining processed
                 await db.save_promos_batch(promos_to_save, [p[0] for p in promos_to_save])
             
-            # ── Final Triage: Mark everything else with reasons ──
             final_skip_ids = list(set(ai_skip_ids) | set(logic_skip_ids))
             if final_skip_ids:
                 await db.mark_batch_processed(final_skip_ids, skip_reason="ai_skip")
             
             if duplicate_ids:
-                # Mark duplicates normally (already in promos table from before)
                 await db.mark_batch_processed(list(duplicate_ids))
 
         except Exception as e:
@@ -394,8 +299,6 @@ async def processing_loop() -> None:
         finally:
             await _release_claims()
 
-        logger.debug(f"Batch completed: {len(msgs)} messages.")
-
     logger.info("Processing Loop started.")
     while True:
         try:
@@ -403,136 +306,63 @@ async def processing_loop() -> None:
             await db.ensure_connection()
 
             queue_size = await db.get_queue_size()
-
-            # ── FIXED: Triage every cycle when queue is pressured
             if queue_size > 20:
                 await _auto_triage_queue()
                 queue_size = await db.get_queue_size()
 
-            # Cap maximum concurrent AI tasks. The real rate limit is enforced
-            # by `_ModelSlot` in processor.py (22 RPM total). This cap exists
-            # only to bound event-loop / memory pressure from too many
-            # simultaneously-spawned batches. When we're at the cap, we yield
-            # briefly rather than sleeping a full second so drain resumes ASAP.
             current_tasks = shared._active_ai_tasks
             if current_tasks >= _AI_MAX_INFLIGHT:
                 await asyncio.sleep(0.2)
                 continue
 
-            # Circuit breaker: during an AI-provider incident (Gemini 500
-            # storm, rolling timeouts), every batch fails in ~90s. Pausing
-            # for a cooldown lets the queue drain via fast-path / poison
-            # retirement rather than pile up behind doomed batches.
             circuit_wait = shared.ai_circuit_open_remaining()
             if circuit_wait > 0:
                 await asyncio.sleep(min(circuit_wait, 2.0))
                 continue
 
-            # Dynamic drain size based on RPM pressure
             now_m = time.monotonic()
-            total_used = sum(
-                len([t for t in slot._calls if now_m - t < 60])
-                for slot in gemini._slots.values()
-            )
+            total_used = sum(len([t for t in slot._calls if now_m - t < 60]) for slot in gemini._slots.values())
             total_cap    = sum(s.limit for s in gemini._slots.values())
             headroom_pct = max(0.0, 1.0 - (total_used / max(total_cap, 1)))
 
-            # Smaller batches → lower per-message latency + more parallelism.
-            # Sweet spot for gemma-4-31b-it: 15–25 msgs per call (~3–6s each).
-            # Under emergency pressure we can size up a bit for throughput, but
-            # never so large that a single batch stalls the drain pipeline.
-            # Batch-size cap at 25 is deliberate: Gemini's Gemma-4 models
-            # time out erratically on very large prompts (observed ≥50-msg
-            # batches hanging forever with no response), so we keep any
-            # single batch small enough that (a) it completes fast under
-            # normal latency, and (b) a stall on one batch doesn't take
-            # down a huge chunk of the queue.
             if _queue_emergency_mode:
-                batch_size = int(15 + 10 * headroom_pct)   # 15–25
+                batch_size = int(15 + 10 * headroom_pct)
             else:
-                batch_size = int(10 + 10 * headroom_pct)   # 10–20
+                batch_size = int(10 + 10 * headroom_pct)
 
-            # ── CORE FIX: fetch AND claim inside the same lock acquisition ──────
-            #
-            # 3-tier queue policy — designed so NO row can sit >~3 min under
-            # any realistic queue shape:
-            #
-            #   ancient_reserve  — rows >= 15 min old. Always claim ≥ 30% of
-            #                      the batch from the very tail of the queue.
-            #                      This is the anti-starvation guarantee: a
-            #                      row that got stuck for 15 min skips ahead
-            #                      of fresher backlog and gets processed.
-            #   priority         — rows < 10 min old, FIFO within that window.
-            #   backlog_reserve  — rows between 10–15 min old, catching the
-            #                      middle tier so the handoff is smooth.
-            #
-            # Previously a row that missed the 10 min window drained at 25%
-            # of the batch, and the `_last_observed_ancient_age` telemetry
-            # showed rows occasionally sitting 20+ min. The 30% ancient
-            # reserve caps the observed age tightly.
             combined: list[Any] = []
             async with _in_progress_lock:
-                ancient_reserve = int(batch_size * 0.3)  # always 30%
-                if queue_size > 200:
-                    backlog_reserve = int(batch_size * 0.3)
-                elif queue_size > 50:
-                    backlog_reserve = int(batch_size * 0.2)
-                else:
-                    backlog_reserve = 0
+                ancient_reserve = int(batch_size * 0.3)
+                if queue_size > 200: backlog_reserve = int(batch_size * 0.3)
+                elif queue_size > 50: backlog_reserve = int(batch_size * 0.2)
+                else: backlog_reserve = 0
 
                 priority_cap = max(1, batch_size - ancient_reserve - backlog_reserve)
+                ancient_raw = await db.get_unprocessed_ancient(min_age_minutes=15, batch_size=ancient_reserve + 100)
+                ancient = [r for r in ancient_raw if r['id'] not in _in_progress_ids][:ancient_reserve]
 
-                # Tier 1: ancient rows (>15 min old) — always first to claim
-                ancient_raw = await db.get_unprocessed_ancient(
-                    min_age_minutes=15, batch_size=ancient_reserve + 100,
-                )
-                ancient = [
-                    r for r in ancient_raw
-                    if r['id'] not in _in_progress_ids
-                ][:ancient_reserve]
-
-                # Tier 2: fresh priority (<10 min old)
-                priority_raw = await db.get_unprocessed_recent(
-                    minutes=10, batch_size=priority_cap + 20,
-                )
+                priority_raw = await db.get_unprocessed_recent(minutes=10, batch_size=priority_cap + 20)
                 seen_ids = {r['id'] for r in ancient}
-                priority = [
-                    r for r in priority_raw
-                    if r['id'] not in _in_progress_ids and r['id'] not in seen_ids
-                ][:priority_cap]
+                priority = [r for r in priority_raw if r['id'] not in _in_progress_ids and r['id'] not in seen_ids][:priority_cap]
 
-                # Tier 3: middle backlog (10–15 min old or whatever's left)
                 filled = len(ancient) + len(priority)
                 backlog_needed = batch_size - filled
                 if backlog_needed > 0:
-                    # Oversample generously so any residual stuck rows in
-                    # `_in_progress_ids` can't drown out fresher backlog.
                     old_raw = await db.get_unprocessed_batch(batch_size=backlog_needed + 200)
                     seen_ids.update(r['id'] for r in priority)
-                    old_batch = [
-                        r for r in old_raw
-                        if r['id'] not in seen_ids and r['id'] not in _in_progress_ids
-                    ][:backlog_needed]
-                else:
-                    old_batch = []
+                    old_batch = [r for r in old_raw if r['id'] not in seen_ids and r['id'] not in _in_progress_ids][:backlog_needed]
+                else: old_batch = []
 
                 combined = ancient + priority + old_batch
                 if combined:
                     claim_ts = time.monotonic()
-                    for r in combined:
-                        _in_progress_ids[r['id']] = claim_ts
+                    for r in combined: _in_progress_ids[r['id']] = claim_ts
 
-                # Telemetry — max observed claim age so /diag can report it
                 if ancient:
                     try:
-                        oldest_age = max(
-                            (datetime.now(timezone.utc)
-                             - _parse_ts(r['timestamp'])).total_seconds()
-                            for r in ancient
-                        )
+                        oldest_age = max((datetime.now(timezone.utc) - _parse_ts(r['timestamp'])).total_seconds() for r in ancient)
                         shared._last_observed_ancient_age = oldest_age
-                    except Exception:
-                        pass
+                    except: pass
 
             if not combined:
                 await asyncio.sleep(2)
@@ -541,17 +371,9 @@ async def processing_loop() -> None:
             # PRE-FILTER OPTIMIZATION: 
             to_ai = []
             regex_noise_ids = []
-            semantic_noise_ids = []
+            fasttext_noise_ids = []
             
-            for r in combined:
-                # Tier 1: Dumb Regex (Zero cost)
-                if not gemini._is_worth_checking(r['text']):
-                    regex_noise_ids.append(r['id'])
-                    continue
-                
-                # ── Level 2 Filter: Semantic Analysis (The Traffic Cop) ──
-            # We only let the model kill a message if it's NOT a high-signal keyword.
-            # This prevents the model from accidentally dropping "aman jsm" or "jp".
+            # Level 2 Safeguard: Protect strong signals from model error
             _PROTECTED_SIGNALS = re.compile(r'\b(jsm|psm|aman|on|jp|work|luber|pecah)\b', re.IGNORECASE)
             
             for r in combined:
@@ -561,124 +383,60 @@ async def processing_loop() -> None:
                     regex_noise_ids.append(r['id'])
                     continue
                 
-                # Tier 2: FastText Semantic Filter
-                # IF the message contains a protected word, we ALWAYS pass it to AI (Safe path)
+                # IF the message contains a protected word, we ALWAYS pass it to AI
                 if _PROTECTED_SIGNALS.search(text):
-                    to_ai.append({
-                        "id":               r['id'],
-                        "text":             r['text'],
-                        "timestamp":        r['timestamp'],
-                        "tg_msg_id":        r['tg_msg_id'],
-                        "chat_id":          r['chat_id'],
-                        "reply_to_msg_id":  r['reply_to_msg_id'],
-                    })
+                    to_ai.append({"id":r['id'],"text":r['text'],"timestamp":r['timestamp'],"tg_msg_id":r['tg_msg_id'],"chat_id":r['chat_id'],"reply_to_msg_id":r['reply_to_msg_id']})
                     continue
 
-                # Otherwise, let the Traffic Cop decide
-                label, confidence = await asyncio.to_thread(shared.predict_is_promo, text)
-                
-                if label == "__label__JUNK" and confidence > 0.85:
-                    semantic_noise_ids.append(r['id'])
+                # Tier 2: FastText Semantic Filter
+                label, confidence = await shared.classify(text)
+                if label == "__label__JUNK" and confidence >= 0.88:
+                    fasttext_noise_ids.append(r['id'])
                     continue
 
-                to_ai.append({
-                    "id":               r['id'],
-                    "text":             r['text'],
-                    "timestamp":        r['timestamp'],
-                    "tg_msg_id":        r['tg_msg_id'],
-                    "chat_id":          r['chat_id'],
-                    "reply_to_msg_id":  r['reply_to_msg_id'],
-                })
+                to_ai.append({"id":r['id'],"text":r['text'],"timestamp":r['timestamp'],"tg_msg_id":r['tg_msg_id'],"chat_id":r['chat_id'],"reply_to_msg_id":r['reply_to_msg_id']})
 
-            # Mark regex-killed noise
             if regex_noise_ids:
                 await db.mark_batch_processed(regex_noise_ids, skip_reason="regex")
                 async with _in_progress_lock:
-                    for nid in regex_noise_ids:
-                        _in_progress_ids.pop(nid, None)
-                logger.debug(f"🧹 Filtered {len(regex_noise_ids)} noise messages from batch (reason: regex).")
+                    for nid in regex_noise_ids: _in_progress_ids.pop(nid, None)
 
-            # Mark high-confidence semantic noise
-            if semantic_noise_ids:
-                await db.mark_batch_processed(semantic_noise_ids, skip_reason="ai_skip")
+            if fasttext_noise_ids:
+                await db.mark_batch_processed(fasttext_noise_ids, skip_reason="fasttext")
                 async with _in_progress_lock:
-                    for nid in semantic_noise_ids:
-                        _in_progress_ids.pop(nid, None)
-                logger.debug(f"🛡️ Traffic Cop: Filtered {len(semantic_noise_ids)} messages (high-confidence JUNK).")
+                    for nid in fasttext_noise_ids: _in_progress_ids.pop(nid, None)
+                logger.debug(f"🛡️ Traffic Cop: Filtered {len(fasttext_noise_ids)} messages (reason: fasttext).")
 
             if not to_ai:
                 await asyncio.sleep(0.5)
                 continue
 
-            logger.info(f"🧬 Spawning batch: {len(to_ai)} msgs "
-                        f"(tasks={shared._active_ai_tasks}, headroom={headroom_pct:.0%}, queue={queue_size})")
-
-            # Spawn one task per iteration and yield briefly so the new task
-            # registers in `_active_ai_tasks` before we re-check the cap.
-            # 50ms is enough for the asyncio scheduler to run the task up to
-            # its first `await`, without artificially throttling drain rate.
+            logger.info(f"🧬 Spawning batch: {len(to_ai)} msgs (tasks={shared._active_ai_tasks}, headroom={headroom_pct:.0%}, queue={queue_size})")
             shared.mark_batch_spawned()
-            # Save a reference to the task so it isn't GC'd mid-flight.
-            # Under heavy load Python's task finalizer can collect a task
-            # whose only reference is the asyncio loop's internal deque
-            # if no one awaits it; if that fires before `finally` in
-            # process_one_batch, the claims leak. Saving and discarding
-            # via add_done_callback closes the window entirely.
             _spawned_task = asyncio.create_task(process_one_batch(to_ai))
             _active_spawn_tasks.add(_spawned_task)
             _spawned_task.add_done_callback(_active_spawn_tasks.discard)
             await asyncio.sleep(0.05)
         except Exception as e:
             logger.error(f"processing_loop error: {e}", exc_info=True)
-            try:
-                await bot.alert_error("processing_loop", e)
-            except Exception:
-                pass
+            try: await bot.alert_error("processing_loop", e)
+            except: pass
             await asyncio.sleep(5)
 
 # ── Runtime self-heal watchdogs ────────────────────────────────────────────────
 
 async def _alert_watchdog():
-    """Un-stick `pending_alerts` rows orphaned by mid-flush crashes."""
     await db.recover_stuck_alerts()
 
-
 async def _active_ai_tasks_reconciler() -> None:
-    """Self-heal the `_active_ai_tasks` counter against the real task set.
-
-    The counter should equal the number of live `process_one_batch` tasks in
-    `_active_spawn_tasks`. If a counter-leak ever happens (e.g. a coroutine
-    is cancelled between the `+= 1` and the `try`, so the finally's `-= 1`
-    never runs), the counter drifts high and the spawn-gate throttles new
-    batches even though the system has headroom.
-
-    Every minute, if the counter is higher than the live task count, we
-    pull it down to the live task count. This is a safety net — the main
-    code already has defensive `finally:` / `except BaseException:` paths;
-    this just guards against future regressions.
-    """
     live_tasks = sum(1 for t in _active_spawn_tasks if not t.done())
     counter = shared._active_ai_tasks
     if counter > live_tasks:
         drift = counter - live_tasks
-        logger.warning(
-            f"⚠️ _active_ai_tasks counter drift: counter={counter} "
-            f"live_tasks={live_tasks} — reconciling down by {drift}"
-        )
-        # Race-safe adjust: if the counter moved since we read it, we'll
-        # just under-correct, and the next run will fix the rest.
+        logger.warning(f"⚠️ _active_ai_tasks counter drift: counter={counter} live_tasks={live_tasks} — reconciling down by {drift}")
         shared._active_ai_tasks = max(0, shared._active_ai_tasks - drift)
 
-
 async def _in_progress_reaper() -> None:
-    """Evict `_in_progress_ids` entries older than _IN_PROGRESS_MAX_AGE_SEC.
-
-    An entry stuck here means a batch claimed rows but never released them —
-    possibly because `process_one_batch` was cancelled mid-flight (e.g. the
-    model slot was lost, a connection timed out, or the task was GC'd before
-    finally ran). Left unchecked, these rows sit at `processed=0` forever and
-    eventually cause the same multi-minute tail latencies as the original bug.
-    """
     now_m = time.monotonic()
     evicted: list[int] = []
     async with _in_progress_lock:
@@ -686,130 +444,63 @@ async def _in_progress_reaper() -> None:
             if now_m - claim_ts > _IN_PROGRESS_MAX_AGE_SEC:
                 evicted.append(mid)
                 _in_progress_ids.pop(mid, None)
-    if evicted:
-        logger.warning(
-            f"⚠️ In-progress reaper freed {len(evicted)} stuck claims "
-            f"(ages > {_IN_PROGRESS_MAX_AGE_SEC:.0f}s). Messages will be retried."
-        )
-
+    if evicted: logger.warning(f"⚠️ In-progress reaper freed {len(evicted)} stuck claims. Messages will be retried.")
 
 _last_loop_alert_ts: float = 0.0
 _LOOP_ALERT_COOLDOWN_SEC: float = 600.0
 
-
 async def _loop_heartbeat_watchdog() -> None:
-    """Alert the owner if `processing_loop` hasn't ticked in >90s.
-
-    The loop ticks every iteration (top of the `while True`). If no tick has
-    been observed for 90s, something has blocked the loop — a runaway AI call
-    holding the event loop, a DB deadlock, or an exception we're not catching.
-    We rate-limit the alert to at most once per 10 minutes so a long block
-    doesn't produce a storm of pings.
-    """
     global _last_loop_alert_ts
     last_tick = shared.get_loop_tick()
-    if last_tick is None:
-        return   # loop hasn't started yet
+    if last_tick is None: return
     age = time.monotonic() - last_tick
-    if age < 90.0:
-        return
+    if age < 90.0: return
     now_m = time.monotonic()
-    if now_m - _last_loop_alert_ts < _LOOP_ALERT_COOLDOWN_SEC:
-        return
+    if now_m - _last_loop_alert_ts < _LOOP_ALERT_COOLDOWN_SEC: return
     _last_loop_alert_ts = now_m
     logger.error(f"💔 processing_loop heartbeat stale: last tick {age:.0f}s ago")
-    try:
-        await bot.alert_error(
-            "processing_loop_heartbeat",
-            RuntimeError(f"processing_loop stalled: no tick for {age:.0f}s"),
-        )
-    except Exception:
-        pass
+    try: await bot.alert_error("processing_loop_heartbeat", RuntimeError(f"processing_loop stalled: no tick for {age:.0f}s"))
+    except: pass
 
-
-_LISTENER_WATCHDOG_QUIET_SEC: float = 60.0   # 1 min without an ingest
+_LISTENER_WATCHDOG_QUIET_SEC: float = 60.0
 _last_listener_reconnect_ts: float = 0.0
 _LISTENER_RECONNECT_COOLDOWN_SEC: float = 45.0
 _listener_reconnect_attempts: int = 0
 
-
 async def _listener_health_watchdog() -> None:
-    """Reconnect Telethon proactively if the listener appears silent.
-
-    Runs every 30s. Logic:
-      - If we've ingested a message in the last _LISTENER_WATCHDOG_QUIET_SEC
-        seconds, do nothing (listener is healthy) and reset backoff.
-      - Otherwise check MTProto socket state. If disconnected, attempt a
-        reconnect with progressive backoff (15s → 30s → 45s).
-
-    This complements `heartbeat_job`'s 20-min lag check with a much tighter
-    detection loop for the "silent dead listener" failure mode.
-    """
     global _last_listener_reconnect_ts, _listener_reconnect_attempts
     try:
         ingest_age = shared.seconds_since_last_ingest()
-        # Fresh ingest → healthy, reset backoff.
         if ingest_age is not None and ingest_age < _LISTENER_WATCHDOG_QUIET_SEC:
-            if _listener_reconnect_attempts > 0:
-                _listener_reconnect_attempts = 0
+            if _listener_reconnect_attempts > 0: _listener_reconnect_attempts = 0
             return
-
-        try:
-            mtproto_connected = bool(shared.listener.client.is_connected())
-        except Exception:
-            mtproto_connected = False
-
-        # Socket says connected AND we haven't been silent that long → fine.
-        # We only intervene when the socket itself reports disconnected.
-        if mtproto_connected:
-            return
-
-        # Progressive backoff: 15s, 30s, 45s, then cap at 45s.
+        try: mtproto_connected = bool(shared.listener.client.is_connected())
+        except: mtproto_connected = False
+        if mtproto_connected: return
         backoff = min(15.0 * (_listener_reconnect_attempts + 1), _LISTENER_RECONNECT_COOLDOWN_SEC)
-
         now_m = time.monotonic()
-        if now_m - _last_listener_reconnect_ts < backoff:
-            return
-        if shared._listener_reconnecting:
-            return
-
+        if now_m - _last_listener_reconnect_ts < backoff: return
+        if shared._listener_reconnecting: return
         _last_listener_reconnect_ts = now_m
         _listener_reconnect_attempts += 1
-        logger.warning(
-            f"🔌 Listener watchdog: socket disconnected and no ingest for "
-            f"{(ingest_age or 0):.0f}s — forcing reconnect "
-            f"(attempt #{_listener_reconnect_attempts}, backoff={backoff:.0f}s)."
-        )
+        logger.warning(f"🔌 Listener watchdog: socket disconnected — forcing reconnect.")
         from shared import _reconnect_listener
         asyncio.create_task(_reconnect_listener(gap_minutes=0.5))
-    except Exception as e:
-        logger.error(f"listener_health_watchdog error: {e}", exc_info=True)
+    except Exception as e: logger.error(f"listener_health_watchdog error: {e}", exc_info=True)
 
 
 # ── Main Entry Point ───────────────────────────────────────────────────────────
 
 async def main() -> None:
-    """Initializes and starts all application components."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)]
-    )
-    
-    # Silence only the most repetitive polling logs
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("telegram.ext").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
-    
-    # Custom logger for pipeline visibility
-    pipeline_logger = logging.getLogger("pipeline")
-    pipeline_logger.setLevel(logging.INFO)
-
-    if not Config.validate():
-        sys.exit(1)
+    if not Config.validate(): sys.exit(1)
 
     logger.info("--- TanyaDFBot Booting ---")
     await db.init()
+    await shared.load_classifier("model.ftz")
 
     global BOOT_CATCHUP_WINDOW
     if not db.conn:
@@ -821,147 +512,59 @@ async def main() -> None:
         if row and row[0]:
             last_ts = _parse_ts(row[0])
             gap     = (datetime.now(timezone.utc) - last_ts).total_seconds()
-            if gap > 3600:
-                BOOT_CATCHUP_WINDOW = min(int(gap) + 600, 28800)
+            if gap > 3600: BOOT_CATCHUP_WINDOW = min(int(gap) + 600, 28800)
 
-    # Catchup logic logs
-    if BOOT_CATCHUP_WINDOW > 3600:
-        logger.info(f"Large gap detected: catching up {BOOT_CATCHUP_WINDOW/3600:.1f} hours.")
-
-    # Initialize and start Bot/Updater
+    if BOOT_CATCHUP_WINDOW > 3600: logger.info(f"Large gap detected: catching up {BOOT_CATCHUP_WINDOW/3600:.1f} hours.")
     await bot.app.initialize()
     await bot.app.start()
-    
-    # NEW: Check for pending failures that were marked fixed but not retried
     pending = await db.get_pending_failures()
     fixed_pending = [f for f in pending if f['fixed'] and not f['retried']]
     if fixed_pending:
         count = len(fixed_pending)
-        logger.info(f"🔍 Found {count} fixed failures pending retry.")
-        msg = (f"🔄 <b>Startup Recovery</b>\n\nFound {count} errors marked as fixed. "
-               "You can retry them from their original error messages.")
+        msg = (f"🔄 <b>Startup Recovery</b>\n\nFound {count} errors marked as fixed.")
         await bot.send_plain(msg, parse_mode='HTML')
 
     await bot.app.updater.start_polling()
-
-    # Launch background loops
     asyncio.create_task(processing_loop())
     await listener.start()
-    
-    # NEW: Trigger initial sync via the resilient reconnect wrapper
     asyncio.create_task(_reconnect_listener(BOOT_CATCHUP_WINDOW / 60))
 
     # ── Scheduled jobs ─────────────────────────────────────────────────────────
-    # Adaptive Jitter: varied timing to avoid patterns and 'rush hour' spikes
-    scheduler.add_job(
-        jobs.image_processing_job, "interval", minutes=5,
-        id="images", args=[db, gemini, listener], jitter=30
-    )
-    scheduler.add_job(
-        jobs.brewing_digest_job, "cron", minute=0, hour="0,1,5-23",
-        id="brewing_digest", args=[bot]
-    )
-    scheduler.add_job(
-        jobs.hourly_digest_job, "cron", minute=1, hour="0,1,5-23",
-        id="digest", args=[db, gemini, bot, WIB], jitter=60 # 01:00–01:01
-    )
-    scheduler.add_job(
-        jobs.midnight_digest_job, "cron", hour=5, minute=0,
-        id="midnight_digest", args=[db, gemini, bot], jitter=300 # 05:00–05:05
-    )
-    scheduler.add_job(
-        jobs.halfhour_digest_job, "cron", minute="14,44",
-        id="halfhour_digest", args=[db, gemini, bot, WIB], jitter=240 # 14-18 & 44-48
-    )
-    scheduler.add_job(
-        jobs.heartbeat_job, "cron", minute=30,
-        id="heartbeat", args=[db, gemini, bot, WIB], jitter=120 # 30-32
-    )
-    scheduler.add_job(
-        jobs.hot_thread_job, "interval", minutes=15,
-        id="hot_threads",
-        args=[db, gemini, listener, bot, WIB, _alerted_hot_threads]
-    )
-    scheduler.add_job(
-        jobs.time_mention_job, "interval", minutes=5,
-        id="time_mentions", args=[db, bot]
-    )
-    scheduler.add_job(
-        jobs.trend_job, "interval", minutes=20,
-        id="trend_job", args=[db, gemini, bot]
-    )
-    scheduler.add_job(
-        jobs.spike_detection_job, "interval", minutes=5,
-        id="spike", args=[db, gemini, bot]
-    )
-    scheduler.add_job(
-        jobs.dead_promo_reaper_job, "interval", minutes=20,
-        id="reaper", args=[db, bot]
-    )
-    scheduler.add_job(
-        jobs.confirmation_gate_job, "interval", minutes=1, id="confirm_gate", args=[db]
-    )
-
-    scheduler.add_job(
-        jobs.db_maintenance_job, "cron", hour="*/4", minute=5,
-        id="db_maint", args=[db, bot]
-    )
-    # runtime watchdog for stuck pending_alerts
-    scheduler.add_job(
-        _alert_watchdog, "interval", minutes=1, id="alert_watchdog"
-    )
-    # Evict stale `_in_progress_ids` claims so messages stuck from a crashed
-    # batch don't block the queue indefinitely.
-    scheduler.add_job(
-        _in_progress_reaper, "interval", minutes=1, id="in_progress_reaper"
-    )
-    # Self-heal the `_active_ai_tasks` counter if it drifts higher than the
-    # real number of live process_one_batch tasks. Prevents counter leaks
-    # from throttling new batch spawns.
-    scheduler.add_job(
-        _active_ai_tasks_reconciler, "interval", minutes=1, id="ai_tasks_reconciler"
-    )
-    # Alert if processing_loop stops ticking (heartbeat > 90s stale).
-    scheduler.add_job(
-        _loop_heartbeat_watchdog, "interval", seconds=30, id="loop_heartbeat"
-    )
-    # Listener watchdog: every 60s, if we haven't ingested a message in 3 min
-    # AND MTProto socket claims disconnected, force a reconnect. Complements
-    # the existing heartbeat_job (which only reconnects on 20min+ lag).
-    scheduler.add_job(
-        _listener_health_watchdog, "interval", seconds=30, id="listener_health"
-    )
-    # Sinyal waktu: T-2min reminders for time-bounded promos.
-    scheduler.add_job(
-        jobs.time_reminder_job, "interval", minutes=1,
-        id="time_reminder", args=[db, bot, WIB]
-    )
+    scheduler.add_job(jobs.image_processing_job, "interval", minutes=5, id="images", args=[db, gemini, listener], jitter=30)
+    scheduler.add_job(jobs.brewing_digest_job, "cron", minute=0, hour="0,1,5-23", id="brewing_digest", args=[bot])
+    scheduler.add_job(jobs.hourly_digest_job, "cron", minute=1, hour="0,1,5-23", id="digest", args=[db, gemini, bot, WIB], jitter=60)
+    scheduler.add_job(jobs.midnight_digest_job, "cron", hour=5, minute=0, id="midnight_digest", args=[db, gemini, bot], jitter=300)
+    scheduler.add_job(jobs.halfhour_digest_job, "cron", minute="14,44", id="halfhour_digest", args=[db, gemini, bot, WIB], jitter=240)
+    scheduler.add_job(jobs.heartbeat_job, "cron", minute=30, id="heartbeat", args=[db, gemini, bot, WIB], jitter=120)
+    scheduler.add_job(jobs.hot_thread_job, "interval", minutes=15, id="hot_threads", args=[db, gemini, listener, bot, WIB, _alerted_hot_threads])
+    scheduler.add_job(jobs.time_mention_job, "interval", minutes=5, id="time_mentions", args=[db, bot])
+    scheduler.add_job(jobs.trend_job, "interval", minutes=20, id="trend_job", args=[db, gemini, bot])
+    scheduler.add_job(jobs.spike_detection_job, "interval", minutes=5, id="spike", args=[db, gemini, bot])
+    scheduler.add_job(jobs.dead_promo_reaper_job, "interval", minutes=20, id="reaper", args=[db, bot])
+    scheduler.add_job(jobs.confirmation_gate_job, "interval", minutes=1, id="confirm_gate", args=[db])
+    scheduler.add_job(jobs.db_maintenance_job, "cron", hour="*/4", minute=5, id="db_maint", args=[db, bot])
+    scheduler.add_job(_alert_watchdog, "interval", minutes=1, id="alert_watchdog")
+    scheduler.add_job(_in_progress_reaper, "interval", minutes=1, id="in_progress_reaper")
+    scheduler.add_job(_active_ai_tasks_reconciler, "interval", minutes=1, id="ai_tasks_reconciler")
+    scheduler.add_job(_loop_heartbeat_watchdog, "interval", seconds=30, id="loop_heartbeat")
+    scheduler.add_job(_listener_health_watchdog, "interval", seconds=30, id="listener_health")
+    scheduler.add_job(jobs.time_reminder_job, "interval", minutes=1, id="time_reminder", args=[db, bot, WIB])
 
     scheduler.start()
     logger.info("✅ TanyaDFBot Online")
 
-    try:
-        await shared.get_stop_event().wait()
-        logger.info("🛑 Shutdown signal received.")
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("🛑 Interrupted by user.")
-    except Exception as e:
-        logger.critical(f"🛑 Critical crash: {e}", exc_info=True)
+    try: await shared.get_stop_event().wait()
+    except (KeyboardInterrupt, SystemExit): pass
+    except Exception as e: logger.critical(f"🛑 Critical crash: {e}", exc_info=True)
     finally:
         scheduler.shutdown()
-        if bot.app.updater and bot.app.updater.running:
-            await bot.app.updater.stop()
+        if bot.app.updater and bot.app.updater.running: await bot.app.updater.stop()
         await bot.app.stop()
         await bot.app.shutdown()
         await listener.client.disconnect()
-        if db.conn:
-            await db.conn.close()
-            logger.info("🗄️ Database connection closed.")
+        if db.conn: await db.conn.close()
         logger.info("👋 Shutdown complete.")
 
-
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    try: asyncio.run(main())
+    except KeyboardInterrupt: pass

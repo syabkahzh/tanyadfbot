@@ -7,3 +7,5 @@ python-dotenv
 apscheduler
 pytz
 psutil
+fasttext-wheel
+numpy
