@@ -33,6 +33,7 @@ INSTANT_PATTERN = re.compile(
     r'qr|scan|edc|membership|member|mamber)\b',
     re.IGNORECASE
 )
+
 NEG_PATTERN = re.compile(
     r'\b(kapan|kok|ga pernah|tidak|belom|belum|gaada|ngga|ga ada|'
     r'iya|cuma|pas|tadi|gamau|jamber|jambrapa|jamberapa|'

@@ -146,7 +146,6 @@ ATURAN OUTPUT:
 
 
 # ── Pre-filter keyword sets ───────────────────────────────────────────────────
-
 _STRONG_KEYWORDS: set[str] = {
     'sfood','gfood','grab','shopee','gojek','tokped','tokopedia',
     'voucher','vcr','voc','diskon','promo','cashback','gratis','potongan',
@@ -158,6 +157,9 @@ _STRONG_KEYWORDS: set[str] = {
     'cb','kesbek','c+s+h+b+c+k','cash back',
     'luber','pecah','flash','sale','deal','murah','hemat','bonus',
     'ongkir','gratis ongkir',
+    'membership','member','mamber',
+}
+
     'membership','member','mamber',
 }
 
@@ -799,3 +801,4 @@ class GeminiProcessor:
             model_id=target
         )
         return cast(str, response.text.strip()) if response and response.text and "NO_TREND" not in response.text else None
+xt else None

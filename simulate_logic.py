@@ -1,7 +1,6 @@
 import re
 from typing import Set
 
-# --- FROM processor.py ---
 _STRONG_KEYWORDS: Set[str] = {
     'sfood','gfood','grab','shopee','gojek','tokped','tokopedia',
     'voucher','vcr','voc','diskon','promo','cashback','gratis','potongan',
@@ -12,6 +11,9 @@ _STRONG_KEYWORDS: Set[str] = {
     'cb','kesbek','c+s+h+b+c+k','cash back',
     'luber','pecah','flash','sale','deal','murah','hemat','bonus',
     'ongkir','gratis ongkir',
+    'membership','member','mamber',
+}
+
     'membership','member','mamber',
 }
 
