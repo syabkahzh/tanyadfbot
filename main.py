@@ -541,25 +541,47 @@ async def processing_loop() -> None:
             # PRE-FILTER OPTIMIZATION: 
             to_ai = []
             regex_noise_ids = []
+            semantic_noise_ids = []
+            
             for r in combined:
-                if gemini._is_worth_checking(r['text']):
-                    to_ai.append({
-                        "id":               r['id'],
-                        "text":             r['text'],
-                        "timestamp":        r['timestamp'],
-                        "tg_msg_id":        r['tg_msg_id'],
-                        "chat_id":          r['chat_id'],
-                        "reply_to_msg_id":  r['reply_to_msg_id'],
-                    })
-                else:
+                # Tier 1: Dumb Regex (Zero cost)
+                if not gemini._is_worth_checking(r['text']):
                     regex_noise_ids.append(r['id'])
+                    continue
+                
+                # Tier 2: FastText Semantic Filter (New)
+                # We use to_thread because ft.predict can be CPU intensive for huge batches
+                # although for e2-micro it's likely fine, we stick to safety.
+                label, confidence = await asyncio.to_thread(shared.predict_is_promo, r['text'])
+                
+                if label == "__label__JUNK" and confidence > 0.85:
+                    semantic_noise_ids.append(r['id'])
+                    continue
 
+                to_ai.append({
+                    "id":               r['id'],
+                    "text":             r['text'],
+                    "timestamp":        r['timestamp'],
+                    "tg_msg_id":        r['tg_msg_id'],
+                    "chat_id":          r['chat_id'],
+                    "reply_to_msg_id":  r['reply_to_msg_id'],
+                })
+
+            # Mark regex-killed noise
             if regex_noise_ids:
                 await db.mark_batch_processed(regex_noise_ids, skip_reason="regex")
                 async with _in_progress_lock:
                     for nid in regex_noise_ids:
                         _in_progress_ids.pop(nid, None)
                 logger.debug(f"🧹 Filtered {len(regex_noise_ids)} noise messages from batch (reason: regex).")
+
+            # Mark high-confidence semantic noise
+            if semantic_noise_ids:
+                await db.mark_batch_processed(semantic_noise_ids, skip_reason="ai_skip")
+                async with _in_progress_lock:
+                    for nid in semantic_noise_ids:
+                        _in_progress_ids.pop(nid, None)
+                logger.debug(f"🛡️ Traffic Cop: Filtered {len(semantic_noise_ids)} messages (high-confidence JUNK).")
 
             if not to_ai:
                 await asyncio.sleep(0.5)

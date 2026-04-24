@@ -4,3 +4,9 @@ __pycache__/
 *.session*
 *.session-journal
 .env
+
+# ML Models
+*.bin
+*.ftz
+*.txt
+!requirements.txt

@@ -4,9 +4,24 @@ import logging
 import re
 import time as _time_mod
 import uuid
+import os
 from collections import OrderedDict, deque
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+import fasttext
+# NumPy 2.0+ compatibility fix for FastText
+try:
+    import numpy as np
+    _orig_array = np.array
+    def _fixed_array(obj, *args, **kwargs):
+        if kwargs.get('copy') is False:
+            kwargs.pop('copy')
+            return np.asarray(obj, *args, **kwargs)
+        return _orig_array(obj, *args, **kwargs)
+    np.array = _fixed_array
+except ImportError:
+    pass
 
 from db import Database, normalize_brand
 from processor import GeminiProcessor, PromoExtraction, _CURRENCY_DISCOUNT_PATTERN
@@ -18,6 +33,38 @@ db: Database = Database()
 gemini: GeminiProcessor = GeminiProcessor()
 listener: Any = None
 bot: Any = None
+
+# ── Local NLP "Traffic Cop" ──────────────────────────────────────────────────
+_ft_model = None
+
+def load_ft_model() -> None:
+    """Load the FastText model once into memory."""
+    global _ft_model
+    model_path = "model.ftz"
+    if os.path.exists(model_path):
+        try:
+            _ft_model = fasttext.load_model(model_path)
+            logger.info(f"🛡️ Traffic Cop: FastText model loaded ({model_path}).")
+        except Exception as e:
+            logger.error(f"❌ Failed to load FastText model: {e}")
+    else:
+        logger.warning(f"⚠️ Traffic Cop: {model_path} not found. Local NLP disabled.")
+
+def predict_is_promo(text: str) -> tuple[str, float]:
+    """Predict if text is a promo using the local model.
+    
+    Returns:
+        (label, probability) where label is '__label__PROMO' or '__label__JUNK'
+    """
+    if _ft_model is None:
+        return "__label__PROMO", 0.0 # Default to pass-through if model missing
+        
+    t = text.lower().replace("\n", " ")
+    labels, probs = _ft_model.predict(t, k=1)
+    return labels[0], probs[0]
+
+# Initial load
+load_ft_model()
 
 def _parse_ts(ts: str | datetime | Any) -> datetime:
     """Always returns a UTC-aware datetime from various timestamp formats.
