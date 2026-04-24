@@ -212,38 +212,60 @@ def _make_tg_link(chat_id: int | str, msg_id: int | str) -> str:
 
 
 async def _reconnect_listener(gap_minutes: float) -> None:
-    """Handles Telethon client reconnection and history catchup with lock resilience."""
+    """Handles Telethon client reconnection and history catchup with lock resilience.
+
+    Two-phase design:
+      Phase 1 (guarded by _listener_reconnecting): disconnect + reconnect with
+               a 30s timeout. Releases the flag as soon as the socket is up so
+               the watchdog can retry quickly if something goes wrong later.
+      Phase 2 (unguarded): sync_history runs outside the reconnecting guard so
+               a slow history fetch doesn't block future reconnect attempts.
+    """
     global _listener_reconnecting
     if _listener_reconnecting:
         return
     _listener_reconnecting = True
+    connected = False
     try:
         logger.info(f"🔄 Reconnecting listener (lag: {int(gap_minutes)}m)...")
         try:
             await listener.client.disconnect()
         except Exception:
             pass
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
 
-        # Retry loop for Telethon connect to handle 'database is locked'
-        for attempt in range(3):
-            try:
-                await listener.client.connect()
-                break
-            except Exception as e:
-                if "locked" in str(e).lower() and attempt < 2:
-                    wait = 2 * (attempt + 1)
-                    logger.warning(f"⚠️ Telethon session locked, retrying in {wait}s...")
-                    await asyncio.sleep(wait)
-                    continue
-                raise
-
-        # Catch up on missed history
-        await listener.sync_history(hours=min(gap_minutes / 60 + 0.25, 3.0))
-    except Exception as e:
-        logger.error(f"❌ _reconnect_listener failed: {e}")
+        # Phase 1: reconnect with overall 30s timeout
+        try:
+            async with asyncio.timeout(30):
+                for attempt in range(5):
+                    try:
+                        await listener.client.connect()
+                        connected = True
+                        break
+                    except Exception as e:
+                        if "locked" in str(e).lower() and attempt < 4:
+                            wait = min(2 * (attempt + 1), 8)
+                            logger.warning(f"⚠️ Telethon session locked, retrying in {wait}s...")
+                            await asyncio.sleep(wait)
+                            continue
+                        raise
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.error("❌ _reconnect_listener: connect phase timed out (30s)")
+        except Exception as e:
+            logger.error(f"❌ _reconnect_listener connect failed: {e}")
     finally:
         _listener_reconnecting = False
+
+    # Phase 2: sync history OUTSIDE the reconnecting guard so the watchdog
+    # can trigger a fresh reconnect if this phase hangs or errors.
+    if connected:
+        try:
+            async with asyncio.timeout(60):
+                await listener.sync_history(hours=min(gap_minutes / 60 + 0.25, 3.0))
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.warning("⚠️ _reconnect_listener: sync_history timed out (60s), skipping.")
+        except Exception as e:
+            logger.error(f"⚠️ _reconnect_listener sync_history failed: {e}")
 
 
 _ELONGATION_RE = re.compile(r'([a-zA-Z])\1{2,}')
