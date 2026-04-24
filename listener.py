@@ -55,6 +55,9 @@ class TelethonListener:
             Config.API_ID,
             Config.API_HASH,
             sequential_updates=False,   # parallel update handling
+            auto_reconnect=True,
+            connection_retries=10,
+            retry_delay=1,
         )
 
     # ── Fast-path ─────────────────────────────────────────────────────────────
