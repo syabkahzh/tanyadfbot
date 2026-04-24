@@ -34,7 +34,8 @@ _PROMO = re.compile(
     r'\b(promo|diskon|cashback|voucher|gratis|murah|hemat|sale|off|deal|potongan|'
     r'sfood|gfood|grab|shopee|gojek|aman|on|jp|work|flash|limit|idm|alfa|indomaret|'
     r'nt|abis|habis|gabisa|gaada|gamau|minbel|r\+s\+t\+k|r\+s\+t\+c\+k|r\+st\+ck|'
-    r'cb|kesbek|c\+s\+h\+b\+c\+k|cash back|kuota|slot|redeem|qr|scan|edc)\b', re.IGNORECASE
+    r'cb|kesbek|c\+s\+h\+b\+c\+k|cash back|kuota|slot|redeem|qr|scan|edc|'
+    r'membership|member|mamber)\b', re.IGNORECASE
 )
 _JUNK_SUMMARY_PATTERN = re.compile(
     r'\b(tidak ada|none|n/a|tidak ditemukan|no promo)\b', re.IGNORECASE
@@ -157,6 +158,7 @@ _STRONG_KEYWORDS: set[str] = {
     'cb','kesbek','c+s+h+b+c+k','cash back',
     'luber','pecah','flash','sale','deal','murah','hemat','bonus',
     'ongkir','gratis ongkir',
+    'membership','member','mamber',
 }
 
 _JUNK_SUMMARIES: set[str] = {'summary','none','n/a','-','tidak ada','tidak ditemukan'}

@@ -30,7 +30,7 @@ INSTANT_PATTERN = re.compile(
     r'\b(on|jp|jackpot|work|aman|luber|pecah|berhasil|restock|ristok|aktif|ready|'
     r'potongan|idm|alfa|indomaret|ag|alfagift|voc|voucher|minbel|'
     r'r\+s\+t\+k|r\+s\+t\+c\+k|r\+st\+ck|cb|kesbek|c\+s\+h\+b\+c\+k|cash back|'
-    r'qr|scan|edc)\b',
+    r'qr|scan|edc|membership|member|mamber)\b',
     re.IGNORECASE
 )
 NEG_PATTERN = re.compile(

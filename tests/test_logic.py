@@ -62,6 +62,9 @@ def test_is_worth_checking():
     assert gp._is_worth_checking("promo shopeefood 50rb") is True
     assert gp._is_worth_checking("hokben aman work") is True
     assert gp._is_worth_checking("sfood jp mantap") is True
+    assert gp._is_worth_checking("membership alfagift murah") is True
+    assert gp._is_worth_checking("info member shopee") is True
+    assert gp._is_worth_checking("mamber indomaret") is True
     
     # Low signal / noise
     assert gp._is_worth_checking("wkwk") is False
