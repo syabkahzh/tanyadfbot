@@ -1,0 +1,3 @@
+## 2024-05-14 - SQLite Database Performance Optimization
+**Learning:** Adding an index on frequently queried columns in SQLite (like `pending_confirmations(brand)`) can yield significant performance improvements, turning an O(n) scan into an O(1) or O(log n) lookup. However, running any scripts that connect to SQLite may generate binary database files (e.g. `.db-shm`, `.db-wal`) that should NOT be committed to the repository to avoid cluttering version control.
+**Action:** Always check `git status` after running local scripts and explicitly unstage/remove any generated SQLite auxiliary binary files before creating a commit.

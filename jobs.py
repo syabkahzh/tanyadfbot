@@ -21,6 +21,155 @@ from shared import _make_tg_link, _flush_alert_buffer, _reconnect_listener
 
 logger = logging.getLogger(__name__)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Time reminder job — "sinyal waktu"
+# Scans active promos for an HH:MM time of day in valid_until/summary/conditions
+# and fires a T-2min reminder so users don't miss a time-bounded promo window.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# HH:MM / HH.MM / HH:MM WIB — anchored to word boundaries to avoid price numbers.
+_TIME_OF_DAY_RE = re.compile(
+    r'\b(?:jam|pukul|pkl|pk|s[./]?d|sampai|sebelum)?\s*'
+    r'(\d{1,2})[:.](\d{2})\s*(wib)?\b',
+    re.IGNORECASE,
+)
+# "jam 10" / "pukul 14" without minutes (interpreted as :00).
+_TIME_HOUR_RE = re.compile(
+    r'\b(?:jam|pukul|pkl|pk|s[./]?d|sampai|sebelum)\s+(\d{1,2})(?:\s*(wib|pagi|siang|sore|malem|malam))?\b',
+    re.IGNORECASE,
+)
+
+
+def _extract_time_of_day(text: str) -> tuple[int, int] | None:
+    """Return (hour, minute) if text explicitly names a time of day in WIB.
+
+    Conservative: only returns when we're confident the number is a clock
+    time, not a price or date. Prefers the HH:MM form; falls back to
+    "jam/pukul N" (minute=0) only when anchored by a time preposition.
+    """
+    if not text:
+        return None
+    m = _TIME_OF_DAY_RE.search(text)
+    if m:
+        hh, mm = int(m.group(1)), int(m.group(2))
+        if 0 <= hh <= 23 and 0 <= mm <= 59:
+            return (hh, mm)
+    m = _TIME_HOUR_RE.search(text)
+    if m:
+        hh = int(m.group(1))
+        if 0 <= hh <= 23:
+            tod = (m.group(2) or '').lower()
+            # "jam 3 sore" → 15:00, "jam 7 malam" → 19:00
+            if tod in ('sore',) and hh < 12:
+                hh += 12
+            elif tod in ('malem', 'malam') and hh < 12:
+                hh += 12
+            return (hh, 0)
+    return None
+
+
+async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
+    """Fire T-2min reminders for active promos with an explicit time-of-day.
+
+    This is the "sinyal waktu" feature: for any active promo whose
+    summary/conditions/valid_until mentions an explicit HH:MM WIB,
+    schedule one reminder ~2 minutes before the stated time. Each promo
+    fires at most one reminder (tracked via the `reminder_fired` column).
+    """
+    logger.info("⏰ [Job] Starting time_reminder_job...")
+    try:
+        if not db.conn:
+            return
+
+        # Ensure the idempotency column exists. Cheap no-op if already there.
+        try:
+            await db.conn.execute(
+                "ALTER TABLE promos ADD COLUMN reminder_fired INTEGER DEFAULT 0"
+            )
+            await db.conn.commit()
+        except Exception:
+            pass   # column already exists
+
+        now_wib = datetime.now(WIB)
+
+        # Only look at active, recent promos to keep this fast.
+        async with db.conn.execute(
+            "SELECT id, brand, summary, conditions, valid_until, tg_link "
+            "FROM promos "
+            "WHERE status='active' AND reminder_fired=0 "
+            "  AND created_at >= strftime('%Y-%m-%d %H:%M:%S+00:00','now','-24 hours') "
+            "ORDER BY id DESC LIMIT 200"
+        ) as cur:
+            rows = await cur.fetchall()
+
+        if not rows:
+            logger.info("✅ [Job] time_reminder_job: no candidates")
+            return
+
+        fired = 0
+        from telegram.constants import ParseMode
+
+        for r in rows:
+            # Prefer valid_until if it contains a time; otherwise scan the
+            # summary and conditions for an explicit HH:MM.
+            haystack = " ".join(
+                x for x in (r['valid_until'], r['summary'], r['conditions']) if x
+            )
+            tod = _extract_time_of_day(haystack)
+            if tod is None:
+                # Mark as checked-no-time so we don't re-scan next minute.
+                await db.conn.execute(
+                    "UPDATE promos SET reminder_fired=1 WHERE id=?", (r['id'],)
+                )
+                continue
+
+            hh, mm = tod
+            target = now_wib.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            # If target already passed today, assume tomorrow.
+            if target <= now_wib:
+                target = target + timedelta(days=1)
+
+            minutes_to = (target - now_wib).total_seconds() / 60.0
+
+            # Fire when the stated time is between 2 and 3 minutes away — we
+            # run this job every minute so this gives us exactly one window.
+            if 2.0 <= minutes_to <= 3.0:
+                text = (
+                    f"⏰ <b>Sinyal Waktu — 2 menit lagi!</b>\n"
+                    f"🏪 <b>{html.escape(r['brand'])}</b>\n"
+                    f"🕒 Target: <code>{target.strftime('%H:%M WIB')}</code>\n"
+                    f"📝 {_esc(r['summary'])}\n"
+                )
+                if r['conditions']:
+                    text += f"ℹ️ <i>{_esc(r['conditions'])}</i>\n"
+                if r['tg_link']:
+                    text += f"\n🔗 <a href='{html.escape(r['tg_link'])}'>Lihat Promo</a>"
+
+                try:
+                    await bot.send_plain(text, parse_mode=ParseMode.HTML)
+                    fired += 1
+                except Exception as e:
+                    logger.error(f"time_reminder send failed for promo {r['id']}: {e}")
+                    continue
+
+                await db.conn.execute(
+                    "UPDATE promos SET reminder_fired=1 WHERE id=?", (r['id'],)
+                )
+
+        if fired:
+            await db.conn.commit()
+            logger.info(f"✅ [Job] time_reminder_job fired {fired} reminders")
+        else:
+            logger.info("✅ [Job] time_reminder_job: no promos within 2-3 min window")
+    except Exception as e:
+        logger.error(f"time_reminder_job error: {e}", exc_info=True)
+        try:
+            await bot.alert_error("time_reminder_job", e)
+        except Exception:
+            pass
+
+
 # ── Digest jobs ──────────────────────────────────────────────────────────────
 
 async def brewing_digest_job(bot: TelegramBot) -> None:
@@ -263,6 +412,26 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                 promo = await gemini.process_image(photo_bytes, text or "", msg_id)
 
                 if promo:
+                    # Correct common mis-attribution where the vision model
+                    # latches onto a cross-promo PAYMENT banner (e.g.
+                    # "Cashback Saldo ShopeePay") instead of the MERCHANT
+                    # (the store where the deal redeems). If the caption
+                    # carries a merchant-specific slang tag (`jsm`/`psm`)
+                    # or a receipt abbreviation (`AFM`/`IDM`), trust that
+                    # over whatever payment-method brand the model returned.
+                    caption_l = (text or "").lower()
+                    PAY_BRANDS = {
+                        'shopeepay', 'spay', 'gopay', 'gpy', 'dana',
+                        'ovo', 'astrapay', 'aspay', 'linkaja', 'qris'
+                    }
+                    if promo.brand and promo.brand.lower().strip() in PAY_BRANDS:
+                        if re.search(r'\b(jsm|psm)\b', caption_l):
+                            promo.brand = 'Alfamart'
+                        elif re.search(r'\bafm\b', caption_l):
+                            promo.brand = 'Alfamart'
+                        elif re.search(r'\bidm\b', caption_l):
+                            promo.brand = 'Indomaret'
+
                     tg_link  = _make_tg_link(chat_id, tg_msg_id)
                     now_utc  = datetime.now(timezone.utc)
                     if (now_utc - shared._parse_ts(ts)).total_seconds() < 5400:
@@ -495,7 +664,7 @@ async def trend_job(db: Database, gemini: GeminiProcessor, bot: TelegramBot) -> 
         
         try:
             async with asyncio.timeout(60):
-                trends = await gemini.generate_narrative(msgs)
+                trends = await gemini.generate_narrative(msgs, db=db)
         except TimeoutError:
             logger.warning("AI timeout in trend_job. Skipping.")
             return
@@ -566,10 +735,34 @@ async def spike_detection_job(db: Database, gemini: GeminiProcessor, bot: Telegr
             sample_lines = [
                 f"• {html.escape((m['text'] or '').strip()[:80])}" for m in recent_msgs[:5]
             ]
-            
+
+            # Find the dominant brand: if any brand shows up in ≥40% of the
+            # last minute's messages, name it explicitly and pick its most
+            # recent message as a clickable "start here" link. Previously
+            # the alert was keyword-only and felt generic.
+            from shared import _guess_brand
+            from db import normalize_brand
+            brand_counts: dict[str, int] = {}
+            brand_latest_msg: dict[str, Any] = {}
+            for m in recent_msgs:
+                b = normalize_brand(_guess_brand(m['text']))
+                if b == "Unknown":
+                    continue
+                brand_counts[b] = brand_counts.get(b, 0) + 1
+                brand_latest_msg.setdefault(b, m)   # first = most recent
+            dominant_brand: str | None = None
+            dominant_count = 0
+            for b, c in brand_counts.items():
+                if c > dominant_count:
+                    dominant_brand = b
+                    dominant_count = c
+            # Require ≥40% of sample to agree on brand before naming it.
+            if dominant_brand and dominant_count < max(3, int(count * 0.4)):
+                dominant_brand = None
+
             top_words = await db.get_recent_words(minutes=3)
             hot_words = [w[0] for w in top_words[:5]]
-            
+
             try:
                 async with asyncio.timeout(30):
                     narrative = await gemini.interpret_keywords(
@@ -580,10 +773,22 @@ async def spike_detection_job(db: Database, gemini: GeminiProcessor, bot: Telegr
                 narrative = "Aktivitas meningkat tajam."
 
             from telegram.constants import ParseMode
+            header_lines = [
+                f"🚀 <b>Lonjakan Pesan!</b>",
+                f"📊 Kecepatan: <code>{count} msg/min</code>",
+                f"📈 Rata-rata: <code>{avg_per_min:.1f} msg/min</code>",
+            ]
+            if dominant_brand:
+                m = brand_latest_msg[dominant_brand]
+                link = _make_tg_link(m['chat_id'], m['tg_msg_id'])
+                header_lines.append(
+                    f"🏪 Dominan: <b>{html.escape(dominant_brand)}</b> "
+                    f"({dominant_count}/{count}) · "
+                    f"<a href='{link}'>mulai di sini</a>"
+                )
+
             text = (
-                f"🚀 <b>Lonjakan Pesan!</b>\n"
-                f"📊 Kecepatan: <code>{count} msg/min</code>\n"
-                f"📈 Rata-rata: <code>{avg_per_min:.1f} msg/min</code>\n\n"
+                "\n".join(header_lines) + "\n\n"
                 f"🤖 <b>Analisis:</b>\n{html.escape(narrative or 'Aktivitas meningkat tajam.')}\n\n"
                 f"<b>Cuplikan:</b>\n" + "\n".join(sample_lines)
             )

@@ -57,20 +57,6 @@ def _to_wib(ts: str | datetime | Any) -> str:
     except Exception:
         return "??:??:??"
 
-def _esc(text: str | None) -> str:
-    """Escapes common Markdown characters to prevent formatting errors.
-
-    Args:
-        text: The raw string to escape.
-
-    Returns:
-        The escaped string.
-    """
-    if not text:
-        return ""
-    return (text.replace("*", "\\*").replace("_", "\\_")
-                .replace("[", "\\[").replace("]", "\\]")
-                .replace("`", "\\`"))
 
 class TelegramBot:
     """Main Telegram Bot implementation."""
@@ -117,6 +103,8 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("ping", self.cmd_ping))
         self.app.add_handler(CommandHandler("help", self.cmd_help))
         self.app.add_handler(CommandHandler("status", self.cmd_status))
+        self.app.add_handler(CommandHandler("diag", self.cmd_diag))
+        self.app.add_handler(CommandHandler("reconnect", self.cmd_reconnect))
         self.app.add_handler(CommandHandler("logs", self.cmd_logs))
         self.app.add_handler(CommandHandler("debug", self.cmd_debug))
         self.app.add_handler(CommandHandler("summary", self.cmd_summary))
@@ -321,6 +309,147 @@ class TelegramBot:
         await status_msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
 
     @_owner_only
+    async def cmd_diag(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Deep-diagnosis of the processing pipeline.
+
+        Complements /status by surfacing the signals that tell you whether the
+        bot is STUCK (vs idle). Specifically:
+          - Loop heartbeat age (how long since `processing_loop` ticked)
+          - Last batch spawn age
+          - Oldest unprocessed message age
+          - Number of stuck in-progress claims
+          - AI RPM headroom + concurrent task count
+          - Listener connection state
+        """
+        if not update.message:
+            return
+
+        import time as _time
+        from datetime import datetime, timezone
+        import main as _main
+
+        now_m = _time.monotonic()
+        loop_tick = shared.get_loop_tick()
+        loop_age = (now_m - loop_tick) if loop_tick else -1
+        spawn_ts = getattr(shared, "_last_batch_spawn_ts", None)
+        spawn_age = (now_m - spawn_ts) if spawn_ts else -1
+
+        try:
+            oldest_age_sec = await self.db.get_oldest_unprocessed_age_sec()
+        except Exception:
+            oldest_age_sec = None
+
+        async with self.db.conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE processed=0"
+        ) as cur:
+            queue = (await cur.fetchone())[0]
+
+        # Stuck claims
+        stuck_claims = 0
+        oldest_claim_age = 0.0
+        async with _main._in_progress_lock:
+            stuck_claims = len(_main._in_progress_ids)
+            if _main._in_progress_ids:
+                oldest_claim_age = now_m - min(_main._in_progress_ids.values())
+
+        # Telethon listener health — inspect multiple signals to avoid the
+        # false DISCONNECTED that `is_connected()` alone produces.
+        try:
+            tg_client = shared.listener.client
+            mtproto_connected = bool(tg_client.is_connected())
+            sender = getattr(tg_client, "_sender", None)
+            sender_has_user_conn = bool(getattr(sender, "_user_connected", False)) if sender else False
+        except Exception:
+            mtproto_connected = False
+            sender_has_user_conn = False
+        ingest_age = shared.seconds_since_last_ingest()
+
+        # Verdict:
+        #   fresh ingest (<5min) → HEALTHY regardless of socket state
+        #   socket up → HEALTHY (just quiet)
+        #   no recent ingest AND socket down → degraded and we trigger reconnect
+        reconnect_triggered = False
+        if ingest_age is not None and ingest_age < 300:
+            listener_health = f"receiving (last msg {ingest_age:.0f}s ago)"
+            listener_degraded = False
+        elif mtproto_connected or sender_has_user_conn:
+            listener_health = (
+                "connected, no msgs yet" if ingest_age is None
+                else f"connected, quiet for {ingest_age:.0f}s"
+            )
+            listener_degraded = ingest_age is not None and ingest_age > 900
+        else:
+            listener_health = "DISCONNECTED"
+            listener_degraded = True
+            # Proactively trigger a reconnect. Idempotent via the
+            # `_listener_reconnecting` guard in shared._reconnect_listener.
+            try:
+                import asyncio as _aio
+                from shared import _reconnect_listener as _reconn
+                if not shared._listener_reconnecting:
+                    _aio.create_task(_reconn(gap_minutes=0.5))
+                    reconnect_triggered = True
+            except Exception:
+                pass
+            if reconnect_triggered:
+                listener_health += " (reconnecting…)"
+
+        # Health verdict
+        verdict = "✅ HEALTHY"
+        reasons = []
+        if loop_age > 90:
+            reasons.append(f"loop stale {loop_age:.0f}s")
+        if queue > 50 and spawn_age > 60:
+            reasons.append(f"queue={queue} but no spawn in {spawn_age:.0f}s")
+        if oldest_age_sec and oldest_age_sec > 120:
+            reasons.append(f"oldest msg {oldest_age_sec:.0f}s unprocessed")
+        if stuck_claims > 30:
+            reasons.append(f"{stuck_claims} claims stuck")
+        if listener_degraded:
+            reasons.append("listener " + listener_health)
+        if reasons:
+            verdict = "🚑 DEGRADED — " + ", ".join(reasons)
+
+        from shared import gemini
+        rpm_used = sum(s.current_usage() for s in gemini._slots.values())
+        rpm_limit = sum(s.limit for s in gemini._slots.values())
+
+        text = (
+            f"🔬 *Diag*\n"
+            f"{verdict}\n\n"
+            f"🔁 Loop tick: `{loop_age:.1f}s` ago\n"
+            f"🧬 Last spawn: `{spawn_age:.1f}s` ago\n"
+            f"📩 Queue: `{queue}` (oldest: `{oldest_age_sec or 0:.0f}s`)\n"
+            f"🔒 Claims: `{stuck_claims}` (oldest: `{oldest_claim_age:.0f}s`)\n"
+            f"🤖 AI: `{shared._active_ai_tasks}` tasks, `{rpm_used}/{rpm_limit}` RPM\n"
+            f"📡 Listener: `{listener_health}`"
+        )
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+    @_owner_only
+    async def cmd_reconnect(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Force a Telethon listener reconnect (owner-only manual recovery)."""
+        if not update.message:
+            return
+        msg = await update.message.reply_text("🔌 Reconnecting listener…")
+        try:
+            # Capture whether a reconnect was already in flight BEFORE we call
+            # `_reconnect_listener` so we don't mislead the operator about
+            # whether our call actually performed a reconnect. The helper
+            # returns immediately (no-op) when the guard is already set.
+            was_reconnecting = shared._listener_reconnecting
+            from shared import _reconnect_listener
+            await _reconnect_listener(gap_minutes=0.5)
+            if was_reconnecting:
+                await msg.edit_text(
+                    "⚠️ Another reconnect already in progress — skipped."
+                )
+            else:
+                await msg.edit_text("✅ Listener reconnected.")
+        except Exception as e:
+            await msg.edit_text(f"❌ Reconnect failed: `{e}`", parse_mode=ParseMode.MARKDOWN)
+
+    @_owner_only
     async def cmd_hourly(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Triggers a manual generation or retrieval of the hourly digest."""
         if not update.message: return
@@ -511,13 +640,13 @@ class TelegramBot:
                 await jobs.halfhour_digest_job(self.db, self.gemini, self, WIB)
                 return True
             elif component == "trend_job":
-                await jobs.trend_job(self.db, self.gemini, self, sys.modules['main'])
+                await jobs.trend_job(self.db, self.gemini, self)
                 return True
             elif component == "spike_detection_job":
-                await jobs.spike_detection_job(self.db, self.gemini, self, sys.modules['main'])
+                await jobs.spike_detection_job(self.db, self.gemini, self)
                 return True
             elif component == "image_processing_job":
-                await jobs.image_processing_job(self.db, self.gemini, shared.listener, sys.modules['main'])
+                await jobs.image_processing_job(self.db, self.gemini, shared.listener)
                 return True
             # Add more as needed
             logger.warning(f"No explicit retry logic for {component}")
@@ -638,11 +767,13 @@ class TelegramBot:
         if timestamp:
             ts = shared._parse_ts(timestamp)
             latency = (now_dt - ts).total_seconds()
-            
+
             detail = []
-            if p_data.queue_time: detail.append(f"Q: {p_data.queue_time:.1f}s")
-            if p_data.ai_time: detail.append(f"AI: {p_data.ai_time:.1f}s")
-            
+            if p_data.queue_time is not None:
+                detail.append(f"Q: {p_data.queue_time:.1f}s")
+            if p_data.ai_time is not None:
+                detail.append(f"AI: {p_data.ai_time:.1f}s")
+
             detail_str = f" ({' · '.join(detail)})" if detail else ""
             latency_str = f"\n⚡ Latency: <code>{latency:.2f}s</code>{detail_str}"
 
@@ -663,11 +794,10 @@ class TelegramBot:
         if corroborations > 0:
             alert_text += f"\n✅ <b>Confirmed by {corroborations} users</b>\n"
             try:
-                import json
                 snippets = json.loads(corroboration_texts)
                 for snip in snippets[:3]: # Show up to 3
                     alert_text += f"🔥 <i>\"{html.escape(snip)}\"</i>\n"
-            except:
+            except (json.JSONDecodeError, TypeError, ValueError):
                 pass
 
         async def _safe_send(uid):
@@ -731,12 +861,11 @@ class TelegramBot:
             if p.links:
                 all_ext_links.extend(p.links)
             try:
-                import json
                 snips = json.loads(ctexts)
                 for s in snips:
                     if s not in all_snippets:
                         all_snippets.append(s)
-            except:
+            except (json.JSONDecodeError, TypeError, ValueError):
                 pass
 
         lines_block = "\n".join(lines)
@@ -857,19 +986,40 @@ class TelegramBot:
         if self.auth_ids:
             await asyncio.gather(*[_safe_send(uid) for uid in self.auth_ids])
 
+    # Rate-limit error alerts per (component, error-class) tuple so a crash
+    # loop can't flood the owner with thousands of identical pings.
+    _error_alert_cooldown: dict[tuple[str, str], float] = {}
+    _ERROR_ALERT_COOLDOWN_SEC: float = 120.0
+
     async def alert_error(self, component: str, error: Exception) -> None:
         """Notifies the owner of a critical system error and logs it for retry.
+
+        Same (component, error_class) pair is silenced on Telegram for
+        _ERROR_ALERT_COOLDOWN_SEC, but is still written to the failures
+        table so nothing is lost.
 
         Args:
             component: The system component where the error occurred.
             error: The exception instance.
         """
         now_wib = datetime.now(WIB).strftime('%H:%M:%S WIB')
-        import traceback
+        import traceback, time as _time
         tb = traceback.format_exc()
 
-        # Log to DB
+        # Always log to DB (cheap + no external call).
         fid = await self.db.log_failure(component, str(error), tb)
+
+        # Rate-limit the Telegram push.
+        key = (component, type(error).__name__)
+        now_m = _time.monotonic()
+        last = self._error_alert_cooldown.get(key, 0.0)
+        if now_m - last < self._ERROR_ALERT_COOLDOWN_SEC:
+            logger.warning(
+                f"alert_error throttled (component={component}, err={type(error).__name__}); "
+                f"still logged to failures table as fid={fid}."
+            )
+            return
+        self._error_alert_cooldown[key] = now_m
 
         tb_short = tb[-1000:] if len(tb) > 1000 else tb
 

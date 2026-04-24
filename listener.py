@@ -9,6 +9,7 @@ Bulletproof rewrite:
 """
 
 import re
+import time
 import asyncio
 from telethon import TelegramClient, events
 from config import Config
@@ -21,9 +22,18 @@ TIME_PATTERN = re.compile(
     r'\b(malem|sore|subuh|pagi|siang)\b)',
     re.IGNORECASE
 )
+# 'aman', 'jp', 'work', 'luber', 'pecah', 'jackpot' are confirmation slang —
+# they fire fast-path as long as a known brand resolves (inline or via parent).
+# 'on/ready/aktif/restock/ristok' stay in the AMBIGUOUS set below and require a
+# known brand plus length guard.
 INSTANT_PATTERN = re.compile(
-    r'\b(on|jp|work|restock|ristok|luber|pecah|aktif|ready|potongan|idm|alfa|indomaret|ag|alfagift|voc|voucher|minbel|r\+s\+t\+k|r\+s\+t\+c\+k|r\+st\+ck|cb|kesbek|c\+s\+h\+b\+c\+k|cash back|qr|scan|edc)\b', re.IGNORECASE
+    r'\b(on|jp|jackpot|work|aman|luber|pecah|berhasil|restock|ristok|aktif|ready|'
+    r'potongan|idm|alfa|indomaret|ag|alfagift|voc|voucher|minbel|'
+    r'r\+s\+t\+k|r\+s\+t\+c\+k|r\+st\+ck|cb|kesbek|c\+s\+h\+b\+c\+k|cash back|'
+    r'qr|scan|edc|membership|member|mamber)\b',
+    re.IGNORECASE
 )
+
 NEG_PATTERN = re.compile(
     r'\b(kapan|kok|ga pernah|tidak|belom|belum|gaada|ngga|ga ada|'
     r'iya|cuma|pas|tadi|gamau|jamber|jambrapa|jamberapa|'
@@ -58,10 +68,12 @@ class TelethonListener:
         event loop at high message volume.
         """
         from shared import (
-            _make_tg_link, _guess_brand, _flush_alert_buffer, 
-            db, gemini, bot, 
+            _make_tg_link, _guess_brand, _flush_alert_buffer,
+            db, gemini, bot,
             _alerted_aman_parents, _alerted_aman_parents_deque, _aman_lock,
-            _recent_alerts_history, _recent_alerts_lock
+            _recent_alerts_history, _recent_alerts_lock,
+            _fastpath_brand_last_fired, _fastpath_brand_lock,
+            FASTPATH_BRAND_DEDUP_SEC,
         )
         from db import normalize_brand
         from processor import PromoExtraction
@@ -70,22 +82,23 @@ class TelethonListener:
         text       = (message_data.get('text') or '').strip()
         text_lower = text.lower()
 
-        # All-caps: has at least one uppercase, zero lowercase letters
-        AMAN_SIGNALS = {'aman'}
-
         is_instant  = bool(INSTANT_PATTERN.search(text)) and '?' not in text
         is_allcaps  = (bool(FAST_ALLCAPS.match(text))
                        and len(text.strip()) > 3
                        and '?' not in text)
-        is_aman     = text_lower in AMAN_SIGNALS and '?' not in text
+        # Standalone "aman" (single word, no extras) — parent-dedup path only.
+        # Compound "aman <brand>" hits via is_instant above and benefits from
+        # brand-level dedup below.
+        is_aman_standalone = text_lower == 'aman' and '?' not in text
 
-        if not (is_instant or is_aman or is_allcaps):
+        if not (is_instant or is_aman_standalone or is_allcaps):
             return False
         if NEG_PATTERN.search(text_lower):
             return False
 
-        # "Aman" deduplication — must be a reply to a known parent
-        if is_aman and not (is_instant or is_allcaps):
+        # Standalone "aman" — MUST be a reply to a known parent AND not a repeat
+        # reaction to the same parent we already alerted on.
+        if is_aman_standalone and not is_allcaps:
             parent_id = message_data.get('reply_to_msg_id')
             if not parent_id:
                 return False
@@ -122,13 +135,26 @@ class TelethonListener:
         if (not is_allcaps and brand == "Unknown"
                 and (found_sigs & AMBIGUOUS) and len(text) > 15):
             return False
-        if not is_allcaps and brand == "Unknown" and (is_aman or is_instant):
+        if not is_allcaps and brand == "Unknown" and (is_aman_standalone or is_instant):
             return False
 
+        # Brand-level dedup for burst traffic: suppress repeat fast-path alerts
+        # for the same brand within a short window. This is what stops 20 "aman
+        # toped" messages from firing 20 alerts — only the first one fires; the
+        # rest are corroborations and fall through to AI where filter_duplicates
+        # catches them.
+        if brand and brand != "Unknown":
+            now_mono = time.monotonic()
+            async with _fastpath_brand_lock:
+                last = _fastpath_brand_last_fired.get(brand, 0.0)
+                if now_mono - last < FASTPATH_BRAND_DEDUP_SEC:
+                    return False
+                _fastpath_brand_last_fired[brand] = now_mono
+
         # Build summary
-        if is_aman and parent_text:
+        if is_aman_standalone and parent_text:
             summary = f"aman ✅ — {parent_text[:120]}"
-        elif is_aman:
+        elif is_aman_standalone:
             return False   # aman with no parent context = useless
         else:
             summary = text[:120]
@@ -205,7 +231,15 @@ class TelethonListener:
     # ── Message ingestion ─────────────────────────────────────────────────────
 
     async def _handle_fast_path_standalone(self, event):
-        """Pure fast-path: pattern match → alert. Zero DB reads except parent lookup."""
+        """Pure fast-path: pattern match → alert. Zero DB reads except parent lookup.
+
+        When the fast-path fires (returns True), we also mark the source message
+        as processed=1 so the AI processing loop does not re-waste a batch slot
+        on it. The mark is tolerant of the race with `_save_to_db`: if the row
+        isn't present yet the UPDATE affects 0 rows and the row will be caught
+        by the AI path later (where `filter_duplicates` catches it via the
+        already-appended history entry).
+        """
         message_data = {
             'tg_msg_id':       event.id,
             'chat_id':         event.chat_id,
@@ -215,7 +249,11 @@ class TelethonListener:
             'internal_id':     0,
         }
         try:
-            await self._handle_fast_path(message_data)
+            fired = await self._handle_fast_path(message_data)
+            if fired:
+                asyncio.create_task(
+                    self.db.mark_processed_by_tg_id(event.id, event.chat_id)
+                )
         except Exception as e:
             if shared.bot:
                 await shared.bot.alert_error("fast_path", e)
@@ -254,6 +292,10 @@ class TelethonListener:
         async def handler(event):
             if not event.text:
                 return
+            # Record ingest timestamp BEFORE dispatch so /diag has an accurate
+            # "time since last message" signal even if downstream tasks error.
+            import shared as _shared
+            _shared.mark_message_ingested()
             # Fast-path as its OWN task - never waits for DB save
             asyncio.create_task(self._handle_fast_path_standalone(event))
             # DB save as separate task - never blocks fast-path
@@ -265,6 +307,7 @@ class TelethonListener:
     async def sync_history(self, hours=6, catchup_hours=2):
         chat    = await self.client.get_entity(Config.TARGET_GROUP)
         chat_id = chat.id
+        from db import _ts_str
         
         from datetime import timezone
         PROCESS_CUTOFF = datetime.now(timezone.utc) - timedelta(minutes=30)
@@ -292,7 +335,7 @@ class TelethonListener:
                 
                 buffer.append((
                     message.id, chat_id, message.sender_id,
-                    f"User_{message.sender_id}", message.date.isoformat(),
+                    f"User_{message.sender_id}", _ts_str(message.date),
                     message.text, message.reply_to_msg_id,
                     mark_processed, 1 if message.photo else 0, 1 if has_time else 0
                 ))

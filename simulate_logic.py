@@ -1,7 +1,6 @@
 import re
 from typing import Set
 
-# --- FROM processor.py ---
 _STRONG_KEYWORDS: Set[str] = {
     'sfood','gfood','grab','shopee','gojek','tokped','tokopedia',
     'voucher','vcr','voc','diskon','promo','cashback','gratis','potongan',
@@ -12,6 +11,7 @@ _STRONG_KEYWORDS: Set[str] = {
     'cb','kesbek','c+s+h+b+c+k','cash back',
     'luber','pecah','flash','sale','deal','murah','hemat','bonus',
     'ongkir','gratis ongkir',
+    'membership','member','mamber',
 }
 
 _WORD_BOUNDARY_KEYWORDS = re.compile(
@@ -42,7 +42,7 @@ def is_worth_checking(text: str) -> bool:
 
 # --- FROM listener.py ---
 INSTANT_PATTERN = re.compile(
-    r'\b(on|jp|work|restock|ristok|luber|pecah|aktif|ready|potongan|idm|alfa|indomaret|ag|alfagift|voc|voucher|minbel|r\+s\+t\+k|r\+s\+t\+c\+k|r\+st\+ck|cb|kesbek|c\+s\+h\+b\+c\+k|cash back)\b', re.IGNORECASE
+    r'\b(on|jp|work|restock|ristok|luber|pecah|aktif|ready|potongan|idm|alfa|indomaret|ag|alfagift|voc|voucher|minbel|r\+s\+t\+k|r\+s\+t\+c\+k|r\+st\+ck|cb|kesbek|c\+s\+h\+b\+c\+k|cash back|membership|member|mamber)\b', re.IGNORECASE
 )
 NEG_PATTERN = re.compile(
     r'\b(kapan|kok|ga pernah|tidak|belom|belum|gaada|ngga|ga ada|'
