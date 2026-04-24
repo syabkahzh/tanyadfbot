@@ -88,6 +88,11 @@ async def classify_batch(texts: list[str]) -> list[tuple[str, float]]:
         logger.warning(f"FastText batch inference error: {exc}")
         return [("__label__UNKNOWN", 0.0)] * len(texts)
 
+async def classify_one(text: str) -> tuple[str, float]:
+    """Predicts label for a single string."""
+    results = await classify_batch([text])
+    return results[0]
+
 def _parse_ts(ts: str | datetime | Any) -> datetime:
     """Always returns a UTC-aware datetime from various timestamp formats.
 
