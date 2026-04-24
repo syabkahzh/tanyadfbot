@@ -481,49 +481,82 @@ class GeminiProcessor:
 
     async def filter_duplicates(self, new_promos: Sequence[PromoExtraction],
                                  recent_alerts: Sequence[dict[str, Any]]) -> list[PromoExtraction]:
-        """Aggressively filters duplicates using brand context and keyword overlap."""
-        async with self._dedup_lock:
-            if not new_promos:
-                return []
-            if not recent_alerts:
-                return list(new_promos)
+        """Aggressively filters duplicates using brand context and keyword overlap.
 
-            recent_keys = {
-                f"{normalize_brand(r['brand']).lower()}:{r['summary'][:35].lower()}"
-                for r in recent_alerts
-            }
-            recent_alerts_list = list(recent_alerts)   # snapshot inside lock
-        
-        recent_brands_tail = [
-            normalize_brand(r['brand']).lower()
-            for r in recent_alerts_list[-50:]
-        ]
-        recent_brands_set = set(recent_brands_tail)
-        history_tail = list(recent_alerts_list[-50:])
+        The caller (main.process_one_batch) already holds `_recent_alerts_lock`
+        for the full compare-and-reserve window, which is what actually makes
+        this atomic across concurrent AI batches. We don't take `_dedup_lock`
+        here anymore — it was redundant with the caller's lock and could mask
+        races (the old code released it before the caller had appended to
+        history, opening the window for the 4x-Sayurbox production bug).
+
+        Also does INTRA-BATCH dedup: if the same batch extracts three phrasings
+        of the same Sayurbox promo, we keep only the first and drop the rest,
+        so a single big batch can't fire duplicates on its own.
+        """
+        if not new_promos:
+            return []
+
+        # Cross-batch history (what the caller already alerted on recently)
+        history_tail = list(recent_alerts)[-50:]
+        recent_keys = {
+            f"{normalize_brand(r['brand']).lower()}:{r['summary'][:35].lower()}"
+            for r in recent_alerts
+        }
+        recent_brands_set = {
+            normalize_brand(r['brand']).lower() for r in history_tail
+        }
 
         unique: list[PromoExtraction] = []
+        # Intra-batch reservation: what we've already accepted in THIS call.
+        intra_batch_keys: set[str] = set()
+        intra_batch_by_brand: dict[str, list[set[str]]] = {}
+
         for p in new_promos:
             brand_key = normalize_brand(p.brand).lower()
             key = f"{brand_key}:{p.summary[:35].lower()}"
 
+            # Exact key match against either history or this batch = dupe
+            if key in recent_keys or key in intra_batch_keys:
+                continue
+
+            p_words = set(re.findall(r'\w+', p.summary.lower())[:8])
+
+            # Cross-batch fuzzy dedup: same brand + ≥2 shared words in the
+            # first 8 tokens = near-duplicate of something already alerted.
             if (brand_key in recent_brands_set
                     and brand_key != 'unknown'
                     and p.status == 'active'):
-                p_words = set(re.findall(r'\w+', p.summary.lower())[:6])
                 is_dupe = False
                 for r in reversed(history_tail):
                     if normalize_brand(r['brand']).lower() == brand_key:
-                        r_words = set(re.findall(r'\w+', r['summary'].lower())[:6])
+                        r_words = set(re.findall(r'\w+', r['summary'].lower())[:8])
                         if len(p_words & r_words) >= 2:
                             is_dupe = True
                             break
                 if is_dupe:
                     continue
 
-            if key not in recent_keys:
-                unique.append(p)
-                recent_keys.add(key)
-                recent_brands_set.add(brand_key)
+            # Intra-batch fuzzy dedup: same brand + ≥2 shared words with
+            # another promo already accepted in this same batch = duplicate.
+            # Handles the case where a single batch of Sayurbox messages
+            # produces multiple slightly-different extractions of the same
+            # promo, which the cross-batch check can't catch because neither
+            # is in history yet.
+            if brand_key != 'unknown':
+                for prev_words in intra_batch_by_brand.get(brand_key, ()):
+                    if len(p_words & prev_words) >= 2:
+                        break
+                else:
+                    unique.append(p)
+                    recent_keys.add(key)
+                    intra_batch_keys.add(key)
+                    intra_batch_by_brand.setdefault(brand_key, []).append(p_words)
+                continue
+
+            unique.append(p)
+            recent_keys.add(key)
+            intra_batch_keys.add(key)
 
         return unique
 
