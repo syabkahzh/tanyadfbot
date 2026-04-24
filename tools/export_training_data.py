@@ -9,7 +9,15 @@ def clean_text(text):
     return re.sub(r'\s+', ' ', text).lower()
 
 def export_v2():
-    db_path = "../tanya_main.db"
+    # Robust path discovery
+    if os.path.exists("tanya_main.db"):
+        db_path = "tanya_main.db"
+    elif os.path.exists("../tanya_main.db"):
+        db_path = "../tanya_main.db"
+    else:
+        # Fallback to current config or env
+        db_path = "tanya_main.db"
+
     output_path = "data/training.txt"
     
     conn = sqlite3.connect(db_path)

@@ -126,30 +126,39 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
 
             hh, mm = tod
             target = now_wib.replace(hour=hh, minute=mm, second=0, microsecond=0)
-            # If target already passed today, assume tomorrow.
+            
+            # If target already passed today, and it was more than 12 hours ago,
+            # it's likely a stale mention or a time meant for tomorrow.
+            # We only want to fire for upcoming times in the next ~12 hours.
             if target <= now_wib:
-                target = target + timedelta(days=1)
+                if (now_wib - target).total_seconds() > 43200: # 12h
+                    target = target + timedelta(days=1)
+                else:
+                    # Time has very recently passed, skip to prevent late alerts
+                    await db.conn.execute(
+                        "UPDATE promos SET reminder_fired=1 WHERE id=?", (r['id'],)
+                    )
+                    continue
 
             minutes_to = (target - now_wib).total_seconds() / 60.0
 
-            # Fire when the stated time is between 2 and 3 minutes away — we
-            # run this job every minute so this gives us exactly one window.
+            # Fire when the stated time is between 2 and 3 minutes away
             if 2.0 <= minutes_to <= 3.0:
-                now_str = datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%H:%M:%S')
+                now_str = now_wib.strftime('%H:%M:%S')
                 text = (
-                    f"⏰ <b>Sinyal Waktu — 2 menit lagi!</b>\n"
-                    f"⏰ Skrg: <code>{now_str}</code>\n"
-                    f"🏪 <b>{html.escape(r['brand'])}</b>\n"
-                    f"🕒 Target: <code>{target.strftime('%H:%M WIB')}</code>\n"
-                    f"📝 {_esc(r['summary'])}\n"
+                    f"⏰ **Sinyal Waktu — 2 menit lagi!**\n"
+                    f"⏰ Skrg: `{now_str}`\n"
+                    f"🏪 **{r['brand']}**\n"
+                    f"🕒 Target: `{target.strftime('%H:%M WIB')}`\n"
+                    f"📝 {r['summary']}\n"
                 )
                 if r['conditions']:
-                    text += f"ℹ️ <i>{_esc(r['conditions'])}</i>\n"
+                    text += f"ℹ️ _{r['conditions']}_\n"
                 if r['tg_link']:
-                    text += f"\n🔗 <a href='{html.escape(r['tg_link'])}'>Lihat Promo</a>"
+                    text += f"\n🔗 [Lihat Promo]({r['tg_link']})"
 
                 try:
-                    await bot.send_plain(text, parse_mode=ParseMode.HTML)
+                    await bot.send_plain(text)
                     fired += 1
                 except Exception as e:
                     logger.error(f"time_reminder send failed for promo {r['id']}: {e}")
