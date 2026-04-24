@@ -350,10 +350,16 @@ class TelegramBot:
         
         # Build Navigation Buttons
         buttons = []
-        if page > 1:
-            buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"today_page:{page-1}"))
-        if page < total_pages:
-            buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"today_page:{page+1}"))
+        if total_pages > 1:
+            # First and Prev
+            if page > 1:
+                buttons.append(InlineKeyboardButton("⏮ First", callback_data="today_page:1"))
+                buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"today_page:{page-1}"))
+            
+            # Next and Last
+            if page < total_pages:
+                buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"today_page:{page+1}"))
+                buttons.append(InlineKeyboardButton("Last ⏭", callback_data=f"today_page:{total_pages}"))
             
         reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
         
