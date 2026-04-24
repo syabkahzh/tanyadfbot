@@ -109,6 +109,45 @@ def seconds_since_last_ingest() -> float | None:
     if _last_message_ingest_ts is None:
         return None
     return _time.monotonic() - _last_message_ingest_ts
+
+
+# ── AI circuit breaker ──────────────────────────────────────────────────────
+#
+# When Gemini has a provider-side incident (500 storms, rolling timeouts),
+# every batch fails in ~90s and we just pound the dead provider while msgs
+# pile up. The circuit breaker tracks recent consecutive failures; when we
+# cross the threshold we pause AI spawns for a cooldown so the queue can
+# drain through fast-path / poison-retirement rather than block behind
+# doomed batches.
+_ai_consecutive_failures: int = 0
+_ai_circuit_open_until: float = 0.0   # monotonic; AI paused until this ts
+
+def record_ai_outcome(success: bool) -> None:
+    """Called from process_one_batch after every AI call.
+
+    `success=True` resets the failure counter and closes the breaker.
+    `success=False` bumps the counter; once we hit the threshold we open
+    the breaker for _AI_CIRCUIT_COOLDOWN_SEC.
+    """
+    global _ai_consecutive_failures, _ai_circuit_open_until
+    import time as _time
+    if success:
+        _ai_consecutive_failures = 0
+        _ai_circuit_open_until = 0.0
+        return
+    _ai_consecutive_failures += 1
+    if _ai_consecutive_failures >= _AI_CIRCUIT_FAILURE_THRESHOLD:
+        _ai_circuit_open_until = _time.monotonic() + _AI_CIRCUIT_COOLDOWN_SEC
+
+def ai_circuit_open_remaining() -> float:
+    """Seconds remaining in the current AI pause, or 0 if AI is available."""
+    import time as _time
+    remaining = _ai_circuit_open_until - _time.monotonic()
+    return remaining if remaining > 0 else 0.0
+
+# Threshold + cooldown. Kept here (not main.py) so /diag can read them.
+_AI_CIRCUIT_FAILURE_THRESHOLD: int = 5
+_AI_CIRCUIT_COOLDOWN_SEC: float = 30.0
 _last_trend_alert: str = ""
 _last_spike_alert: datetime = datetime.min.replace(tzinfo=timezone.utc)
 _last_hourly_digest: str = ""

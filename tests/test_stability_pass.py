@@ -171,8 +171,8 @@ async def test_in_progress_reaper_evicts_stale():
     mainmod._in_progress_ids.clear()
     try:
         now = time.monotonic()
-        mainmod._in_progress_ids[1] = now - 400   # stale (>100s)
-        mainmod._in_progress_ids[2] = now - 50    # fresh (<100s)
+        mainmod._in_progress_ids[1] = now - 400   # stale (>130s)
+        mainmod._in_progress_ids[2] = now - 50    # fresh (<130s)
         mainmod._in_progress_ids[3] = now - 600   # very stale
 
         await mainmod._in_progress_reaper()
