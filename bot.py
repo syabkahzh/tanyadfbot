@@ -22,6 +22,9 @@ from telegram.ext import (
 from telegram.request import HTTPXRequest
 from telegram.constants import ParseMode
 
+from telegramify_markdown import convert, telegramify
+from telegramify_markdown.content import ContentType
+
 import shared
 from db import Database, normalize_brand
 from config import Config
@@ -65,6 +68,8 @@ class TelegramBot:
     def _setup_handlers(self) -> None:
         """Configures Telegram command and message handlers."""
         self.app.add_handler(CommandHandler("start", self.cmd_start))
+        self.app.add_handler(CommandHandler("help", self.cmd_help))
+        self.app.add_handler(CommandHandler("ping", self.cmd_ping))
         self.app.add_handler(CommandHandler("status", self.cmd_status))
         self.app.add_handler(CommandHandler("diag", self.cmd_diag))
         self.app.add_handler(CommandHandler("today", self.cmd_today))
@@ -80,12 +85,59 @@ class TelegramBot:
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handles the /start command."""
-        await update.message.reply_text(
-            "🚀 <b>TanyaDFBot Online</b>\n\n"
+        text = (
+            "🚀 **TanyaDFBot Online**\n\n"
             "I'm scanning for promos and hot discussion trends in real-time.\n"
-            "Use /status to see system health.",
-            parse_mode=ParseMode.HTML
+            "Use /status to see system health."
         )
+        await self._send_markdown(update, text)
+
+    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Dynamically lists all available commands from registered handlers."""
+        cmds = []
+        for group in self.app.handlers.values():
+            for handler in group:
+                if isinstance(handler, CommandHandler):
+                    for command in handler.commands:
+                        cmds.append(f"/{command}")
+        
+        # Deduplicate and sort
+        active_cmds = sorted(list(set(cmds)))
+        
+        text = (
+            "📖 **TanyaDFBot Help**\n\n"
+            "I'm scanning for promos and hot discussion trends in real-time.\n\n"
+            "🛡 **Active Commands:**\n"
+            + "\n".join([f"• {c}" for c in active_cmds]) +
+            "\n\n_Note: Some commands are restricted to authorized users._"
+        )
+        await self._send_markdown(update, text)
+
+    async def cmd_ping(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Simple health check to confirm the bot is responsive."""
+        now = datetime.now(pytz.timezone("Asia/Jakarta")).strftime('%H:%M:%S')
+        await self._send_markdown(update, f"🏓 **Pong!**\n🕒 Time: `{now} WIB`")
+
+    async def _send_markdown(self, update: Update | object, text: str, reply_markup: Any = None) -> None:
+        """Helper to send Markdown text using telegramify-markdown."""
+        safe_text, entities = convert(text)
+        try:
+            if isinstance(update, Update) and update.message:
+                await update.message.reply_text(
+                    safe_text,
+                    entities=[e.to_dict() for e in entities],
+                    reply_markup=reply_markup,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
+                )
+            elif hasattr(update, 'message'): # For callback queries or other objects
+                 await update.message.reply_text(
+                    safe_text,
+                    entities=[e.to_dict() for e in entities],
+                    reply_markup=reply_markup,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
+                )
+        except Exception as e:
+            logger.error(f"Failed to send markdown msg: {e}")
 
     @_owner_only
     async def cmd_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -138,17 +190,17 @@ class TelegramBot:
         if failures:
             lines = []
             for f in failures:
-                comp = html.escape(f['component'])
-                err  = html.escape(f['error_msg'][:60])
+                comp = f['component']
+                err  = f['error_msg'][:60]
                 lines.append(f"• {comp}: {err}...")
-            recent_log = "\n\n❌ <b>Recent Failures:</b>\n" + "\n".join(lines)
+            recent_log = "\n\n❌ **Recent Failures:**\n" + "\n".join(lines)
 
         # 7. Background Task Tracking
         flush_status = "Active 🔄" if shared._buffer_flush_task and not shared._buffer_flush_task.done() else "Idle 😴"
         bg_tasks = (
-            f"🤖 AI Batches: <code>{shared._active_ai_tasks}</code>\n"
-            f"⏳ Retrying Sends: <code>{shared._active_retry_sends}</code>\n"
-            f"🔔 Alert Flush: <code>{html.escape(flush_status)}</code>"
+            f"🤖 AI Batches: `{shared._active_ai_tasks}`\n"
+            f"⏳ Retrying Sends: `{shared._active_retry_sends}`\n"
+            f"🔔 Alert Flush: `{flush_status}`"
         )
 
         WIB = pytz.timezone("Asia/Jakarta")
@@ -156,23 +208,28 @@ class TelegramBot:
         latest_wib = _to_wib(latest_ts) + " WIB" if latest_ts else "N/A"
 
         text = (
-            f"📊 <b>Full Transparency Status</b>\n"
-            f"🕒 <code>{now_wib}</code>\n\n"
-            f"📩 Total Msgs: <code>{msg_count}</code>\n"
-            f"🔥 Total Promos: <code>{promo_count}</code>\n"
-            f"🔄 Queue: <code>{unprocessed}</code> {html.escape(triage_icon)}\n"
-            f"🛡️ Traffic Cop: <code>{html.escape(ft_status)}</code>\n"
-            f"🕒 Latest: <code>{latest_wib}</code>\n\n"
-            f"⚙️ <b>Background Tasks:</b>\n{bg_tasks}\n\n"
-            f"🤖 <b>AI Pressure:</b>\n{rpm_status}\n"
-            f"📈 Total RPM: <code>{total_active}/{total_limit}</code>\n"
+            f"📊 **Full Transparency Status**\n"
+            f"🕒 `{now_wib}`\n\n"
+            f"📩 Total Msgs: `{msg_count}`\n"
+            f"🔥 Total Promos: `{promo_count}`\n"
+            f"🔄 Queue: `{unprocessed}` {triage_icon}\n"
+            f"🛡️ Traffic Cop: `{ft_status}`\n"
+            f"🕒 Latest: `{latest_wib}`\n\n"
+            f"⚙️ **Background Tasks:**\n{bg_tasks}\n\n"
+            f"🤖 **AI Pressure:**\n{rpm_status}\n"
+            f"📈 Total RPM: `{total_active}/{total_limit}`\n"
             f"{recent_log}\n\n"
-            f"💻 <b>System:</b>\n"
-            f"📁 DB Size: <code>{db_size_mb:.1f} MB</code>\n"
-            f"🧠 RAM: <code>{ram_mb:.1f} MB</code>\n"
-            f"⚡ CPU: <code>{cpu_usage:.1f}%</code>"
+            f"💻 **System:**\n"
+            f"📁 DB Size: `{db_size_mb:.1f} MB`\n"
+            f"🧠 RAM: `{ram_mb:.1f} MB`\n"
+            f"⚡ CPU: `{cpu_usage:.1f}%`"
         )
-        await status_msg.edit_text(text, parse_mode=ParseMode.HTML)
+        safe_text, entities = convert(text)
+        await status_msg.edit_text(
+            safe_text, 
+            entities=[e.to_dict() for e in entities],
+            link_preview_options=LinkPreviewOptions(is_disabled=True)
+        )
 
     @_owner_only
     async def cmd_diag(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -229,50 +286,109 @@ class TelegramBot:
             verdict = "🔴 CRITICAL"
 
         text = (
-            f"🩺 <b>Pipeline Diagnostics</b>\n\n"
-            f"⚙️ <b>Heartbeats:</b>\n"
-            f"🔄 Loop: <code>{html.escape(loop_status)}</code>\n"
-            f"🛰 Ingest: <code>{html.escape(listener_health)}</code>\n"
-            f"🧬 Spawn: <code>{html.escape(spawn_status)}</code>\n\n"
-            f"🛡 <b>Traffic Cop:</b>\n"
-            f"🧠 FastText: <code>{html.escape(ft_active)}</code>\n\n"
-            f"🤖 <b>AI Pressure:</b>\n"
-            f"🔥 Concurrent: <code>{shared._active_ai_tasks}</code>\n"
-            f"🚦 Headroom: <code>{headroom_pct:.0%}</code>\n\n"
-            f"📥 <b>Queue Backlog:</b>\n"
-            f"📦 Unprocessed: <code>{queue}</code>\n"
-            f"🕒 Max Age: <code>{oldest_fmt}</code>\n"
-            f"⚠️ Stuck Claims: <code>{stuck_claims}</code>\n\n"
-            f"<b>Verdict:</b> {verdict}"
+            f"🩺 **Pipeline Diagnostics**\n\n"
+            f"⚙️ **Heartbeats:**\n"
+            f"🔄 Loop: `{loop_status}`\n"
+            f"🛰 Ingest: `{listener_health}`\n"
+            f"🧬 Spawn: `{spawn_status}`\n\n"
+            f"🛡 **Traffic Cop:**\n"
+            f"🧠 FastText: `{ft_active}`\n\n"
+            f"🤖 **AI Pressure:**\n"
+            f"🔥 Concurrent: `{shared._active_ai_tasks}`\n"
+            f"🚦 Headroom: `{headroom_pct:.0%}`\n\n"
+            f"📥 **Queue Backlog:**\n"
+            f"📦 Unprocessed: `{queue}`\n"
+            f"🕒 Max Age: `{oldest_fmt}`\n"
+            f"⚠️ Stuck Claims: `{stuck_claims}`\n\n"
+            f"**Verdict:** {verdict}"
         )
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+        await self._send_markdown(update, text)
 
     @_owner_only
     async def cmd_today(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Summary of promos from today."""
-        rows = await self.db.get_promos(hours=24)
-        if not rows:
-            await update.message.reply_text("Belum ada promo yang terdeteksi hari ini.")
-            return
-        
+        """Summary of promos from the start of the current day (WIB) with pagination."""
+        await self._render_today_page(update, page=1)
+
+    async def _render_today_page(self, update: Update | object, page: int = 1) -> None:
+        """Helper to render a specific page of today's promos."""
         WIB = pytz.timezone("Asia/Jakarta")
-        today_str = datetime.now(WIB).strftime('%d %b')
-        text = self._fmt_raw_list(rows, f"Promo Hari Ini — {today_str} WIB")
-        await self._send_long(update, text)
+        now_wib = datetime.now(WIB)
+        start_of_day_wib = now_wib.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        rows = await self.db.get_promos(since_dt=start_of_day_wib)
+        
+        if not rows:
+            msg_text = "Belum ada promo yang terdeteksi hari ini."
+            if isinstance(update, Update) and update.message:
+                await self._send_markdown(update, msg_text)
+            elif hasattr(update, 'edit_message_text'):
+                safe_text, entities = convert(msg_text)
+                await update.edit_message_text(safe_text, entities=[e.to_dict() for e in entities])
+            return
+
+        page_size = 15
+        total_promos = len(rows)
+        total_pages = (total_promos + page_size - 1) // page_size
+        page = max(1, min(page, total_pages))
+        
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        page_rows = rows[start_idx:end_idx]
+        
+        today_str = now_wib.strftime('%d %b')
+        header = f"📅 **Promo Hari Ini — {today_str}**\n"
+        header += f"🔥 Total: **{total_promos} promos** (Hal {page}/{total_pages})\n\n"
+        
+        lines = []
+        for r in page_rows:
+            brand = r['brand'] if r['brand'] and r['brand'].lower() not in ('unknown', 'sunknown', '') else '❓'
+            time_str = _to_wib(r['msg_time'])
+            link = r['tg_link'] or "#"
+            lines.append(f"• `[{time_str}]` **{brand}**: {r['summary']} [➤]({link})")
+            
+        text = header + "\n".join(lines)
+        
+        # Build Navigation Buttons
+        buttons = []
+        if page > 1:
+            buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"today_page:{page-1}"))
+        if page < total_pages:
+            buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"today_page:{page+1}"))
+            
+        reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
+        
+        safe_text, entities = convert(text)
+        try:
+            if isinstance(update, Update) and update.message:
+                await update.message.reply_text(
+                    safe_text,
+                    entities=[e.to_dict() for e in entities],
+                    reply_markup=reply_markup,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
+                )
+            elif hasattr(update, 'edit_message_text'): # CallbackQuery
+                await update.edit_message_text(
+                    safe_text,
+                    entities=[e.to_dict() for e in entities],
+                    reply_markup=reply_markup,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
+                )
+        except Exception as e:
+            logger.error(f"Failed to render today page {page}: {e}")
 
     @_owner_only
     async def cmd_debug(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Dumps raw database rows for debugging."""
         rows = await self.db.get_raw_messages(limit=5)
-        text = "🔍 <b>Raw Debug (Latest 5):</b>\n\n"
+        text = "🔍 **Raw Debug (Latest 5):**\n\n"
         
         lines = []
         for r in rows:
-            clean_text = html.escape((r['text'] or '').replace('\n', ' ')[:80])
+            clean_text = (r['text'] or '').replace('\n', ' ')[:80]
             status = "✅" if r['processed'] else "⏳"
-            lines.append(f"{status} <code>[{r['id']}]</code> {clean_text}...")
+            lines.append(f"{status} `[{r['id']}]` {clean_text}...")
         
-        await update.message.reply_text(text + "\n".join(lines), parse_mode=ParseMode.HTML)
+        await self._send_markdown(update, text + "\n".join(lines))
 
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Processes inline button clicks."""
@@ -287,12 +403,12 @@ class TelegramBot:
             user_id = update.effective_user.id
             self._awaiting_feedback[user_id] = orig_msg_id
             
-            await query.message.reply_text(
-                "📝 <b>Correction Mode</b>\n\n"
+            await self._send_markdown(
+                query,
+                "📝 **Correction Mode**\n\n"
                 "What's wrong with this promo? Send me the correct details "
                 "(e.g., 'Wrong brand, it should be McD' or 'Expired').\n\n"
-                "I will learn from this!",
-                parse_mode=ParseMode.HTML
+                "I will learn from this!"
             )
             return
 
@@ -303,11 +419,33 @@ class TelegramBot:
             # Update original message to show it's marked
             if query.message:
                 reply_markup = query.message.reply_markup
+                new_text = f"{query.message.text}\n\n🛠 **Fix Marked!** Ready to retry."
+                safe_text, entities = convert(new_text)
                 await query.edit_message_text(
-                    text=f"{query.message.text_html}\n\n🛠 <b>Fix Marked!</b> Ready to retry.",
-                    parse_mode=ParseMode.HTML,
+                    text=safe_text,
+                    entities=[e.to_dict() for e in entities],
                     reply_markup=reply_markup
                 )
+
+        elif data.startswith("retry_"):
+            fid = int(data.split("_")[1])
+            # Mark failure as retried in DB
+            await self.db.mark_failure_retried(fid)
+            
+            # Update original message to show it's retrying
+            if query.message:
+                reply_markup = query.message.reply_markup
+                new_text = f"{query.message.text}\n\n🔄 **Retry Marked!** Re-queueing..."
+                safe_text, entities = convert(new_text)
+                await query.edit_message_text(
+                    text=safe_text,
+                    entities=[e.to_dict() for e in entities],
+                    reply_markup=reply_markup
+                )
+
+        elif data.startswith("today_page:"):
+            page = int(data.split(":")[1])
+            await self._render_today_page(query, page=page)
 
     @_owner_only
     async def handle_qa(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -324,17 +462,19 @@ class TelegramBot:
                     (orig_msg_id, correction)
                 )
                 await self.db.conn.commit()
-                await update.message.reply_text("✅ <b>Feedback Saved!</b>\n\nI will analyze this to improve my detection. Thank you, mawmaw!", parse_mode=ParseMode.HTML)
+                await self._send_markdown(update, "✅ **Feedback Saved!**\n\nI will analyze this to improve my detection. Thank you, mawmaw!")
             except Exception as e:
                 logger.error(f"Failed to save ai_correction: {e}")
-                await update.message.reply_text(f"❌ Failed to save feedback: {e}")
+                await self._send_markdown(update, f"❌ Failed to save feedback: {e}")
             return
 
-        wait_msg = await update.message.reply_text("🤔 <b>Thinking...</b>", parse_mode=ParseMode.HTML)
+        wait_msg = await update.message.reply_text("🤔 **Thinking...**")
         rows = await self.db.get_promos(hours=4)
         context_text = "\n".join([f"- {r['brand']}: {r['summary']}" for r in rows])
         answer = await self.gemini.answer_question(update.message.text, context_text)
-        await wait_msg.edit_text(answer, parse_mode=ParseMode.HTML)
+        
+        safe_text, entities = convert(answer)
+        await wait_msg.edit_text(safe_text, entities=[e.to_dict() for e in entities])
 
     async def send_alert(self, p_data: PromoExtraction, tg_link: str, 
                          timestamp: str | None = None, 
@@ -352,45 +492,46 @@ class TelegramBot:
         
         # Visual cues for status
         status_emoji = "🔥" if p_data.status == 'active' else "💀"
-        brand_tag = f"<b>{_esc(brand_label)}</b>"
+        brand_tag = f"**{brand_label}**"
         
         # Source & Latency breakdown
-        source_tag = "🤖 <b>AI Processed</b>" if source == 'ai' else "⚡ <b>Triggered Pythonly</b>"
+        source_tag = "🤖 **AI Processed**" if source == 'ai' else "⚡ **Triggered Pythonly**"
         
         perf_tag = ""
         if source == 'ai':
             total_lat = (p_data.queue_time or 0) + (p_data.ai_time or 0)
-            perf_tag = f"\n⏱ <code>Total: {total_lat:.1f}s | Q: {p_data.queue_time or 0:.0f}s | AI: {p_data.ai_time or 0:.1f}s</code>"
+            perf_tag = f"\n⏱ `Total: {total_lat:.1f}s | Q: {p_data.queue_time or 0:.0f}s | AI: {p_data.ai_time or 0:.1f}s`"
         else:
             # Fast-path: queue_time was set to total latency in listener.py
-            perf_tag = f"\n⏱ <code>Latency: {p_data.queue_time or 0:.2f}s</code>"
+            perf_tag = f"\n⏱ `Latency: {p_data.queue_time or 0:.2f}s`"
 
         text = (
             f"{status_emoji} {brand_tag}\n"
-            f"📝 {_esc(p_data.summary)}\n"
-            f"⏰ Jam: <code>{msg_wib}</code>\n"
+            f"📝 {p_data.summary}\n"
+            f"⏰ Jam: `{msg_wib}`\n"
             f"{source_tag}{perf_tag}"
         )
 
         if p_data.conditions and p_data.conditions.lower() != 'none':
-            text += f"\nℹ️ <i>{_esc(p_data.conditions)}</i>"
+            text += f"\nℹ️ _{p_data.conditions}_"
         
         if corroborations > 0:
-            text += f"\n\n👥 <b>+{corroborations} users</b> also mentioned this."
+            text += f"\n\n👥 **+{corroborations} users** also mentioned this."
             try:
                 snippets = json.loads(corroboration_texts)
                 if snippets:
-                    text += "\n" + "\n".join([f"  • <i>\"{_esc(s)}\"</i>" for s in snippets[:3]])
+                    text += "\n" + "\n".join([f"  • _\"{s}\"_" for s in snippets[:3]])
             except Exception: pass
 
         if p_data.links:
-            text += "\n\n🔗 " + " ".join([f"<a href='{l}'>Link</a>" for l in p_data.links])
+            text += "\n\n🔗 " + " ".join([f"[Link]({l})" for l in p_data.links])
 
+        safe_text, entities = convert(text)
         try:
             await self.app.bot.send_message(
                 chat_id=Config.OWNER_ID,
-                text=text,
-                parse_mode=ParseMode.HTML,
+                text=safe_text,
+                entities=[e.to_dict() for e in entities],
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 link_preview_options=LinkPreviewOptions(is_disabled=True)
             )
@@ -408,48 +549,44 @@ class TelegramBot:
             InlineKeyboardButton("🔧 Feedback", callback_data=f"feed_{items[-1][0].original_msg_id}")
         ]]
         
-        header = f"🚀 <b>{_esc(brand.upper())} BURST!</b> ({len(items)} alerts)\n"
+        header = f"🚀 **{brand.upper()} BURST!** ({len(items)} alerts)\n"
         lines = []
         for p, link, ts, corr, ctexts, src in items:
             msg_wib = _to_wib(ts)
             source_icon = "🤖" if src == 'ai' else "⚡"
             if src == 'ai':
                 total_lat = (p.queue_time or 0) + (p.ai_time or 0)
-                lat_info = f"<code>{total_lat:.1f}s (Q{p.queue_time or 0:.0f}/A{p.ai_time or 0:.1f})</code>"
+                lat_info = f"`{total_lat:.1f}s (Q{p.queue_time or 0:.0f}/A{p.ai_time or 0:.1f})`"
             else:
-                lat_info = f"<code>{p.queue_time or 0:.2f}s</code>"
+                lat_info = f"`{p.queue_time or 0:.2f}s`"
             
-            lines.append(f"• {source_icon} {_esc(p.summary)} (<code>{msg_wib}</code>) | {lat_info}")
+            lines.append(f"• {source_icon} {p.summary} (`{msg_wib}`) | {lat_info}")
 
         text = header + "\n" + "\n".join(lines)
-        try:
-            _sender = getattr(self, "_send_with_retry", None)
-            if _sender:
-                await _sender(
-                    chat_id=Config.OWNER_ID,
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-            else:
-                await self.app.bot.send_message(
-                    chat_id=Config.OWNER_ID,
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-        except Exception as e:
-            logger.error(f"Failed to send grouped alert: {e}")
-
-    async def send_plain(self, text: str, parse_mode: Any = ParseMode.HTML) -> None:
-        """Sends a plain text message to the owner."""
+        safe_text, entities = convert(text)
         try:
             await self.app.bot.send_message(
                 chat_id=Config.OWNER_ID,
-                text=text,
-                parse_mode=parse_mode,
+                text=safe_text,
+                entities=[e.to_dict() for e in entities],
+                reply_markup=InlineKeyboardMarkup(keyboard),
                 link_preview_options=LinkPreviewOptions(is_disabled=True)
             )
+        except Exception as e:
+            logger.error(f"Failed to send grouped alert: {e}")
+
+    async def send_plain(self, text: str, parse_mode: Any = None) -> None:
+        """Sends a plain text message to the owner using telegramify for auto-chunking."""
+        try:
+            results = await telegramify(text)
+            for item in results:
+                if item.content_type == ContentType.TEXT:
+                    await self.app.bot.send_message(
+                        chat_id=Config.OWNER_ID,
+                        text=item.text,
+                        entities=[e.to_dict() for e in item.entities],
+                        link_preview_options=LinkPreviewOptions(is_disabled=True)
+                    )
         except Exception as e:
             logger.error(f"Failed to send plain msg: {e}")
 
@@ -473,29 +610,24 @@ class TelegramBot:
         
         self._error_alert_cooldown[component] = now
         
-        keyboard = [[InlineKeyboardButton("🛠 Mark Fixed", callback_data=f"fix_{fid}")]]
+        keyboard = [[
+            InlineKeyboardButton("🛠 Mark Fixed", callback_data=f"fix_{fid}"),
+            InlineKeyboardButton("🔄 Retry Msg", callback_data=f"retry_{fid}")
+        ]]
         now_wib = datetime.now(pytz.timezone("Asia/Jakarta")).strftime('%H:%M:%S')
         text = (
-            f"🚨 <b>Error in {component}</b>\n"
-            f"⏰ Time: <code>{now_wib}</code>\n\n"
-            f"<code>{_esc(err_msg[:300])}</code>"
+            f"🚨 **Error in {component}**\n"
+            f"⏰ Time: `{now_wib}`\n\n"
+            f"`{err_msg[:300]}`"
         )
+        safe_text, entities = convert(text)
         try:
-            _sender = getattr(self, "_send_with_retry", None)
-            if _sender:
-                await _sender(
-                    chat_id=Config.OWNER_ID,
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-            else:
-                await self.app.bot.send_message(
-                    chat_id=Config.OWNER_ID,
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
+            await self.app.bot.send_message(
+                chat_id=Config.OWNER_ID,
+                text=safe_text,
+                entities=[e.to_dict() for e in entities],
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
         except Exception as e:
             logger.error(f"Failed to send error alert: {e}")
 
@@ -505,29 +637,37 @@ class TelegramBot:
 
     def _fmt_raw_list(self, rows: list, title: str) -> str:
         """Formatting helper for lists of promotions."""
-        lines = [f"📅 <b>{title}</b>\n"]
+        lines = [f"📅 **{title}**\n"]
         for r in rows:
             brand = r['brand'] if r['brand'] and r['brand'].lower() != 'unknown' else '❓'
-            lines.append(f"• <b>{_esc(brand)}</b>: {_esc(r['summary'])}")
+            lines.append(f"• **{brand}**: {r['summary']}")
         return "\n".join(lines)
 
     async def _send_long(self, update: Update, text: str) -> None:
-        """Sends potentially long messages by splitting into chunks."""
-        if len(text) < 4000:
-            await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-            return
-        
-        for i in range(0, len(text), 4000):
-            await update.message.reply_text(text[i:i+4000], parse_mode=ParseMode.HTML)
+        """Sends potentially long messages by splitting into chunks safely using telegramify."""
+        try:
+            results = await telegramify(text)
+            for item in results:
+                if item.content_type == ContentType.TEXT:
+                    await update.message.reply_text(
+                        item.text,
+                        entities=[e.to_dict() for e in item.entities],
+                        link_preview_options=LinkPreviewOptions(is_disabled=True)
+                    )
+        except Exception as e:
+            logger.error(f"Failed to send long markdown msg: {e}")
 
 
 def _to_wib(ts_str: str) -> str:
     """Helper to convert ISO timestamp string to WIB HH:MM."""
+    if not ts_str:
+        return "??"
     try:
-        dt = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+        from shared import _parse_ts
+        dt = _parse_ts(ts_str)
         WIB = pytz.timezone("Asia/Jakarta")
         return dt.astimezone(WIB).strftime('%H:%M')
-    except (ValueError, TypeError):
+    except Exception:
         return "??"
 
 import pytz
