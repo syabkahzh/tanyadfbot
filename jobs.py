@@ -380,6 +380,8 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
             return
         rows = rows[:5]
 
+        processed_ids = []
+
         for r in rows:
             msg_id, tg_msg_id, chat_id, text, ts = (
                 r['id'], r['tg_msg_id'], r['chat_id'], r['text'], r['timestamp']
@@ -403,10 +405,7 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                     photo_bytes = downloaded
 
                 if not photo_bytes:
-                    await db.conn.execute(
-                        "UPDATE messages SET image_processed=1 WHERE id=?", (msg_id,)
-                    )
-                    await db.conn.commit()
+                    processed_ids.append(msg_id)
                     continue
 
                 promo = await gemini.process_image(photo_bytes, text or "", msg_id)
@@ -446,12 +445,16 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                                 asyncio.create_task(_flush_alert_buffer(delay=0.5))
                             )
 
-                await db.conn.execute(
-                    "UPDATE messages SET image_processed=1 WHERE id=?", (msg_id,)
-                )
-                await db.conn.commit()
+                processed_ids.append(msg_id)
             except Exception as e:
                 logger.error(f"image_processing_job item (msg {tg_msg_id}) error: {e}")
+
+        if processed_ids:
+            ph = ','.join('?' * len(processed_ids))
+            await db.conn.execute(
+                f"UPDATE messages SET image_processed=1 WHERE id IN ({ph})", processed_ids
+            )
+            await db.conn.commit()
         logger.info("✅ [Job] Finished image_processing_job")
     except Exception as e:
         logger.error(f"image_processing_job critical error: {e}", exc_info=True)
