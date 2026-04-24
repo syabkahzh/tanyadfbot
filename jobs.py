@@ -620,7 +620,7 @@ _TIME_RETROSPECTIVE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _TIME_COMPLAINT_FILLER = re.compile(
-    r'\b(males|lag mulu|lelet|lemot|kesel|sebel|nyesel|nyesek|😭{2,})\b',
+    r'\b(males|lag mulu|lelet|lemot|kesel|sebel|nyesel|nyesek)\b|😭{2,}',
     re.IGNORECASE,
 )
 # Actionable promo signals — stronger than generic _PROMO. A time-mention
