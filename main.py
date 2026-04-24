@@ -140,7 +140,7 @@ async def _auto_triage_queue() -> None:
             break
 
     if discard_ids:
-        await db.mark_batch_processed(discard_ids)
+        await db.mark_batch_processed(discard_ids, skip_reason="triage")
         logger.info(f"Triage discarded {len(discard_ids)} noise msgs ({queue - len(discard_ids)} remain).")
 
 
@@ -232,21 +232,20 @@ async def processing_loop() -> None:
 
         try:
             # Atomically filter duplicates AND pre-reserve the surviving keys
-            # in `_recent_alerts_history` in a single critical section. This
-            # fixes a cross-batch race where N parallel AI batches could each
-            # read the same stale history, conclude "no duplicate", and all
-            # fire near-identical alerts seconds apart (the 4x Sayurbox /
-            # "Daging Sapi Rendang" alerts reported in production).
-            #
-            # The reservation is optimistic: we append every survivor even
-            # before we know its final confidence. If it ends up being
-            # dropped (low confidence → pending_confirmations, or rejected
-            # meta-commentary), leaving it in history is harmless — it just
-            # prevents re-extracting the same phrasing in the next batch,
-            # which is the correct behavior for dedup purposes.
+            # in `_recent_alerts_history` in a single critical section.
             async with _recent_alerts_lock:
                 history_snapshot = list(_recent_alerts_history)
                 filtered = await gemini.filter_duplicates(promos, history_snapshot)
+
+            # ── Training Data Collection: Identify what we skipped ──
+            success_ids_ai = {p.original_msg_id for p in promos}
+            # Definitive rejections by AI ("SKIP")
+            ai_skip_ids = [mid for mid in msg_ids if mid not in success_ids_ai]
+            # Will collect IDs rejected by post-AI logic (meta, vague unknown)
+            logic_skip_ids = []
+            # Will collect IDs that were found by AI but are duplicates
+            filtered_ids = {p.original_msg_id for p in filtered}
+            duplicate_ids = success_ids_ai - filtered_ids
 
             if filtered:
                 promos_to_save: list[tuple[int, PromoExtraction, str]] = []
@@ -276,10 +275,12 @@ async def processing_loop() -> None:
 
                     # Never alert "Unknown" brand with vague summary
                     if brand_norm == "Unknown" and len(summary_stripped) < 30:
+                        logic_skip_ids.append(m['id'])
                         continue
 
                     # Never alert meta-commentary
                     if _META_PATTERNS.search(summary_stripped):
+                        logic_skip_ids.append(m['id'])
                         continue
 
                     # Supplement links from raw text
@@ -311,7 +312,7 @@ async def processing_loop() -> None:
                                 continue
                             await db.save_pending_alert(
                                 brand_key, p.model_dump_json(), tg_link, m['timestamp'],
-                                source='ai', commit=False # commit=False + single commit at end
+                                source='ai', commit=False 
                             )
                             t = shared.get_buffer_flush_task()
                             if t is None or t.done():
@@ -326,7 +327,8 @@ async def processing_loop() -> None:
                             recently_alerted_brands.add(brand_key.lower())
                         else:
                             if brand_norm == "Unknown":
-                                continue # drop silently
+                                # drop silently (but not logic skip, it's just low confidence)
+                                continue 
 
                             if not db.conn:
                                 continue
@@ -374,9 +376,18 @@ async def processing_loop() -> None:
                         asyncio.create_task(_flush_alert_buffer(delay=0.6))
                     )
 
-                await db.save_promos_batch(promos_to_save, msg_ids)
-            else:
-                await db.mark_batch_processed(msg_ids)
+                # Final batch save and mark remaining processed
+                await db.save_promos_batch(promos_to_save, [p[0] for p in promos_to_save])
+            
+            # ── Final Triage: Mark everything else with reasons ──
+            final_skip_ids = list(set(ai_skip_ids) | set(logic_skip_ids))
+            if final_skip_ids:
+                await db.mark_batch_processed(final_skip_ids, skip_reason="ai_skip")
+            
+            if duplicate_ids:
+                # Mark duplicates normally (already in promos table from before)
+                await db.mark_batch_processed(list(duplicate_ids))
+
         except Exception as e:
             logger.error(f"Post-AI processing error: {e}", exc_info=True)
             await db.mark_batch_processed(msg_ids)
@@ -529,7 +540,7 @@ async def processing_loop() -> None:
 
             # PRE-FILTER OPTIMIZATION: 
             to_ai = []
-            noise_ids = []
+            regex_noise_ids = []
             for r in combined:
                 if gemini._is_worth_checking(r['text']):
                     to_ai.append({
@@ -541,14 +552,14 @@ async def processing_loop() -> None:
                         "reply_to_msg_id":  r['reply_to_msg_id'],
                     })
                 else:
-                    noise_ids.append(r['id'])
+                    regex_noise_ids.append(r['id'])
 
-            if noise_ids:
-                await db.mark_batch_processed(noise_ids)
+            if regex_noise_ids:
+                await db.mark_batch_processed(regex_noise_ids, skip_reason="regex")
                 async with _in_progress_lock:
-                    for nid in noise_ids:
+                    for nid in regex_noise_ids:
                         _in_progress_ids.pop(nid, None)
-                logger.debug(f"🧹 Filtered {len(noise_ids)} noise messages from batch.")
+                logger.debug(f"🧹 Filtered {len(regex_noise_ids)} noise messages from batch (reason: regex).")
 
             if not to_ai:
                 await asyncio.sleep(0.5)
