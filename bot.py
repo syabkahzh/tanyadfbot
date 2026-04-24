@@ -365,26 +365,28 @@ class TelegramBot:
             # Fast-path: queue_time was set to total latency in listener.py
             perf_tag = f"\n⏱ <code>Latency: {p_data.queue_time or 0:.2f}s</code>"
 
-        text = (
-            f"{status_emoji} {brand_tag}\n"
-            f"📝 {_esc(p_data.summary)}\n"
-            f"⏰ Jam: <code>{msg_wib}</code>\n"
+        parts = [
+            f"{status_emoji} {brand_tag}\n",
+            f"📝 {_esc(p_data.summary)}\n",
+            f"⏰ Jam: <code>{msg_wib}</code>\n",
             f"{source_tag}{perf_tag}"
-        )
+        ]
 
         if p_data.conditions and p_data.conditions.lower() != 'none':
-            text += f"\nℹ️ <i>{_esc(p_data.conditions)}</i>"
+            parts.append(f"\nℹ️ <i>{_esc(p_data.conditions)}</i>")
         
         if corroborations > 0:
-            text += f"\n\n👥 <b>+{corroborations} users</b> also mentioned this."
+            parts.append(f"\n\n👥 <b>+{corroborations} users</b> also mentioned this.")
             try:
                 snippets = json.loads(corroboration_texts)
                 if snippets:
-                    text += "\n" + "\n".join([f"  • <i>\"{_esc(s)}\"</i>" for s in snippets[:3]])
+                    parts.append("\n" + "\n".join([f"  • <i>\"{_esc(s)}\"</i>" for s in snippets[:3]]))
             except: pass
 
         if p_data.links:
-            text += "\n\n🔗 " + " ".join([f"<a href='{l}'>Link</a>" for l in p_data.links])
+            parts.append("\n\n🔗 " + " ".join([f"<a href='{l}'>Link</a>" for l in p_data.links]))
+
+        text = "".join(parts)
 
         try:
             await self.app.bot.send_message(
@@ -455,6 +457,7 @@ class TelegramBot:
 
         # Rate-limit notifications: 120s per component
         from shared import _last_error_alerts, _ERROR_ALERT_COOLDOWN
+        import time
         now = time.monotonic()
         if component in _last_error_alerts and (now - _last_error_alerts[component]) < _ERROR_ALERT_COOLDOWN:
             return

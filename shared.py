@@ -582,3 +582,7 @@ _BRAND_KEYWORDS: dict[str, str] = {
     'svip': 'ShopeeFood',
     'spud': 'SPUD',
 }
+
+# Added for error alert cooldowns
+_last_error_alerts: dict[str, float] = {}
+_ERROR_ALERT_COOLDOWN = 120.0

@@ -280,10 +280,10 @@ class GeminiProcessor:
         self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
         self._dedup_lock = asyncio.Lock()
 
-        # Both models get the same RPM limit (15 each = 30 total aggregate).
+        # Both models get the same RPM limit (12 each = 24 total aggregate).
         self._slots: dict[str, _ModelSlot] = {
-            Config.MODEL_ID:       _ModelSlot(Config.MODEL_ID,       15),
-            Config.MODEL_FALLBACK: _ModelSlot(Config.MODEL_FALLBACK, 15),
+            Config.MODEL_ID:       _ModelSlot(Config.MODEL_ID,       12),
+            Config.MODEL_FALLBACK: _ModelSlot(Config.MODEL_FALLBACK, 12),
         }
 
         # Strict round-robin index — incremented BEFORE use
