@@ -22,6 +22,9 @@ TanyaDFBot is built as a monolithic `asyncio` application:
 - **AI Throttling**: Intelligent concurrency limiting (semaphores) prevents AI API saturation and event loop stalls.
 - **Intelligent Deduplication**: Uses memory-locked history to ensure no duplicate alerts are broadcasted for the same deal.
 
+## Documentation
+Detailed project knowledge and AI-generated insights are maintained in the **[Devin DeepWiki](https://app.devin.ai/org/hafizh-survey-2ee2579f8b07463cbc32e7587f8384f4/wiki/syabkahzh/tanyadfbot?branch=master)**.
+
 ## Project Structure
 - `main.py`: Entry point and orchestrator.
 - `bot.py`: Telegram command handlers and broadcaster.
