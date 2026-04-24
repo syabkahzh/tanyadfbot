@@ -35,7 +35,10 @@ _PROMO = re.compile(
     r'sfood|gfood|grab|shopee|gojek|aman|on|jp|work|flash|limit|idm|alfa|indomaret|'
     r'nt|abis|habis|gabisa|gaada|gamau|minbel|r\+s\+t\+k|r\+s\+t\+c\+k|r\+st\+ck|'
     r'cb|kesbek|c\+s\+h\+b\+c\+k|cash back|kuota|slot|redeem|qr|scan|edc|'
-    r'membership|member|mamber)\b', re.IGNORECASE
+    r'membership|member|mamber|'
+    r'tukpo|murce|murmer|sopi|tsel|cgv|xxi|svip|badut|war|begal|kreator|'
+    r'kopken|chatime|gindaco|solaria|rotio|spx|gopay|spay|ovo|'
+    r'neo|tmrw|saqu|seabank|hero)\b', re.IGNORECASE
 )
 _JUNK_SUMMARY_PATTERN = re.compile(
     r'\b(tidak ada|none|n/a|tidak ditemukan|no promo)\b', re.IGNORECASE
@@ -85,15 +88,21 @@ class TrendResponse(BaseModel):
 
 _EXTRACT_SYSTEM = """Kamu ekstrak promo dari percakapan grup deal hunter Indonesia (Discountfess).
 
-ISTILAH KUNCI: mm=Mall Monday, bs=BerburuSales, nt=gagal/expired, jp=jackpot, sfood=ShopeeFood, gfood=GoFood
+ISTILAH KUNCI: mm=Mall Monday, bs=BerburuSales, nt=gagal/expired, jp=jackpot, sfood=ShopeeFood, gfood=GoFood,
+tukpo=Tokopedia, murce=murah meriah, sopi=Shopee, tsel=Telkomsel, badut=beli-ada-duit (cashback trick)
 
-STATUS: active jika ada "aman/on/jp/work/restock/berhasil" | expired jika "abis/nt/sold out/ga bisa" | unknown jika ambigu
+STATUS: active jika ada "aman/on/jp/work/restock/berhasil/nyala/cair/lancar/masuk" | expired jika "abis/nt/sold out/ga bisa/koid/hangus/zonk" | unknown jika ambigu
 
-EKSTRAK jika: ada sinyal aktif/expired + info brand/platform. SKIP jika: pertanyaan murni, OOT, curhat tanpa info promo.
-JANGAN EKSTRAK: form isi data pribadi (NIK/KTP/alamat), kuis berhadiah yang butuh upload foto/data, konten OOT, atau pesan yang tidak menyebut diskon/harga/voucher/cashback konkret.
+ATURAN UTAMA:
+1. Pahami konteks obrolan (slang). Jika pengguna bilang "nyala", "on", "cair", "masuk", atau "udah pake" terkait suatu brand, itu ADALAH event promo yang valid. Ekstrak sebagai active.
+2. JANGAN MEMAKSAKAN ANGKA KONKRET. Jika diskon/harga tidak disebutkan tapi status promo jelas aktif, biarkan field harga null/kosong, tetapi TETAP ekstrak sebagai data valid.
+3. Abaikan obrolan OOT (Out of Topic) seperti review barang fisik (parfum, makanan tanpa konteks promo), keluhan rute/kurir, atau curhatan non-promo.
+
+EKSTRAK jika: ada sinyal aktif/expired + info brand/platform (bahkan tanpa angka harga/diskon). SKIP jika: pertanyaan murni, OOT, curhat tanpa info promo.
+JANGAN EKSTRAK: form isi data pribadi (NIK/KTP/alamat), kuis berhadiah yang butuh upload foto/data, konten OOT.
 
 Context ditulis sebagai C: sebelum MSG: — gunakan untuk resolve brand jika pesan utama cuma "aman" atau "on".
-Summary: 1 kalimat informatif, sertakan harga/diskon jika ada.
+Summary: 1 kalimat informatif, sertakan harga/diskon jika ada. Jika tidak ada angka, cukup sebutkan status + brand.
 Brand: Gunakan nama yang konsisten — "HopHop" bukan "Hophop". Jika ragu → "Unknown" (bukan "sunknown" atau variasi lain).
 
 PENTING: Jika kamu tidak yakin ada promo nyata, JANGAN isi summary dengan deskripsi tentang pesan itu sendiri seperti "User bertanya tentang..." atau "Pesan ini membahas...". Lebih baik SKIP sama sekali.
@@ -108,19 +117,23 @@ ATURAN BRAND (PENTING — sering salah):
 
 ATURAN OUTPUT:
 - Jika SKIP: {"summary": "SKIP", "brand": "SKIP", "conditions": "", "valid_until": "", "status": "unknown", "original_msg_id": 0}
-- Jika promo valid: summary 1 kalimat padat dengan brand + diskon/harga + syarat utama
-- Brand: nama konsisten (Alfamart, Indomaret, Tokopedia, Shopee, ShopeeFood, GoFood, ShopeePay, GoPay, dll). "Unknown" hanya jika benar-benar tidak jelas.
+- Jika promo valid: summary 1 kalimat padat dengan brand + status. Sertakan harga/diskon jika disebutkan, tapi boleh kosong jika status jelas.
+- Brand: nama konsisten (Alfamart, Indomaret, Tokopedia, Shopee, ShopeeFood, GoFood, ShopeePay, GoPay, Solaria, CGV, Telkomsel, dll). "Unknown" hanya jika benar-benar tidak jelas.
 
 CONTOH YANG HARUS DI-SKIP:
 - 'wkwkwk iya bener' → OOT
 - 'hasilnya masih sama kak' → konteks tidak cukup, skip
 - 'mau tanya dong, masih on gak?' → pertanyaan murni
 - 'noted makasih' → bukan promo
+- 'aman kak rutenya' → OOT (transportasi, bukan promo)
 
 CONTOH YANG HARUS DIEKSTRAK:
 - 'sfood masih on 40k dapet 2' → active, ShopeeFood
 - 'gobiz 30% off s/d jam 12 aman dicoba' → active, GoBiz
-- 'NT gaes, udah abis' → expired, status flip"""
+- 'NT gaes, udah abis' → expired, status flip
+- 'tsel nyala' → active, Telkomsel (tanpa angka pun tetap valid)
+- 'sopi cair' → active, Shopee (status jelas aktif meski tanpa angka)
+- 'cgv on ges' → active, CGV"""
 
 _DEDUP_SYSTEM = "Kamu agen deteksi duplikasi. Output HANYA angka indeks dipisah koma."
 
@@ -174,6 +187,23 @@ _STRONG_KEYWORDS: set[str] = {
     'luber','pecah','flash','sale','deal','murah','hemat','bonus',
     'ongkir','gratis ongkir',
     'membership','member','mamber',
+    # Slang discovered from raw data analysis (2026-04-24)
+    'tukpo','tukar poin',            # tukar poin (point exchange)
+    'murce','murmer',                 # murah/cheap slang
+    'sopi','sopie',                   # Shopee misspelling
+    'tsel','mytsel',                  # Telkomsel slang
+    'cgv','xxi',                      # cinema brands
+    'svip',                           # ShopeeFood VIP
+    'badut',                          # deal-camping slang
+    'war',                            # war = competing for deals
+    'begal',                          # aggressive deal grab
+    'kreator','live kreator',         # Shopee/Tokped live creator events
+    'kopken','chatime','gindaco',     # food brands seen in data
+    'solaria','rotio',                # restaurant brands
+    'spx','shopee xpress',            # logistics brand
+    'gopay','spay','shopeepay','ovo', # payment brands
+    'neo','tmrw','saqu','seabank',    # digital bank brands
+    'hero',                           # Hero supermarket
 }
 
 _JUNK_SUMMARIES: set[str] = {'summary','none','n/a','-','tidak ada','tidak ditemukan'}
@@ -445,24 +475,31 @@ class GeminiProcessor:
             return False
 
         words = t.split()
-        if len(words) < 2 and not any(kw in t for kw in ['sfood','gfood','grab','aman','on','jp']):
-            return False
 
-        question_words = {'ga','gak','nggak','apa','gimana','berapa','kapan','dimana','kenapa','ada','masih'}
-        if t.endswith('?') and words and words[0] in question_words:
-            return False
-        if len(words) <= 4 and t.endswith('?'):
-            return False
-
-        if _SOCIAL_FILLER.match(t):
-            return False
-
-        # Strong signal bypass
+        # Strong signal bypass — check FIRST, before any length/question gates.
+        # This ensures brand mentions and deal keywords always reach AI.
         if any(kw in t for kw in _STRONG_KEYWORDS):
             return True
         if _WORD_BOUNDARY_KEYWORDS.search(t):
             return True
-        
+
+        if len(words) < 2:
+            return False
+
+        # Questions with a brand or deal keyword are still worth checking —
+        # they provide trend context ("ada 99% lg kah?", "cgv masih on?").
+        # Only drop pure questions with zero deal signal.
+        question_words = {'ga','gak','nggak','apa','gimana','berapa','kapan','dimana','kenapa','ada','masih'}
+        if t.endswith('?') and words and words[0] in question_words:
+            if not _PROMO.search(t):
+                return False
+        if len(words) <= 3 and t.endswith('?'):
+            if not _PROMO.search(t):
+                return False
+
+        if _SOCIAL_FILLER.match(t):
+            return False
+
         # If no strong keywords, require more length to be considered "content"
         if len(words) <= 4:
             return False
@@ -692,6 +729,20 @@ class GeminiProcessor:
         res.original_msg_id = original_msg_id
         return res
 
+    @staticmethod
+    def _row_get(m: Any, key: str, default: Any = None) -> Any:
+        """Safely access a key from a dict or aiosqlite.Row.
+
+        aiosqlite.Row (sqlite3.Row) does not have a .get() method,
+        so we need this helper to avoid AttributeError when rows
+        come directly from DB queries (e.g. get_recent_messages).
+        """
+        try:
+            val = m[key]
+            return val if val is not None else default
+        except (KeyError, IndexError):
+            return default
+
     async def generate_narrative(self, messages: Sequence[dict[str, Any] | Any],
                                   db: Any = None) -> list[TrendItem]:
         """Generates structured trend narratives for recent traffic."""
@@ -702,9 +753,12 @@ class GeminiProcessor:
         parent_map: dict[int, str] = {}
         if db is not None:
             try:
-                chat_id = messages[0]['chat_id']
-                reply_ids = [m['reply_to_msg_id'] for m in messages
-                             if m['reply_to_msg_id']]
+                chat_id = self._row_get(messages[0], 'chat_id')
+                reply_ids = [
+                    self._row_get(m, 'reply_to_msg_id')
+                    for m in messages
+                    if self._row_get(m, 'reply_to_msg_id')
+                ]
                 if chat_id is not None and reply_ids:
                     parent_map = await db.get_deep_context_bulk(
                         reply_ids, chat_id, max_depth=2
@@ -715,12 +769,16 @@ class GeminiProcessor:
         lines: list[str] = []
         for m in messages[:50]:
             ctx = ""
-            rid = m['reply_to_msg_id']
+            rid = self._row_get(m, 'reply_to_msg_id')
             if rid and rid in parent_map:
                 parent_txt = (parent_map[rid] or "")[-120:].replace("\n", " ")
                 if parent_txt:
                     ctx = f" [reply→ {parent_txt}]"
-            lines.append(f"ID:{m['tg_msg_id']} {m['sender_name']}:{ctx} {m['text']}")
+            lines.append(
+                f"ID:{self._row_get(m, 'tg_msg_id', '?')} "
+                f"{self._row_get(m, 'sender_name', '?')}:{ctx} "
+                f"{self._row_get(m, 'text', '')}"
+            )
         context = "\n- ".join(lines)
         target  = await self._pick_model()
         

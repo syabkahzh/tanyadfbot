@@ -277,6 +277,12 @@ async def processing_loop() -> None:
                     brand_norm = normalize_brand(p.brand)
                     summary_stripped = (p.summary or "").strip()
 
+                    # Feed temporal context from AI-resolved brands
+                    if brand_norm != "Unknown":
+                        await shared.context_tracker.update_brand(
+                            m['chat_id'], brand_norm
+                        )
+
                     # Never alert "Unknown" brand with vague summary
                     if brand_norm == "Unknown" and len(summary_stripped) < 30:
                         continue
@@ -309,6 +315,9 @@ async def processing_loop() -> None:
                         confidence = _score_confidence(p, m, recently_alerted_brands)
 
                         if confidence >= 45:
+                            # Fuzzy dedup: skip near-identical alerts
+                            if await shared.is_fuzzy_duplicate(brand_key, p.summary):
+                                continue
                             await db.save_pending_alert(
                                 brand_key, p.model_dump_json(), tg_link, m['timestamp'],
                                 source='ai', commit=False # commit=False + single commit at end

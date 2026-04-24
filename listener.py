@@ -27,7 +27,8 @@ TIME_PATTERN = re.compile(
 # 'on/ready/aktif/restock/ristok' stay in the AMBIGUOUS set below and require a
 # known brand plus length guard.
 INSTANT_PATTERN = re.compile(
-    r'\b(on|jp|jackpot|work|aman|luber|pecah|berhasil|restock|ristok|aktif|ready|'
+    r'\b(on|jp|jackpot|work|aman|luber|pecah|berhasil|gacor|mantul|restock|ristok|aktif|ready|'
+    r'nyala|masuk|udah pake|dikirim|cair|done|lancar|'
     r'potongan|idm|alfa|indomaret|ag|alfagift|voc|voucher|minbel|'
     r'r\+s\+t\+k|r\+s\+t\+c\+k|r\+st\+ck|cb|kesbek|c\+s\+h\+b\+c\+k|cash back|'
     r'qr|scan|edc|membership|member|mamber)\b',
@@ -35,11 +36,12 @@ INSTANT_PATTERN = re.compile(
 )
 
 NEG_PATTERN = re.compile(
-    r'\b(kapan|kok|ga pernah|tidak|belom|belum|gaada|ngga|ga ada|'
+    r'\b(kapan|kok|ga pernah|tidak|belom|belum|gaada|ngga|ga ada|gak|nggak|bukan|jangan|'
     r'iya|cuma|pas|tadi|gamau|jamber|jambrapa|jamberapa|'
     r'b\+r\+p|brp|berapa|drmana|dimana|dmn|mana|d\+r\+m\+n|'
     r'tunggu|nunggu|nanti|besok|lusa|tar\b|dulu|sore|malem|malam|pagi|'
     r'harusnya|katanya|mungkin|kayaknya|kyknya|sepertinya|entah|'
+    r'koid|hangus|refund|batal|balsis|ngebadut|zonk|habis|sold|error|'
     r'coba|nyoba|semoga|mudah.mudahan|insya)\b',
     re.IGNORECASE
 )
@@ -77,6 +79,8 @@ class TelethonListener:
             _recent_alerts_history, _recent_alerts_lock,
             _fastpath_brand_last_fired, _fastpath_brand_lock,
             FASTPATH_BRAND_DEDUP_SEC,
+            context_tracker, TRANSIT_NOISE_PATTERN,
+            is_fuzzy_duplicate,
         )
         from db import normalize_brand
         from processor import PromoExtraction
@@ -98,6 +102,9 @@ class TelethonListener:
             return False
         if NEG_PATTERN.search(text_lower):
             return False
+        # Transit-noise gate: "aman kak rutenya" is NOT a deal signal
+        if 'aman' in text_lower and TRANSIT_NOISE_PATTERN.search(text):
+            return False
 
         # Standalone "aman" — MUST be a reply to a known parent AND not a repeat
         # reaction to the same parent we already alerted on.
@@ -116,21 +123,32 @@ class TelethonListener:
 
         # Brand resolution — DB lookup with hard timeout so fast-path stays fast
         parent_text = None
+        chat_id     = message_data['chat_id']
         brand       = normalize_brand(_guess_brand(text))
+
+        # If brand found explicitly, update temporal context for future messages
+        if brand != "Unknown":
+            await context_tracker.update_brand(chat_id, brand)
 
         if brand == "Unknown" and message_data.get('reply_to_msg_id'):
             try:
                 async with asyncio.timeout(0.5):   # BUG 4 FIX
                     async with self.db.conn.execute(
                         "SELECT text FROM messages WHERE tg_msg_id=? AND chat_id=?",
-                        (message_data['reply_to_msg_id'], message_data['chat_id'])
+                        (message_data['reply_to_msg_id'], chat_id)
                     ) as cur:
                         row = await cur.fetchone()
                         if row:
                             parent_text = row['text']
                 brand = normalize_brand(_guess_brand(parent_text or text))
+                if brand != "Unknown":
+                    await context_tracker.update_brand(chat_id, brand)
             except (asyncio.TimeoutError, Exception):
                 pass   # stay Unknown — fast-path may skip, that's fine
+
+        # Temporal context fallback: inherit brand from recent conversation
+        if brand == "Unknown":
+            brand = await context_tracker.get_context(chat_id)
 
         # Strict: ambiguous signals require a known brand (unless ALL-CAPS shout)
         AMBIGUOUS = {'on', 'ready', 'aktif', 'restock', 'ristok'}
@@ -191,6 +209,10 @@ class TelethonListener:
         )
 
         tg_link = _make_tg_link(message_data['chat_id'], message_data['tg_msg_id'])
+
+        # Fuzzy dedup: suppress near-identical alerts before DB/broadcast
+        if await is_fuzzy_duplicate(brand, summary):
+            return False
 
         await db.save_pending_alert(
             brand=brand,
