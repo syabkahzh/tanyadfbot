@@ -563,6 +563,13 @@ class GeminiProcessor:
             normalize_brand(r['brand']).lower() for r in history_tail
         }
 
+        history_words: list[tuple[str, set[str]]] = []
+        for r in reversed(history_tail):
+            r_brand_key = normalize_brand(r['brand']).lower()
+            if r_brand_key in recent_brands_set:
+                r_words = set(re.findall(r'\w+', r['summary'].lower())[:8])
+                history_words.append((r_brand_key, r_words))
+
         unique: list[PromoExtraction] = []
         # Intra-batch reservation: what we've already accepted in THIS call.
         intra_batch_keys: set[str] = set()
@@ -583,9 +590,8 @@ class GeminiProcessor:
                     and brand_key != 'unknown'
                     and p.status == 'active'):
                 is_dupe = False
-                for r in reversed(history_tail):
-                    if normalize_brand(r['brand']).lower() == brand_key:
-                        r_words = set(re.findall(r'\w+', r['summary'].lower())[:8])
+                for r_brand, r_words in history_words:
+                    if r_brand == brand_key:
                         if len(p_words & r_words) >= 2:
                             is_dupe = True
                             break
