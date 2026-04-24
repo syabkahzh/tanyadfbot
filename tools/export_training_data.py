@@ -33,7 +33,6 @@ def export(db_path: str, out_path: str) -> None:
         FROM messages m
         INNER JOIN promos p ON m.id = p.source_msg_id
         WHERE m.text IS NOT NULL 
-        AND m.id >= 76179
         AND length(trim(m.text)) > 5
     """)
     positives = [row["text"] for row in cur.fetchall()]
@@ -45,7 +44,6 @@ def export(db_path: str, out_path: str) -> None:
         SELECT DISTINCT text
         FROM messages
         WHERE skip_reason = 'ai_skip'
-        AND id >= 76179
         AND text IS NOT NULL AND length(trim(text)) > 5
         ORDER BY RANDOM()
         LIMIT {neg_limit}

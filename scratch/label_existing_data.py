@@ -1,10 +1,9 @@
 import sqlite3
 import os
 
-def label_data():
-    db_path = "tanya_main_vps.db"
+def label_data(db_path="tanya_main_vps.db"):
     if not os.path.exists(db_path):
-        print(f"❌ Error: {db_path} not found. Please ensure your downloaded DB is named exactly this.")
+        print(f"❌ Error: {db_path} not found.")
         return
 
     conn = sqlite3.connect(db_path)
@@ -52,4 +51,6 @@ def label_data():
     print(f"\nNext: Run your export script to generate the FastText .txt file!")
 
 if __name__ == "__main__":
-    label_data()
+    import sys
+    path = sys.argv[1] if len(sys.argv) > 1 else "tanya_main_vps.db"
+    label_data(path)
