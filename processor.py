@@ -65,6 +65,7 @@ class PromoExtraction(BaseModel):
     conditions: str
     valid_until: str
     status: Literal["active", "expired", "unknown"]
+    confidence: float # 0.0 to 1.0 based on AI certainty
     links: List[str] = []
     detected_at: Optional[str] = None
     queue_time: Optional[float] = None
@@ -118,6 +119,7 @@ ATURAN BRAND (PENTING — sering salah):
 ATURAN OUTPUT:
 - Jika SKIP: {"summary": "SKIP", "brand": "SKIP", "conditions": "", "valid_until": "", "status": "unknown", "original_msg_id": 0}
 - Jika promo valid: summary 1 kalimat padat dengan brand + status. Sertakan harga/diskon jika disebutkan, tapi boleh kosong jika status jelas.
+- Confidence: Berikan skor 0.0 - 1.0. Skor tinggi (>0.85) jika ada bukti kuat (struk/screenshot/keyword jelas). Skor rendah (<0.7) jika ambigu atau cuma diskusi singkat tanpa bukti konkrit.
 - Brand: nama konsisten (Alfamart, Indomaret, Tokopedia, Shopee, ShopeeFood, GoFood, ShopeePay, GoPay, Solaria, CGV, Telkomsel, dll). "Unknown" hanya jika benar-benar tidak jelas.
 
 CONTOH YANG HARUS DI-SKIP:

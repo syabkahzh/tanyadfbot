@@ -447,13 +447,8 @@ class TelegramBot:
                     parse_mode=ParseMode.MARKDOWN
                 )
             else:
-                # Instant save for structured options
-                mapping = {
-                    "brand": "Wrong brand identified",
-                    "expired": "Promo is already expired",
-                    "dup": "Duplicate of another alert"
-                }
-                correction = mapping.get(option, "Other error")
+                mapping = {"brand": "Wrong brand", "expired": "Expired", "dup": "Duplicate"}
+                correction = mapping.get(option, "Feedback")
                 try:
                     await self.db.conn.execute(
                         "INSERT INTO ai_corrections (original_msg_id, correction) VALUES (?, ?)",
@@ -465,14 +460,37 @@ class TelegramBot:
                         parse_mode=ParseMode.MARKDOWN
                     )
                 except Exception as e:
-                    logger.error(f"Failed to save structured feedback: {e}")
+                    logger.error(f"Failed to save fopt: {e}")
+            return
+
+        elif data.startswith("poll_"):
+            parts = data.split("_")
+            orig_msg_id = int(parts[1])
+            vote = parts[2]
+            
+            mapping = {"yes": "VERIFIED_PROMO", "no": "NOT_A_PROMO", "spam": "SPAM_OR_NOISE"}
+            correction = mapping.get(vote, "VOTED")
+            
+            try:
+                if vote in ("no", "spam"):
+                    await self.db.conn.execute(
+                        "INSERT INTO ai_corrections (original_msg_id, correction) VALUES (?, ?)",
+                        (orig_msg_id, correction)
+                    )
+                    await self.db.conn.commit()
+                
+                status_emoji = "✅" if vote == "yes" else ("❌" if vote == "no" else "🚫")
+                await query.edit_message_text(
+                    text=f"{query.message.text}\n\n{status_emoji} **Verdict: {vote.upper()}**",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                logger.error(f"Failed poll vote: {e}")
             return
 
         elif data.startswith("fix_"):
             fid = int(data.split("_")[1])
             await self.db.mark_failure_fixed(fid)
-            
-            # Update original message to show it's marked
             if query.message:
                 reply_markup = query.message.reply_markup
                 new_text = f"{query.message.text}\n\n🛠 **Fix Marked!** Ready to retry."
@@ -482,26 +500,21 @@ class TelegramBot:
                     entities=[e.to_dict() for e in entities],
                     reply_markup=reply_markup
                 )
+            return
 
         elif data.startswith("retry_"):
             fid = int(data.split("_")[1])
-            
-            # 1. Mark failure as retried in DB
             await self.db.mark_failure_retried(fid)
-            
-            # 2. Find the associated message ID and re-queue it
             async with self.db.conn.execute("SELECT source_msg_id FROM failures WHERE id = ?", (fid,)) as cur:
                 row = await cur.fetchone()
                 msg_id = row[0] if row else None
             
             requeued = False
-            if msg_id:
-                requeued = await self.db.requeue_message(msg_id)
+            if msg_id: requeued = await self.db.requeue_message(msg_id)
             
-            # 3. Update original message to show it's retrying
             if query.message:
                 reply_markup = query.message.reply_markup
-                status_text = "🔄 **Retry Marked!** Re-queueing..." if requeued else "🔄 **Retry Marked!** (No specific message found to re-queue)"
+                status_text = "🔄 **Retry Marked!** Re-queueing..." if requeued else "🔄 **Retry Marked!**"
                 new_text = f"{query.message.text}\n\n{status_text}"
                 safe_text, entities = convert(new_text)
                 await query.edit_message_text(
@@ -509,10 +522,12 @@ class TelegramBot:
                     entities=[e.to_dict() for e in entities],
                     reply_markup=reply_markup
                 )
+            return
 
         elif data.startswith("today_page:"):
             page = int(data.split(":")[1])
             await self._render_today_page(query, page=page)
+            return
 
     @_owner_only
     async def handle_qa(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -668,6 +683,36 @@ class TelegramBot:
             )
         except Exception as e:
             logger.error(f"Failed to send photo: {e}")
+
+    async def send_verification_poll(self, p_data: PromoExtraction, tg_link: str) -> None:
+        """Sends a verification poll for low-confidence AI extractions."""
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Deal", callback_data=f"poll_{p_data.original_msg_id}_yes"),
+                InlineKeyboardButton("❌ No Deal", callback_data=f"poll_{p_data.original_msg_id}_no"),
+                InlineKeyboardButton("🚫 Spam", callback_data=f"poll_{p_data.original_msg_id}_spam")
+            ],
+            [InlineKeyboardButton("🛒 Buka Pesan", url=tg_link)]
+        ]
+        
+        text = (
+            f"🗳 **Deal or No Deal?**\n"
+            f"AI is unsure about this extraction (Conf: `{p_data.confidence:.2f}`)\n\n"
+            f"🏪 **{p_data.brand}**\n"
+            f"📝 {p_data.summary}\n"
+            f"ℹ️ _{p_data.conditions or 'No conditions'}_"
+        )
+        
+        safe_text, entities = convert(text)
+        try:
+            await self.app.bot.send_message(
+                chat_id=Config.OWNER_ID,
+                text=safe_text,
+                entities=[e.to_dict() for e in entities],
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception as e:
+            logger.error(f"Failed to send verification poll: {e}")
 
     async def alert_error(self, component: str, error: Exception, source_msg_id: int | None = None) -> None:
         """Alerts the owner about a system error (rate-limited)."""

@@ -243,6 +243,11 @@ async def processing_loop() -> None:
                         brand_key  = normalize_brand(p.brand)
                         confidence = _score_confidence(p, m, recently_alerted_brands)
 
+                        # Trigger verification poll for low-confidence extractions (< 0.70)
+                        if p.confidence < 0.70 and bot:
+                            await bot.send_verification_poll(p, tg_link)
+                            continue
+
                         if confidence >= 45:
                             if await shared.is_fuzzy_duplicate(brand_key, p.summary):
                                 continue
@@ -562,6 +567,7 @@ async def main() -> None:
     scheduler.add_job(jobs.brewing_digest_job, "cron", minute=0, hour="0,1,5-23", id="brewing_digest", args=[bot])
     scheduler.add_job(jobs.hourly_digest_job, "cron", minute=1, hour="0,1,5-23", id="digest", args=[db, gemini, bot, WIB], jitter=60)
     scheduler.add_job(jobs.midnight_digest_job, "cron", hour=5, minute=0, id="midnight_digest", args=[db, gemini, bot], jitter=300)
+    scheduler.add_job(jobs.visual_trend_job, "cron", hour=9, minute=0, id="visual_trend", args=[db, bot], jitter=120)
     scheduler.add_job(jobs.halfhour_digest_job, "cron", minute="14,44", id="halfhour_digest", args=[db, gemini, bot, WIB], jitter=240)
     scheduler.add_job(jobs.heartbeat_job, "cron", minute=30, id="heartbeat", args=[db, gemini, bot, WIB], jitter=120)
     scheduler.add_job(jobs.hot_thread_job, "interval", minutes=15, id="hot_threads", args=[db, gemini, listener, bot, WIB, _alerted_hot_threads])
