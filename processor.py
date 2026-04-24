@@ -182,8 +182,8 @@ _STRONG_KEYWORDS: set[str] = {
     'klaim','claim','restock','ristok','nt','abis','habis',
     'gabisa','gaada','g+b+s','gamau','minbel',
     'kuota','limit','slot','redeem','qr','scan','edc',
-    'r+s+t+k','r+s+t+c\+k','r\+st\+ck',
-    'cb','kesbek','c\+s\+h\+b\+c\+k','cash back',
+    'r+s+t+k',r'r+s+t+c\+k',r'r\+st\+ck',
+    'cb','kesbek',r'c\+s\+h\+b\+c\+k','cash back',
     'luber','pecah','flash','sale','deal','murah','hemat','bonus',
     'ongkir','gratis ongkir',
     'membership','member','mamber',
@@ -280,10 +280,10 @@ class GeminiProcessor:
         self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
         self._dedup_lock = asyncio.Lock()
 
-        # Both models get the same RPM limit (15 each = 30 total aggregate).
+        # Both models get the same RPM limit (12 each = 24 total aggregate).
         self._slots: dict[str, _ModelSlot] = {
-            Config.MODEL_ID:       _ModelSlot(Config.MODEL_ID,       15),
-            Config.MODEL_FALLBACK: _ModelSlot(Config.MODEL_FALLBACK, 15),
+            Config.MODEL_ID:       _ModelSlot(Config.MODEL_ID,       12),
+            Config.MODEL_FALLBACK: _ModelSlot(Config.MODEL_FALLBACK, 12),
         }
 
         # Strict round-robin index — incremented BEFORE use
@@ -418,6 +418,10 @@ class GeminiProcessor:
                 if attempt == retries:
                     logger.error(f"AI call failed after {retries + 1} attempts: {err[:200]}")
                     self._slots[slot_acquired].release_last()
+                    if is_internal:
+                        # 500 internals shouldn't penalize the message's failure count permanently.
+                        # We return a specific sentinel string that the caller can interpret as a transient error.
+                        raise Exception("TEMP_500_INTERNAL")
                     return None
 
                 await asyncio.sleep(1.5 ** attempt)

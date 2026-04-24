@@ -85,11 +85,14 @@ def normalize_brand(brand: str | None) -> str:
     """
     if not brand:
         return "Unknown"
-    b = brand.strip()
-    if b.lower() in ('unknown', 'sunknown', 'bunknown', ''):
+
+    b_lower = brand.strip().lower()
+    if b_lower in ('unknown', 'sunknown', 'bunknown', ''):
         return "Unknown"
-    if b.lower() in _BRAND_CANON:
-        return _BRAND_CANON[b.lower()]
+    if b_lower in _BRAND_CANON:
+        return _BRAND_CANON[b_lower]
+
+    b = brand.strip()
     return b[0].upper() + b[1:] if b else "Unknown"
 
 
@@ -932,7 +935,7 @@ class Database:
         from config import Config
         try:
             return os.path.getsize(Config.DB_PATH) / (1024 * 1024)
-        except:
+        except Exception:
             return 0.0
 
     async def get_latest_message_ts(self) -> str | None:

@@ -189,7 +189,7 @@ class TelegramBot:
         spawn_age = (now_m - spawn_ts) if spawn_ts else -1
 
         try: oldest_age_sec = await self.db.get_oldest_unprocessed_age_sec()
-        except: oldest_age_sec = None
+        except Exception: oldest_age_sec = None
 
         async with self.db.conn.execute("SELECT COUNT(*) FROM messages WHERE processed=0") as cur:
             queue = (await cur.fetchone())[0]
@@ -201,7 +201,7 @@ class TelegramBot:
         try:
             tg_client = shared.listener.client
             mtproto_connected = bool(tg_client.is_connected())
-        except: mtproto_connected = False
+        except Exception: mtproto_connected = False
         ingest_age = shared.seconds_since_last_ingest()
 
         listener_health = "DISCONNECTED"
@@ -381,7 +381,7 @@ class TelegramBot:
                 snippets = json.loads(corroboration_texts)
                 if snippets:
                     text += "\n" + "\n".join([f"  • <i>\"{_esc(s)}\"</i>" for s in snippets[:3]])
-            except: pass
+            except Exception: pass
 
         if p_data.links:
             text += "\n\n🔗 " + " ".join([f"<a href='{l}'>Link</a>" for l in p_data.links])
@@ -423,12 +423,21 @@ class TelegramBot:
 
         text = header + "\n" + "\n".join(lines)
         try:
-            await self.app.bot.send_message(
-                chat_id=Config.OWNER_ID,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+            _sender = getattr(self, "_send_with_retry", None)
+            if _sender:
+                await _sender(
+                    chat_id=Config.OWNER_ID,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            else:
+                await self.app.bot.send_message(
+                    chat_id=Config.OWNER_ID,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
         except Exception as e:
             logger.error(f"Failed to send grouped alert: {e}")
 
@@ -454,12 +463,15 @@ class TelegramBot:
         fid = await self.db.log_failure(component, err_msg, tb)
 
         # Rate-limit notifications: 120s per component
-        from shared import _last_error_alerts, _ERROR_ALERT_COOLDOWN
-        now = time.monotonic()
-        if component in _last_error_alerts and (now - _last_error_alerts[component]) < _ERROR_ALERT_COOLDOWN:
+        import time; now = time.monotonic()
+        if not hasattr(self, '_error_alert_cooldown'):
+            self._error_alert_cooldown = {}
+            self._ERROR_ALERT_COOLDOWN_SEC = 120.0
+
+        if component in self._error_alert_cooldown and (now - self._error_alert_cooldown[component]) < self._ERROR_ALERT_COOLDOWN_SEC:
             return
         
-        _last_error_alerts[component] = now
+        self._error_alert_cooldown[component] = now
         
         keyboard = [[InlineKeyboardButton("🛠 Mark Fixed", callback_data=f"fix_{fid}")]]
         now_wib = datetime.now(pytz.timezone("Asia/Jakarta")).strftime('%H:%M:%S')
@@ -469,12 +481,21 @@ class TelegramBot:
             f"<code>{_esc(err_msg[:300])}</code>"
         )
         try:
-            await self.app.bot.send_message(
-                chat_id=Config.OWNER_ID,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+            _sender = getattr(self, "_send_with_retry", None)
+            if _sender:
+                await _sender(
+                    chat_id=Config.OWNER_ID,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            else:
+                await self.app.bot.send_message(
+                    chat_id=Config.OWNER_ID,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
         except Exception as e:
             logger.error(f"Failed to send error alert: {e}")
 
@@ -506,7 +527,7 @@ def _to_wib(ts_str: str) -> str:
         dt = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
         WIB = pytz.timezone("Asia/Jakarta")
         return dt.astimezone(WIB).strftime('%H:%M')
-    except:
+    except (ValueError, TypeError):
         return "??"
 
 import pytz

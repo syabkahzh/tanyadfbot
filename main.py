@@ -152,9 +152,13 @@ async def processing_loop() -> None:
                         logger.warning(f"AI rate limits exhausted — requeuing {len(msgs)} msgs for later.")
                         ai_failed = True
                     except Exception as e:
-                        logger.error(f"AI processing error: {e}", exc_info=True)
-                        await db.increment_ai_failure_count(msg_ids)
-                        ai_failed = True
+                        if str(e) == "TEMP_500_INTERNAL":
+                            logger.warning(f"AI internal 500 error — requeuing {len(msgs)} msgs for later.")
+                            ai_failed = True
+                        else:
+                            logger.error(f"AI processing error: {e}", exc_info=True)
+                            await db.increment_ai_failure_count(msg_ids)
+                            ai_failed = True
             finally:
                 shared._active_ai_tasks -= 1
         except BaseException:
@@ -253,30 +257,18 @@ async def processing_loop() -> None:
                             recently_alerted_brands.add(brand_key.lower())
                         else:
                             if brand_norm == "Unknown": continue
-                            if not db.conn: continue
-                            async with db.conn.execute(
-                                "SELECT id, corroboration_texts FROM pending_confirmations WHERE brand=? LIMIT 1",
-                                (brand_key,)
-                            ) as cur:
-                                existing = await cur.fetchone()
-                            
                             snippet = (m['text'] or '')[:100].strip()
-                            if existing:
-                                try:
-                                    texts = json.loads(existing['corroboration_texts'])
-                                except: texts = []
-                                if snippet and snippet not in texts: texts.append(snippet)
-                                await db.conn.execute(
-                                    "UPDATE pending_confirmations SET corroborations=corroborations+1, corroboration_texts=? WHERE id=?",
-                                    (json.dumps(texts), existing['id'])
-                                )
-                            else:
-                                expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')
-                                texts = [snippet] if snippet else []
-                                await db.conn.execute(
-                                    "INSERT INTO pending_confirmations (brand, p_data_json, tg_link, timestamp, confidence, corroboration_texts, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                    (brand_key, p.model_dump_json(), tg_link, m['timestamp'], confidence, json.dumps(texts), expires_at)
-                                )
+                            pending_confirmations_batch.append({
+                                'brand': brand_key,
+                                'p_data_json': p.model_dump_json(),
+                                'tg_link': tg_link,
+                                'timestamp': m['timestamp'],
+                                'confidence': confidence,
+                                'snippet': snippet
+                            })
+
+                if pending_confirmations_batch:
+                    await db.bulk_upsert_pending_confirmations(pending_confirmations_batch)
 
                 if db.conn: await db.conn.commit()
 
@@ -365,7 +357,7 @@ async def processing_loop() -> None:
                     try:
                         oldest_age = max((datetime.now(timezone.utc) - _parse_ts(r['timestamp'])).total_seconds() for r in ancient)
                         shared._last_observed_ancient_age = oldest_age
-                    except: pass
+                    except Exception: pass
 
             if not combined:
                 await asyncio.sleep(2)
@@ -450,7 +442,7 @@ async def processing_loop() -> None:
         except Exception as e:
             logger.error(f"processing_loop error: {e}", exc_info=True)
             try: await bot.alert_error("processing_loop", e)
-            except: pass
+            except Exception: pass
             await asyncio.sleep(5)
 
 # ── Runtime self-heal watchdogs ────────────────────────────────────────────────
@@ -490,7 +482,7 @@ async def _loop_heartbeat_watchdog() -> None:
     _last_loop_alert_ts = now_m
     logger.error(f"💔 processing_loop heartbeat stale: last tick {age:.0f}s ago")
     try: await bot.alert_error("processing_loop_heartbeat", RuntimeError(f"processing_loop stalled: no tick for {age:.0f}s"))
-    except: pass
+    except Exception: pass
 
 _LISTENER_WATCHDOG_QUIET_SEC: float = 60.0
 _last_listener_reconnect_ts: float = 0.0
@@ -505,7 +497,7 @@ async def _listener_health_watchdog() -> None:
             if _listener_reconnect_attempts > 0: _listener_reconnect_attempts = 0
             return
         try: mtproto_connected = bool(shared.listener.client.is_connected())
-        except: mtproto_connected = False
+        except Exception: mtproto_connected = False
         if mtproto_connected: return
         backoff = min(15.0 * (_listener_reconnect_attempts + 1), _LISTENER_RECONNECT_COOLDOWN_SEC)
         now_m = time.monotonic()
