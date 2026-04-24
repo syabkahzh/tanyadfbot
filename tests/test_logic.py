@@ -121,3 +121,36 @@ def test_is_worth_checking():
     # Length based
     assert gp._is_worth_checking("ini ada promo menarik di gerai terdekat") is True
     assert gp._is_worth_checking("cek") is False
+
+
+def test_fast_path_improved():
+    from listener import check_fast_path
+
+    # Noise phrases with 'aman'
+    assert not check_fast_path("kak beli di toko itu aman ga ya")
+    assert not check_fast_path("aman ga")
+    assert not check_fast_path("aman ngga")
+
+    # Real signal with 'aman'
+    assert check_fast_path("aman spx")
+    assert check_fast_path("spx aman")
+
+    # Social filler
+    assert not check_fast_path("📝 ya allah baru masuk ke rmh😭")
+    assert not check_fast_path("makasih kak")
+
+def test_is_worth_checking_improved():
+    gp = GeminiProcessor()
+
+    # Noise phrases with 'aman'
+    assert not gp._is_worth_checking("kak beli di toko itu aman ga ya")
+    assert not gp._is_worth_checking("aman ga")
+    assert not gp._is_worth_checking("aman ngga")
+
+    # Social filler
+    assert not gp._is_worth_checking("📝 ya allah baru masuk ke rmh😭")
+    assert not gp._is_worth_checking("makasih kak")
+    assert not gp._is_worth_checking("nangis beneran")
+
+    # Valid short phrase
+    assert gp._is_worth_checking("aman spx")

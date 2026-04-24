@@ -22,7 +22,7 @@ _WORD_BOUNDARY_KEYWORDS = re.compile(
     r'\b(off|on|aman|work|bs|jp|mm)\b', re.IGNORECASE
 )
 _SOCIAL_FILLER = re.compile(
-    r'^((wkwk|haha|hehe|iya|noted|oke|ok|makasih|thanks|thx|mantap|gas|bos|guys|gais|bang|kak|siap|sip|lol|anjir|anjay|btw|oot|gws|semangat)[!.\s]*)+$',
+    r'^((wkwk|haha|hehe|iya|noted|oke|ok|makasih|thanks|thx|mantap|gas|bos|guys|gais|bang|kak|siap|sip|lol|anjir|anjay|btw|oot|gws|semangat|ya allah|nangis|sedih|beneran|kah)[!.\s]*)+$',
     re.IGNORECASE
 )
 _NON_PROMO = re.compile(
@@ -434,31 +434,49 @@ class GeminiProcessor:
         if len(t) < 4:
             return False
 
-        words = t.split()
-        if len(words) < 2 and not any(kw in t for kw in ['sfood','gfood','grab','aman','on','jp']):
-            return False
-
-        question_words = {'ga','gak','nggak','apa','gimana','berapa','kapan','dimana','kenapa','ada','masih'}
-        if t.endswith('?') and words and words[0] in question_words:
-            return False
-        if len(words) <= 4 and t.endswith('?'):
-            return False
-
         if _SOCIAL_FILLER.match(t):
             return False
 
-        # Strong signal bypass
-        if any(kw in t for kw in _STRONG_KEYWORDS):
-            return True
-        if _WORD_BOUNDARY_KEYWORDS.search(t):
-            return True
-        
-        # If no strong keywords, require more length to be considered "content"
-        if len(words) <= 4:
-            return False
-            
-        return bool(_PROMO.search(t))
+        words = t.split()
 
+        # Heuristic scoring
+        score = 0
+
+        # Strong indicators (+)
+        if any(kw in t for kw in _STRONG_KEYWORDS):
+            score += 10
+        if _WORD_BOUNDARY_KEYWORDS.search(t):
+            score += 5
+        if bool(_PROMO.search(t)):
+            score += 2
+
+        # Question / Noise indicators (-)
+        question_words = {'ga', 'gak', 'nggak', 'apa', 'gimana', 'berapa', 'kapan', 'dimana', 'kenapa', 'ada', 'masih', 'ya'}
+        has_question_word = any(w in question_words for w in words)
+        
+        if '?' in t:
+            score -= 10
+            
+        # Phrases like "aman ga", "aman ya" -> high penalty
+        if re.search(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b', t):
+            score -= 15
+
+        if t.endswith('?') and words and words[0] in question_words:
+            score -= 5
+
+        if has_question_word and ('aman' in t or 'work' in t or 'on' in t):
+            # Probably asking if it's working
+            score -= 8
+
+        # specifically penalize single short word followed by ngga
+        if re.search(r'\b(aman|work|on)\s+(ngga)\b', t):
+            score -= 15
+
+        # Short message penalty
+        if len(words) <= 4 and score < 5:
+            return False
+
+        return score > 0
     async def process_batch(self, messages: Sequence[dict[str, Any]], db: Any = None) -> list[PromoExtraction] | None:
         """Extracts promos from a batch of messages using AI."""
         if not messages:

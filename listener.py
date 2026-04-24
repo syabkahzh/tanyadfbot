@@ -28,7 +28,7 @@ TIME_PATTERN = re.compile(
 # known brand plus length guard.
 INSTANT_PATTERN = re.compile(
     r'\b(on|jp|jackpot|work|aman|luber|pecah|berhasil|gacor|mantul|restock|ristok|aktif|ready|'
-    r'nyala|masuk|udah pake|dikirim|cair|done|lancar|'
+    r'nyala|udah pake|dikirim|cair|done|lancar|'
     r'potongan|idm|alfa|indomaret|ag|alfagift|voc|voucher|minbel|'
     r'r\+s\+t\+k|r\+s\+t\+c\+k|r\+st\+ck|cb|kesbek|c\+s\+h\+b\+c\+k|cash back|'
     r'qr|scan|edc|membership|member|mamber)\b',
@@ -36,13 +36,13 @@ INSTANT_PATTERN = re.compile(
 )
 
 NEG_PATTERN = re.compile(
-    r'\b(kapan|kok|ga pernah|tidak|belom|belum|gaada|ngga|ga ada|gak|nggak|bukan|jangan|'
+    r'\b(kapan|kok|ga pernah|ga\b|ya\b|tidak|belom|belum|gaada|ngga|ga ada|gak|nggak|bukan|jangan|'
     r'iya|cuma|pas|tadi|gamau|jamber|jambrapa|jamberapa|'
     r'b\+r\+p|brp|berapa|drmana|dimana|dmn|mana|d\+r\+m\+n|'
     r'tunggu|nunggu|nanti|besok|lusa|tar\b|dulu|sore|malem|malam|pagi|'
     r'harusnya|katanya|mungkin|kayaknya|kyknya|sepertinya|entah|'
     r'koid|hangus|refund|batal|balsis|ngebadut|zonk|habis|sold|error|'
-    r'coba|nyoba|semoga|mudah.mudahan|insya)\b',
+    r'coba|nyoba|semoga|mudah.mudahan|insya|makasih|terima kasih|thanks|nuhun|tengkyu|nangis|sedih|anjir|bgst|halo|hai)\b',
     re.IGNORECASE
 )
 # All-caps: has at least one uppercase, zero lowercase letters
@@ -59,6 +59,15 @@ def check_fast_path(text: str) -> bool:
     if '?' in t or NEG_PATTERN.search(tl):
         return False
         
+    import re
+    if re.search(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b', tl):
+        return False
+
+    # 1.5 Gate: Social Filler only (skip "makasih kak", "ya allah😭" without real signal)
+    from processor import _SOCIAL_FILLER
+    if _SOCIAL_FILLER.match(t):
+        return False
+
     # 2. Gate: Transit-noise (skip "aman rutenya" etc)
     from shared import TRANSIT_NOISE_PATTERN
     if 'aman' in tl and TRANSIT_NOISE_PATTERN.search(tl):
@@ -123,9 +132,18 @@ class TelethonListener:
         # brand-level dedup below.
         is_aman_standalone = text_lower == 'aman' and '?' not in text
 
+        # 1.5 Gate: Social Filler
+        from processor import _SOCIAL_FILLER
+        if _SOCIAL_FILLER.match(text):
+            return False
+
         if not (is_instant or is_aman_standalone or is_allcaps):
             return False
         if NEG_PATTERN.search(text_lower):
+            return False
+
+        import re
+        if re.search(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b', text_lower):
             return False
         # Transit-noise gate: "aman kak rutenya" is NOT a deal signal
         if 'aman' in text_lower and TRANSIT_NOISE_PATTERN.search(text):
