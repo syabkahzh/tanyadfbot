@@ -292,6 +292,10 @@ class TelethonListener:
         async def handler(event):
             if not event.text:
                 return
+            # Record ingest timestamp BEFORE dispatch so /diag has an accurate
+            # "time since last message" signal even if downstream tasks error.
+            import shared as _shared
+            _shared.mark_message_ingested()
             # Fast-path as its OWN task - never waits for DB save
             asyncio.create_task(self._handle_fast_path_standalone(event))
             # DB save as separate task - never blocks fast-path
