@@ -374,8 +374,13 @@ async def processing_loop() -> None:
             fasttext_noise_ids = []
             
             # Level 2 Safeguard: Protect strong signals from model error
-            _PROTECTED_SIGNALS = re.compile(r'\b(jsm|psm|aman|on|jp|work|luber|pecah)\b', re.IGNORECASE)
+            _PROTECTED_SIGNALS = re.compile(
+                r'\b(jsm|psm|aman|on|jp|work|luber|pecah|cair|nyala|'
+                r'berhasil|lancar|masuk|murce|murmer|big|badut|syarat|snk|serbu)\b', 
+                re.IGNORECASE
+            )
             
+            candidates = []
             for r in combined:
                 text = r['text'] or ""
                 # Tier 1: Dumb Regex (Zero cost)
@@ -383,18 +388,37 @@ async def processing_loop() -> None:
                     regex_noise_ids.append(r['id'])
                     continue
                 
-                # IF the message contains a protected word, we ALWAYS pass it to AI
+                # Safeguard: ALWAYS pass holy-grail keywords to AI
                 if _PROTECTED_SIGNALS.search(text):
-                    to_ai.append({"id":r['id'],"text":r['text'],"timestamp":r['timestamp'],"tg_msg_id":r['tg_msg_id'],"chat_id":r['chat_id'],"reply_to_msg_id":r['reply_to_msg_id']})
+                    to_ai.append({
+                        "id":               r['id'],
+                        "text":             r['text'],
+                        "timestamp":        r['timestamp'],
+                        "tg_msg_id":        r['tg_msg_id'],
+                        "chat_id":          r['chat_id'],
+                        "reply_to_msg_id":  r['reply_to_msg_id'],
+                    })
                     continue
 
-                # Tier 2: FastText Semantic Filter
-                label, confidence = await shared.classify(text)
-                if label == "__label__JUNK" and confidence >= 0.88:
-                    fasttext_noise_ids.append(r['id'])
-                    continue
+                candidates.append(r)
 
-                to_ai.append({"id":r['id'],"text":r['text'],"timestamp":r['timestamp'],"tg_msg_id":r['tg_msg_id'],"chat_id":r['chat_id'],"reply_to_msg_id":r['reply_to_msg_id']})
+            # Tier 2: FastText Batch Semantic Filter
+            if candidates:
+                texts = [c['text'] or "" for c in candidates]
+                results = await shared.classify_batch(texts)
+                
+                for r, (label, confidence) in zip(candidates, results):
+                    if label == "__label__JUNK" and confidence >= 0.88:
+                        fasttext_noise_ids.append(r['id'])
+                    else:
+                        to_ai.append({
+                            "id":               r['id'],
+                            "text":             r['text'],
+                            "timestamp":        r['timestamp'],
+                            "tg_msg_id":        r['tg_msg_id'],
+                            "chat_id":          r['chat_id'],
+                            "reply_to_msg_id":  r['reply_to_msg_id'],
+                        })
 
             if regex_noise_ids:
                 await db.mark_batch_processed(regex_noise_ids, skip_reason="regex")

@@ -25,11 +25,24 @@ def export_v2():
     """)
     promos = [clean_text(row['text']) for row in cur.fetchall()]
 
-    # 2. Fetch HIGH-QUALITY Noise (messages the AI actually looked at but skipped)
+    # 1b. Fetch USER CORRECTIONS (Ground Truth - Force into PROMO)
     cur.execute("""
-        SELECT DISTINCT text FROM messages 
-        WHERE skip_reason = 'ai_skip' 
-        AND text IS NOT NULL AND length(text) > 4
+        SELECT DISTINCT m.text FROM messages m
+        JOIN ai_corrections c ON m.id = c.original_msg_id
+        WHERE m.text IS NOT NULL AND length(m.text) > 4
+    """)
+    corrections = [clean_text(row['text']) for row in cur.fetchall()]
+    
+    # Add corrections to promos and remove duplicates
+    promos = list(set(promos + corrections))
+
+    # 2. Fetch HIGH-QUALITY Noise (messages the AI actually looked at but skipped)
+    # CRITICAL: Exclude messages that were later corrected by user!
+    cur.execute("""
+        SELECT DISTINCT m.text FROM messages m
+        WHERE m.skip_reason = 'ai_skip' 
+        AND m.text IS NOT NULL AND length(m.text) > 4
+        AND m.id NOT IN (SELECT original_msg_id FROM ai_corrections)
     """)
     ai_noise = [clean_text(row['text']) for row in cur.fetchall()]
 

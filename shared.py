@@ -60,18 +60,33 @@ async def classify(text: str) -> tuple[str, float]:
     Returns:
         (label, confidence) where label is '__label__PROMO' or '__label__JUNK'
     """
+    res = await classify_batch([text])
+    return res[0]
+
+async def classify_batch(texts: list[str]) -> list[tuple[str, float]]:
+    """
+    Classify a batch of texts efficiently using native FastText batch prediction.
+
+    Returns:
+        List of (label, confidence) tuples.
+    """
     if _ft_model is None:
-        return "__label__UNKNOWN", 0.0
-    if not text or not text.strip():
-        return "__label__JUNK", 1.0
+        return [("__label__UNKNOWN", 0.0)] * len(texts)
+    if not texts:
+        return []
         
     try:
-        t = text.lower().replace("\n", " ")[:512]
-        labels, probs = await asyncio.to_thread(_ft_model.predict, t, k=1)
-        return labels[0], float(probs[0])
+        # FastText.predict handles lists natively and is MUCH faster than looping
+        # Clean and truncate each text for consistency
+        cleaned = [t.lower().replace("\n", " ")[:512] for t in texts]
+        
+        labels_list, probs_list = await asyncio.to_thread(_ft_model.predict, cleaned, k=1)
+        
+        # FastText returns [ [l1], [l2] ... ], [ [p1], [p2] ... ]
+        return [(l[0], float(p[0])) for l, p in zip(labels_list, probs_list)]
     except Exception as exc:
-        logger.warning(f"FastText inference error: {exc}")
-        return "__label__UNKNOWN", 0.0
+        logger.warning(f"FastText batch inference error: {exc}")
+        return [("__label__UNKNOWN", 0.0)] * len(texts)
 
 def _parse_ts(ts: str | datetime | Any) -> datetime:
     """Always returns a UTC-aware datetime from various timestamp formats.
