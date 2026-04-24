@@ -616,12 +616,15 @@ async def time_mention_job(db: Database, bot: TelegramBot) -> None:
         from processor import _PROMO
         from telegram.constants import ParseMode
 
-        noise_ids = []
+        all_ids = []
+        noise_count = 0
         for r in rows:
             text  = r['text'] or ""
+            all_ids.append(r['id'])
+
             # Only alert on time-mentions that also have deal signals
             if not _PROMO.search(text):
-                noise_ids.append(r['id'])
+                noise_count += 1
                 continue
 
             link  = _make_tg_link(r['chat_id'], r['tg_msg_id'])
@@ -630,18 +633,20 @@ async def time_mention_job(db: Database, bot: TelegramBot) -> None:
                 f"🔗 <a href='{link}'>Lihat Pesan</a>"
             )
             await bot.send_plain(alert, parse_mode=ParseMode.HTML)
-            await db.conn.execute(
-                "UPDATE messages SET time_alerted=1 WHERE id=?", (r['id'],)
-            )
+
+        if all_ids:
+            # Chunk updates to avoid SQLite limits
+            chunk_size = 900
+            for i in range(0, len(all_ids), chunk_size):
+                chunk = all_ids[i:i + chunk_size]
+                ph = ','.join('?' * len(chunk))
+                await db.conn.execute(
+                    f"UPDATE messages SET time_alerted=1 WHERE id IN ({ph})", chunk
+                )
             await db.conn.commit()
 
-        if noise_ids:
-            ph = ','.join('?' * len(noise_ids))
-            await db.conn.execute(
-                f"UPDATE messages SET time_alerted=1 WHERE id IN ({ph})", noise_ids
-            )
-            await db.conn.commit()
-            logger.info(f"⏰ [Job] Marked {len(noise_ids)} noise time-mentions as alerted.")
+            if noise_count > 0:
+                logger.info(f"⏰ [Job] Marked {noise_count} noise time-mentions as alerted.")
 
         logger.info("✅ [Job] Finished time_mention_job")
     except Exception as e:
