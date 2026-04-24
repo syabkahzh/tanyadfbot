@@ -1,6 +1,7 @@
 import asyncio
 import html
 import logging
+import re
 import uuid
 from collections import deque
 from datetime import datetime, timezone
@@ -8,6 +9,7 @@ from typing import Any, Sequence, cast
 
 from db import Database, normalize_brand
 from processor import GeminiProcessor, PromoExtraction, _CURRENCY_DISCOUNT_PATTERN
+from utils import _esc
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +53,62 @@ _alerted_aman_parents: set[int] = set()
 _alerted_aman_parents_deque: deque[int] = deque(maxlen=500)
 _aman_lock: asyncio.Lock = asyncio.Lock()
 
+# Brand-level dedup for the fast-path. Suppresses repeat alerts for the same
+# brand within a short window so a 20-message "aman toped" burst produces ONE
+# alert instead of 20. Remaining messages fall through to the AI path, where
+# `filter_duplicates` catches them via `_recent_alerts_history`.
+FASTPATH_BRAND_DEDUP_SEC: float = 90.0
+_fastpath_brand_last_fired: dict[str, float] = {}
+_fastpath_brand_lock: asyncio.Lock = asyncio.Lock()
+
 _stop_event: asyncio.Event = asyncio.Event()
 
 _listener_reconnecting: bool = False
+
+# Monotonic timestamp of the last processing_loop iteration. A dedicated
+# watchdog (main._loop_heartbeat_watchdog) alerts the owner if this goes
+# stale for >90s — i.e. the loop is blocked.
+_last_loop_tick: float | None = None
+
+def set_loop_tick() -> None:
+    """Record that the processing_loop just ticked (called at top of each iter)."""
+    global _last_loop_tick
+    import time as _time
+    _last_loop_tick = _time.monotonic()
+
+def get_loop_tick() -> float | None:
+    return _last_loop_tick
+
+# Max age (seconds) of the oldest row we observed in the ancient tier on the
+# last batch fetch. Used by /diag to surface tail-latency risk.
+_last_observed_ancient_age: float = 0.0
+
+# Monotonic timestamp of the last time any AI batch was spawned. /diag
+# reports (now - this) so the owner can see if batching has stalled even
+# when the loop is still ticking (e.g. queue empty or semaphore saturated).
+_last_batch_spawn_ts: float | None = None
+
+def mark_batch_spawned() -> None:
+    global _last_batch_spawn_ts
+    import time as _time
+    _last_batch_spawn_ts = _time.monotonic()
+
+# Wall-clock timestamp of the last message we ingested from the target group.
+# Primary signal for "is Telethon actually delivering updates" — much more
+# reliable than `client.is_connected()`, which returns False transiently
+# during MTProto reconnects even while messages are actively flowing.
+_last_message_ingest_ts: float | None = None
+
+def mark_message_ingested() -> None:
+    global _last_message_ingest_ts
+    import time as _time
+    _last_message_ingest_ts = _time.monotonic()
+
+def seconds_since_last_ingest() -> float | None:
+    import time as _time
+    if _last_message_ingest_ts is None:
+        return None
+    return _time.monotonic() - _last_message_ingest_ts
 _last_trend_alert: str = ""
 _last_spike_alert: datetime = datetime.min.replace(tzinfo=timezone.utc)
 _last_hourly_digest: str = ""
@@ -69,6 +124,13 @@ _BRAND_KEYWORDS: dict[str, str] = {
     'gfood': 'GoFood', 'gofood': 'GoFood', 'g+f+d': 'GoFood', 'g+o+f+o+o+d': 'GoFood',
     'spx': 'SPX', 'shopee xpress': 'SPX', 's+p+x': 'SPX',
     'alfamart': 'Alfamart', 'alfa': 'Alfamart', 'a+l+f+a': 'Alfamart', 'a+l+f+a+m+a+r+t': 'Alfamart',
+    # Alfamart's own weekly promo tags & receipt abbreviations — seen as `jsm`
+    # (Jumat Sabtu Minggu), `psm` (Promo Spesial Minggu), or `AFM …` on the
+    # physical struk. These MUST win over payment-method brands when a deal
+    # redeems at an Alfamart store (even if paid via ShopeePay/DANA/etc.).
+    'jsm': 'Alfamart', 'j+s+m': 'Alfamart',
+    'psm': 'Alfamart', 'p+s+m': 'Alfamart',
+    'afm': 'Alfamart', 'a+f+m': 'Alfamart',
     'indomaret': 'Indomaret', 'idm': 'Indomaret', 'i+d+m': 'Indomaret', 'i+n+d+o': 'Indomaret',
     'chatime': 'Chatime', 'chtm': 'Chatime',
     'c+h+t+m': 'Chatime', 'ctm': 'Chatime', 'c+t+m': 'Chatime',
@@ -110,52 +172,76 @@ def _make_tg_link(chat_id: int | str, msg_id: int | str) -> str:
     return f"https://t.me/c/{cid}/{msg_id}"
 
 
-def _esc(text: str | None) -> str:
-    """Escapes MarkdownV2 special characters."""
-    if not text:
-        return ""
-    return (text.replace("*", "\\*").replace("_", "\\_")
-                .replace("[", "\\[").replace("]", "\\]")
-                .replace("`", "\\`"))
-
-
 async def _reconnect_listener(gap_minutes: float) -> None:
-    """Handles Telethon client reconnection and history catchup."""
-    from shared import listener
-    if shared._listener_reconnecting:
+    """Handles Telethon client reconnection and history catchup with lock resilience."""
+    global _listener_reconnecting
+    if _listener_reconnecting:
         return
-    shared._listener_reconnecting = True
+    _listener_reconnecting = True
     try:
-        logger.info(f"Reconnecting listener (lag: {int(gap_minutes)}m)...")
+        logger.info(f"🔄 Reconnecting listener (lag: {int(gap_minutes)}m)...")
         try:
             await listener.client.disconnect()
         except Exception:
             pass
-        await asyncio.sleep(3)
-        await listener.client.connect()
+        await asyncio.sleep(2)
+
+        # Retry loop for Telethon connect to handle 'database is locked'
+        for attempt in range(3):
+            try:
+                await listener.client.connect()
+                break
+            except Exception as e:
+                if "locked" in str(e).lower() and attempt < 2:
+                    wait = 2 * (attempt + 1)
+                    logger.warning(f"⚠️ Telethon session locked, retrying in {wait}s...")
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+
+        # Catch up on missed history
         await listener.sync_history(hours=min(gap_minutes / 60 + 0.25, 3.0))
+    except Exception as e:
+        logger.error(f"❌ _reconnect_listener failed: {e}")
     finally:
-        shared._listener_reconnecting = False
+        _listener_reconnecting = False
+
+
+_ELONGATION_RE = re.compile(r'([a-zA-Z])\1{2,}')
 
 
 def _guess_brand(text: str | None) -> str:
-    """Fast, pattern-based brand identification with strict short-word matching."""
+    """Fast, pattern-based brand identification with strict short-word matching.
+
+    Also collapses letter elongations (e.g. 'topeddd' → 'toped', 'amannn' →
+    'aman') before matching, so burst-chat slang like "Aman topeddd yeay",
+    "Gaib bgt topedddd", "aman alfaaa" still resolves correctly. Collapsing to
+    a single letter is safe because every keyword in `_BRAND_KEYWORDS` uses at
+    most a single repeated letter (e.g. 'tokopedia' → 'tokopedia' is unchanged;
+    'GooFood' would collapse to 'gofood', matching the canonical key).
+    """
     if not text:
         return 'Unknown'
-    
-    t = text.lower()
-    import re
-    
+
+    t_raw = text.lower()
+    # Normalize 3+ repeats down to 1: "topeddd" → "toped", "amannn" → "aman"
+    t_norm = _ELONGATION_RE.sub(r'\1', t_raw)
+
     for kw, brand in _BRAND_KEYWORDS.items():
-        # For very short or commonly substringed keywords, require word boundaries
+        # For very short or commonly substringed keywords, require word boundaries.
+        # The custom boundary handles the '+' literal in some keywords.
         if len(kw) <= 3 or '+' in kw:
-            # We use a custom boundary check to handle the '+' literal in some keywords
             pattern = rf'(^|[^a-zA-Z0-9]){re.escape(kw)}($|[^a-zA-Z0-9])'
-            if re.search(pattern, t):
+            if re.search(pattern, t_raw) or re.search(pattern, t_norm):
                 return brand
-        elif kw in t:
+        elif len(kw) <= 5:
+            # BUG S4 FIX: short keywords (4-5 chars like 'grab') also need boundary
+            pattern = rf'(^|[^a-zA-Z0-9]){re.escape(kw)}($|[^a-zA-Z0-9])'
+            if re.search(pattern, t_raw) or re.search(pattern, t_norm):
+                return brand
+        elif kw in t_raw or kw in t_norm:
             return brand
-            
+
     return 'Unknown'
 
 
@@ -254,6 +340,11 @@ def _score_confidence(p: PromoExtraction, msg: dict, recently_alerted_brands: se
     if normalize_brand(p.brand) != "Unknown": score += 30
     if _CURRENCY_DISCOUNT_PATTERN.search(p.summary):
         score += 30
+        
+    # BUG S1 FIX: Slang active signals count as implicit confirmation
+    if _ACTIVE_SLANG.search(p.summary or ''):
+        score += 15
+        
     if p.status == 'active': score += 15
     if msg.get('reply_to_msg_id'): score += 5
 

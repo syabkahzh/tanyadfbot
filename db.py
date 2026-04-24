@@ -21,14 +21,17 @@ logger = logging.getLogger(__name__)
 _BRAND_CANON: dict[str, str] = {
     'hokben': 'HokBen', 'hoka ben': 'HokBen', 'h+k+b+n': 'HokBen', 'h+o+k+b+e+n': 'HokBen',
     'hophop': 'HopHop', 'hop hop': 'HopHop', 'h+p+h+p': 'HopHop',
-    'shopeefood': 'ShopeeFood', 'shopee food': 'ShopeeFood',
+    'sfood': 'ShopeeFood', 'shopeefood': 'ShopeeFood', 'shopee food': 'ShopeeFood',
     's+f+d': 'ShopeeFood', 'sfud': 'ShopeeFood',
     'sopifut': 'ShopeeFood', 'sopifud': 'ShopeeFood', 's+p+f+d': 'ShopeeFood',
-    'gofood': 'GoFood', 'go food': 'GoFood', 'g+f+d': 'GoFood', 'g+o+f+o+o+d': 'GoFood',
+    'gfood': 'GoFood', 'gofood': 'GoFood', 'go food': 'GoFood', 'g+f+d': 'GoFood', 'g+o+f+o+o+d': 'GoFood',
     'gopay': 'GoPay', 'gpy': 'GoPay', 'g+p+y': 'GoPay', 'g+o+p+a+y': 'GoPay',
     'kopken': 'Kopi Kenangan', 'kopi kenangan': 'Kopi Kenangan',
     'kenangan': 'Kopi Kenangan', 'k+p+k+n': 'Kopi Kenangan',
     'alfamart': 'Alfamart', 'alfa': 'Alfamart', 'a+l+f+a': 'Alfamart', 'a+l+f+a+m+a+r+t': 'Alfamart',
+    'jsm': 'Alfamart', 'j+s+m': 'Alfamart',
+    'psm': 'Alfamart', 'p+s+m': 'Alfamart',
+    'afm': 'Alfamart', 'a+f+m': 'Alfamart',
     'indomaret': 'Indomaret', 'idm': 'Indomaret', 'i+d+m': 'Indomaret', 'i+n+d+o': 'Indomaret',
     'spx': 'SPX', 'spx express': 'SPX', 'shopee xpress': 'SPX', 's+p+x': 'SPX',
     'chatime': 'Chatime', 'chtm': 'Chatime',
@@ -234,6 +237,7 @@ class Database:
             "ALTER TABLE messages ADD COLUMN time_alerted INTEGER DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN has_photo INTEGER DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN image_processed INTEGER DEFAULT 0",
+            "ALTER TABLE messages ADD COLUMN ai_failure_count INTEGER DEFAULT 0",
             "ALTER TABLE pending_alerts ADD COLUMN flush_id TEXT DEFAULT NULL",
             "ALTER TABLE pending_alerts ADD COLUMN corroborations INTEGER DEFAULT 0",
             "ALTER TABLE pending_alerts ADD COLUMN corroboration_texts TEXT DEFAULT '[]'",
@@ -242,6 +246,7 @@ class Database:
             "ALTER TABLE promos ADD COLUMN valid_until TEXT DEFAULT ''",
             "ALTER TABLE promos ADD COLUMN status_history TEXT DEFAULT '[]'",
             "ALTER TABLE promos ADD COLUMN via_fastpath INTEGER DEFAULT 0",
+            "ALTER TABLE promos ADD COLUMN reminder_fired INTEGER DEFAULT 0",
             # created_at format fix for older rows
         ]
         for sql in migrations:
@@ -290,6 +295,14 @@ class Database:
         await self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_promo_brand "
             "ON promos(brand)"
+        )
+
+        # ⚡ Bolt Optimization: Add index to pending_confirmations(brand)
+        # This speeds up the frequent lookup in main.py:
+        # "SELECT id, corroboration_texts FROM pending_confirmations WHERE brand=? LIMIT 1"
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_conf_brand "
+            "ON pending_confirmations(brand)"
         )
         await self.conn.commit()
 
@@ -436,24 +449,77 @@ class Database:
             logger.error(f"DB get_unprocessed_batch error: {e}")
             return []
 
+    async def get_unprocessed_ancient(self, min_age_minutes: int = 15,
+                                       batch_size: int = 20) -> list[aiosqlite.Row]:
+        """Rows older than `min_age_minutes` that haven't been processed.
+
+        Used by the 3-tier queue policy in main.processing_loop to guarantee
+        a starvation cap: any row this old skips ahead of fresher backlog.
+        Returns oldest first so the very tail of the queue drains first.
+        """
+        if not self.conn:
+            return []
+        try:
+            cutoff = _ts_str(datetime.now(timezone.utc) - timedelta(minutes=min_age_minutes))
+            async with self.conn.execute(
+                "SELECT id, text, timestamp, tg_msg_id, chat_id, reply_to_msg_id "
+                "FROM messages WHERE processed=0 AND timestamp < ? "
+                "ORDER BY timestamp ASC LIMIT ?",
+                (cutoff, batch_size)
+            ) as cur:
+                rows = await cur.fetchall()
+                return list(rows) if rows else []
+        except Exception as e:
+            logger.error(f"DB get_unprocessed_ancient error: {e}")
+            return []
+
+    async def get_oldest_unprocessed_age_sec(self) -> float | None:
+        """Seconds since the oldest unprocessed message was received, or None."""
+        if not self.conn:
+            return None
+        try:
+            async with self.conn.execute(
+                "SELECT MIN(timestamp) FROM messages WHERE processed=0"
+            ) as cur:
+                row = await cur.fetchone()
+            if not row or not row[0]:
+                return None
+            try:
+                oldest = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+                if oldest.tzinfo is None:
+                    oldest = oldest.replace(tzinfo=timezone.utc)
+            except Exception:
+                return None
+            return (datetime.now(timezone.utc) - oldest).total_seconds()
+        except Exception as e:
+            logger.error(f"DB get_oldest_unprocessed_age_sec error: {e}")
+            return None
+
     async def get_unprocessed_recent(self, minutes: int = 3, batch_size: int = 20) -> list[aiosqlite.Row]:
-        """Retrieves recent unprocessed messages within a time window.
+        """Retrieves recent unprocessed messages within a time window, oldest-first.
+
+        FIFO ordering (``ORDER BY timestamp ASC``) is intentional: processing
+        newest-first under bursty load starves messages that arrived 5–10 minutes
+        ago until they age out of the priority window entirely, causing the
+        multi-minute alert latencies observed in production.
 
         Args:
             minutes: Time window in minutes.
             batch_size: Maximum number of messages to retrieve.
 
         Returns:
-            A list of database rows for recent unprocessed messages.
+            A list of database rows for recent unprocessed messages, oldest first.
         """
         if not self.conn:
             return []
-            
+
         try:
             cutoff = _ts_str(datetime.now(timezone.utc) - timedelta(minutes=minutes))
+            # FIFO within the priority window: oldest-first so new arrivals can't
+            # starve a message that's been sitting for 9 minutes.
             async with self.conn.execute(
                 "SELECT id, text, timestamp, tg_msg_id, chat_id, reply_to_msg_id "
-                "FROM messages WHERE processed=0 AND timestamp >= ? ORDER BY timestamp DESC LIMIT ?",
+                "FROM messages WHERE processed=0 AND timestamp >= ? ORDER BY timestamp ASC LIMIT ?",
                 (cutoff, batch_size)
             ) as cur:
                 rows = await cur.fetchall()
@@ -479,6 +545,51 @@ class Database:
             await self.conn.commit()
         except Exception as e:
             logger.error(f"DB mark_batch_processed error: {e}")
+
+    async def mark_processed_by_tg_id(self, tg_msg_id: int, chat_id: int) -> None:
+        """Marks a message as processed by its Telegram id (race-safe).
+
+        Called from the listener's fast-path after a successful alert so the AI
+        loop doesn't re-process a message that already fired. Tolerant of the
+        race with `_save_to_db`: if the row isn't yet in `messages`, the UPDATE
+        affects 0 rows (no error) and the row will be picked up normally by the
+        AI loop later (where `_recent_alerts_history` dedup catches it).
+        """
+        if not self.conn:
+            return
+        try:
+            await self.conn.execute(
+                "UPDATE messages SET processed=1 "
+                "WHERE tg_msg_id=? AND chat_id=? AND processed=0",
+                (tg_msg_id, chat_id),
+            )
+            await self.conn.commit()
+        except Exception as e:
+            logger.error(f"DB mark_processed_by_tg_id error: {e}")
+
+    async def increment_ai_failure_count(self, ids: Sequence[int]) -> None:
+        """Increments failure count for a batch of messages. 
+        
+        Messages with high failure counts (>=3) are eventually marked processed 
+        to prevent permanent loop on 'poison' messages.
+        """
+        if not self.conn or not ids:
+            return
+        ph = ','.join('?' * len(ids))
+        try:
+            # Increment count
+            await self.conn.execute(
+                f"UPDATE messages SET ai_failure_count = ai_failure_count + 1 WHERE id IN ({ph})",
+                list(ids)
+            )
+            # Mark those that reached 3 failures as processed so they don't block the queue forever
+            await self.conn.execute(
+                f"UPDATE messages SET processed=1 WHERE id IN ({ph}) AND ai_failure_count >= 3",
+                list(ids)
+            )
+            await self.conn.commit()
+        except Exception as e:
+            logger.error(f"DB increment_ai_failure_count error: {e}")
 
     async def get_last_msg_id(self, chat_id: int) -> int:
         """Retrieves the highest Telegram message ID seen in a chat.
@@ -546,21 +657,35 @@ class Database:
             
         try:
             await self.conn.execute("BEGIN")
+            
+            # Prepare bulk data
+            promo_data = []
             for source_id, p, link in promos_to_save:
                 clean_brand = normalize_brand(p.brand)
                 if clean_brand == "Unknown" and (not p.summary or len(p.summary) < 15):
                     continue
                 status = p.status if p.status in ('active', 'expired', 'unknown') else 'unknown'
-                await self.conn.execute("""
+                valid_until = (getattr(p, 'valid_until', '') or '').strip()
+                promo_data.append((source_id, p.summary, clean_brand, p.conditions or '',
+                                   link, status, valid_until))
+
+            if promo_data:
+                # Persist `valid_until` too so the time-reminder job can find
+                # promos with a time-of-day window (e.g. "s/d 12:00", "jam 14").
+                await self.conn.executemany("""
                     INSERT INTO promos
-                        (source_msg_id, summary, brand, conditions, tg_link, status, via_fastpath)
-                    VALUES (?, ?, ?, ?, ?, ?, 0)
+                        (source_msg_id, summary, brand, conditions, tg_link, status, via_fastpath, valid_until)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, ?)
                     ON CONFLICT(brand, summary) DO UPDATE SET
-                        status      = excluded.status,
-                        tg_link     = excluded.tg_link,
+                        status        = excluded.status,
+                        tg_link       = excluded.tg_link,
                         source_msg_id = COALESCE(excluded.source_msg_id, source_msg_id),
-                        created_at  = strftime('%Y-%m-%d %H:%M:%S+00:00','now')
-                """, (source_id, p.summary, clean_brand, p.conditions or '', link, status))
+                        valid_until   = CASE
+                            WHEN excluded.valid_until != '' THEN excluded.valid_until
+                            ELSE valid_until
+                        END,
+                        created_at    = strftime('%Y-%m-%d %H:%M:%S+00:00','now')
+                """, promo_data)
 
             if processed_msg_ids:
                 ph = ','.join('?' * len(processed_msg_ids))
