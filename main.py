@@ -12,7 +12,6 @@ import re
 import sys
 import time
 import logging
-from collections import deque
 from datetime import datetime, timezone, timedelta
 from typing import Any, Sequence
 
