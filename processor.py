@@ -152,6 +152,16 @@ ATURAN OUTPUT:
 
 # ── Pre-filter keyword sets ───────────────────────────────────────────────────
 
+_SLANG_KAMUS = {
+    'ywwa': 'yang wangi-wangi aja (pamer hoki/promo)',
+    'bau': 'tidak hoki / tidak dapat promo / amsyong',
+    'cibu': 'cashback / c+s+h+b+a+c+k / kesbek',
+    'on': 'promo masih aktif / work / bisa ditebus',
+    'jp': 'jackpot / berhasil tembus promo / hoki',
+    'nt': 'nice try / gagal / habis / kuota limit',
+    'luber': 'melimpah / restock besar / banjir promo',
+}
+
 _STRONG_KEYWORDS: set[str] = {
     'sfood','gfood','grab','shopee','gojek','tokped','tokopedia',
     'voucher','vcr','voc','diskon','promo','cashback','gratis','potongan',
