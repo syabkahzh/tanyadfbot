@@ -68,6 +68,9 @@ def test_is_worth_checking():
     
     # Low signal / noise
     assert gp._is_worth_checking("wkwk") is False
+    assert gp._is_worth_checking("wkwk haha") is False
+    assert gp._is_worth_checking("siap noted makasih") is False
+    assert gp._is_worth_checking("oke mantap bos") is False
     assert gp._is_worth_checking("apa kabar?") is False
     assert gp._is_worth_checking("masih ada?") is False
     assert gp._is_worth_checking("saya membisukan dia") is False
