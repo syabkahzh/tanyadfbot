@@ -22,7 +22,7 @@ _WORD_BOUNDARY_KEYWORDS = re.compile(
     r'\b(off|on|aman|work|bs|jp|mm)\b', re.IGNORECASE
 )
 _SOCIAL_FILLER = re.compile(
-    r'^((wkwk|haha|hehe|iya|noted|oke|ok|makasih|thanks|thx|mantap|gas|bos|guys|gais|bang|kak|siap|sip|lol|anjir|anjay|btw|oot|gws|semangat)[!.\s]*)+$',
+    r'^((wkwk|haha|hehe|iya|noted|oke|ok|mantap|gas|bos|guys|gais|bang|kak|siap|sip|lol|anjir|anjay|btw|oot|gws|semangat)[!.\s]*)+$',
     re.IGNORECASE
 )
 _NON_PROMO = re.compile(
@@ -34,7 +34,8 @@ _PROMO = re.compile(
     r'sfood|gfood|grab|shopee|gojek|aman|on|jp|work|flash|limit|idm|alfa|indomaret|'
     r'nt|abis|habis|gabisa|gaada|gamau|minbel|r\+s\+t\+k|r\+s\+t\+c\+k|r\+st\+ck|'
     r'cb|kesbek|c\+s\+h\+b\+c\+k|cash back|kuota|slot|redeem|qr|scan|edc|'
-    r'membership|member|mamber|'
+    r'membership|member|mamber|cek|info|luber|pecah|'
+    r'makasih|thx|thanks|makasi|mks|terima.?kasih|'
     r'tukpo|murce|murmer|sopi|tsel|cgv|xxi|svip|badut|war|begal|kreator|'
     r'kopken|chatime|gindaco|solaria|rotio|spx|gopay|spay|ovo|'
     r'neo|tmrw|saqu|seabank|hero)\b', re.IGNORECASE
@@ -90,10 +91,10 @@ _EXTRACT_SYSTEM = """Kamu ekstrak promo dari percakapan grup deal hunter Indones
 ISTILAH KUNCI: mm=Mall Monday, bs=BerburuSales, nt=gagal/expired, jp=jackpot, sfood=ShopeeFood, gfood=GoFood,
 tukpo=Tokopedia, murce=murah meriah, sopi=Shopee, tsel=Telkomsel, badut=beli-ada-duit (cashback trick)
 
-STATUS: active jika ada "aman/on/jp/work/restock/berhasil/nyala/cair/lancar/masuk" | expired jika "abis/nt/sold out/ga bisa/koid/hangus/zonk" | unknown jika ambigu
+STATUS: active jika ada "aman/on/jp/work/restock/berhasil/nyala/cair/lancar/masuk/cek/info/makasih" | expired jika "abis/nt/sold out/ga bisa/koid/hangus/zonk" | unknown jika ambigu
 
 ATURAN UTAMA:
-1. Pahami konteks obrolan (slang). Jika pengguna bilang "nyala", "on", "cair", "masuk", atau "udah pake" terkait suatu brand, itu ADALAH event promo yang valid. Ekstrak sebagai active.
+1. Pahami konteks obrolan (slang). Jika pengguna bilang "nyala", "on", "cair", "masuk", "cek", "info", "makasih", atau "udah pake" terkait suatu brand, itu ADALAH event promo yang valid. Ekstrak sebagai active.
 2. JANGAN MEMAKSAKAN ANGKA KONKRET. Jika diskon/harga tidak disebutkan tapi status promo jelas aktif, biarkan field harga null/kosong, tetapi TETAP ekstrak sebagai data valid.
 3. Abaikan obrolan OOT (Out of Topic) seperti review barang fisik (parfum, makanan tanpa konteks promo), keluhan rute/kurir, atau curhatan non-promo.
 
@@ -186,6 +187,8 @@ _STRONG_KEYWORDS: set[str] = {
     'luber','pecah','flash','sale','deal','murah','hemat','bonus',
     'ongkir','gratis ongkir',
     'membership','member','mamber',
+    'cek','info',
+    'makasih','thx','thanks','makasi','mks','terimakasih',
     'tukpo','murce','murmer','sopi','tsel','cgv','xxi','svip','badut','war','begal','kreator','live kreator',
     'kopken','chatime','gindaco','solaria','rotio','spx','gopay','spay','shopeepay','ovo','neo','tmrw','saqu','seabank','hero',
 }
@@ -277,10 +280,10 @@ class GeminiProcessor:
         self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
         self._dedup_lock = asyncio.Lock()
 
-        # Both models get the same RPM limit (12 each = 24 total aggregate).
+        # Both models get the same RPM limit (15 each = 30 total aggregate).
         self._slots: dict[str, _ModelSlot] = {
-            Config.MODEL_ID:       _ModelSlot(Config.MODEL_ID,       12),
-            Config.MODEL_FALLBACK: _ModelSlot(Config.MODEL_FALLBACK, 12),
+            Config.MODEL_ID:       _ModelSlot(Config.MODEL_ID,       15),
+            Config.MODEL_FALLBACK: _ModelSlot(Config.MODEL_FALLBACK, 15),
         }
 
         # Strict round-robin index — incremented BEFORE use
@@ -424,8 +427,10 @@ class GeminiProcessor:
 
     # ── Public interface ──────────────────────────────────────────────────────
 
-    def _is_worth_checking(self, text: str | None) -> bool:
+    def _is_worth_checking(self, text: str | None, has_photo: bool = False) -> bool:
         """Pre-filter: skip low-signal messages without any AI call."""
+        if has_photo:
+            return True
         if not text or not text.strip():
             return False
         t = text.strip().lower()
@@ -464,7 +469,7 @@ class GeminiProcessor:
         if not messages:
             return []
 
-        filtered = [m for m in messages if self._is_worth_checking(m.get('text'))]
+        filtered = [m for m in messages if self._is_worth_checking(m.get('text'), bool(m.get('has_photo')))]
         if not filtered:
             return []
 

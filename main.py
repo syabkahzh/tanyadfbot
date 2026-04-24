@@ -418,6 +418,7 @@ async def processing_loop() -> None:
                             "tg_msg_id":        r['tg_msg_id'],
                             "chat_id":          r['chat_id'],
                             "reply_to_msg_id":  r['reply_to_msg_id'],
+                            "has_photo":        r['has_photo'],
                         })
 
             if regex_noise_ids:

@@ -135,8 +135,10 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
             # Fire when the stated time is between 2 and 3 minutes away — we
             # run this job every minute so this gives us exactly one window.
             if 2.0 <= minutes_to <= 3.0:
+                now_str = datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%H:%M:%S')
                 text = (
                     f"⏰ <b>Sinyal Waktu — 2 menit lagi!</b>\n"
+                    f"⏰ Skrg: <code>{now_str}</code>\n"
                     f"🏪 <b>{html.escape(r['brand'])}</b>\n"
                     f"🕒 Target: <code>{target.strftime('%H:%M WIB')}</code>\n"
                     f"📝 {_esc(r['summary'])}\n"
@@ -220,8 +222,10 @@ async def hourly_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegram
         except TimeoutError:
             logger.warning("AI timeout in hourly_digest_job. Skipping summary.")
             ai_summary = ""
+        now_str = datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%H:%M:%S')
         full_text = (
-            f"📊 <b>Digest {hour_label}</b> ({len(rows)} promo)\n\n"
+            f"📊 <b>Digest {hour_label}</b> ({len(rows)} promo)\n"
+            f"⏰ Waktu: <code>{now_str}</code>\n\n"
             f"{ai_summary}\n\n"
             f"<b>Detail:</b>\n" + "\n".join(lines)
         )
@@ -273,8 +277,10 @@ async def midnight_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
         except TimeoutError:
             logger.warning("AI timeout in midnight_digest_job. Skipping summary.")
             digest = ""
+        now_str = datetime.now(jakarta_tz).strftime('%H:%M:%S')
         full_text = (
-            f"📊 <b>Rekap 02:00–05:00 WIB</b> ({len(rows)} promo)\n\n"
+            f"📊 <b>Rekap 02:00–05:00 WIB</b> ({len(rows)} promo)\n"
+            f"⏰ Waktu: <code>{now_str}</code>\n\n"
             f"{digest}\n\n"
             f"<b>Detail:</b>\n" + "\n".join(lines)
         )
@@ -319,8 +325,10 @@ async def halfhour_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
             logger.warning("AI timeout in halfhour_digest_job. Skipping.")
             return
 
+        now_str = datetime.now(WIB).strftime('%H:%M:%S')
         full_text = (
-            f"⚡ <b>Update {label}</b> ({len(rows)} promo)\n\n"
+            f"⚡ <b>Update {label}</b> ({len(rows)} promo)\n"
+            f"⏰ Waktu: <code>{now_str}</code>\n\n"
             f"{digest}\n\n" + "\n".join(lines)
         )
         await bot.send_plain(full_text, parse_mode='HTML')
@@ -410,9 +418,14 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                     processed_ids.append(msg_id)
                     continue
 
+                start_ai = time.monotonic()
                 promo = await gemini.process_image(photo_bytes, text or "", msg_id)
+                ai_duration = time.monotonic() - start_ai
 
                 if promo:
+                    promo.ai_time = ai_duration
+                    promo.queue_time = (datetime.now(timezone.utc) - shared._parse_ts(ts)).total_seconds() - ai_duration
+                    
                     caption_l = (text or "").lower()
                     PAY_BRANDS = {
                         'shopeepay', 'spay', 'gopay', 'gpy', 'dana',
@@ -579,9 +592,10 @@ async def hot_thread_job(db: Database, gemini: GeminiProcessor, listener: Any, b
                     parent_snippet = parent_snippet[:97] + "..."
 
                 from telegram.constants import ParseMode
+                age_min = (now_ts - shared._parse_ts(t['timestamp'])).total_seconds() / 60
                 text = (
                     f"🔥 <b>Thread Hot! ({t['reply_count']} balasan)</b>\n"
-                    f"⏰ Jam: <code>{msg_wib}</code>\n"
+                    f"⏰ Jam: <code>{msg_wib}</code> (<code>{age_min:.0f}m ago</code>)\n"
                     f"📌 <b>Pesan Awal:</b>\n<i>{html.escape(parent_snippet)}</i>\n\n"
                     f"💬 <b>Topik:</b>\n{html.escape(summary)}\n\n"
                     f"📜 <b>Cuplikan:</b>\n" + "\n".join(snippets) + "\n\n"
@@ -722,8 +736,10 @@ async def time_mention_job(db: Database, bot: TelegramBot) -> None:
                 continue
 
             link  = _make_tg_link(r['chat_id'], r['tg_msg_id'])
+            now_str = datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%H:%M:%S')
             alert = (
-                f"🕒 <b>Sinyal Waktu:</b>\n{_esc(text)}\n\n"
+                f"🕒 <b>Sinyal Waktu:</b>\n{_esc(text)}\n"
+                f"⏰ Waktu: <code>{now_str}</code>\n\n"
                 f"🔗 <a href='{link}'>Lihat Pesan</a>"
             )
             await bot.send_plain(alert, parse_mode=ParseMode.HTML)
@@ -783,8 +799,10 @@ async def trend_job(db: Database, gemini: GeminiProcessor, bot: TelegramBot) -> 
             link = _make_tg_link(chat_id, t.msg_id)
             lines.append(f"• {html.escape(t.topic)}\n  🔗 <a href='{link}'>Lihat Pesan</a>")
 
+        now_wib = datetime.now(pytz.timezone("Asia/Jakarta")).strftime('%H:%M:%S')
         full_text = (
-            "📈 <b>Narasi Tren (15m):</b>\n\n"
+            f"📈 <b>Narasi Tren (15m):</b>\n"
+            f"⏰ Waktu: <code>{now_wib}</code>\n\n"
             + "\n\n".join(lines)
         )
         
@@ -876,6 +894,7 @@ async def spike_detection_job(db: Database, gemini: GeminiProcessor, bot: Telegr
                 "🚀 <b>Lonjakan Pesan!</b>",
                 f"📊 Kecepatan: <code>{count} msg/min</code>",
                 f"📈 Rata-rata: <code>{avg_per_min:.1f} msg/min</code>",
+                f"⏰ Waktu: <code>{datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%H:%M:%S')}</code>",
             ]
             if dominant_brand:
                 m = brand_latest_msg[dominant_brand]

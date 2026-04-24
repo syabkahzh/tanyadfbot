@@ -28,7 +28,8 @@ TIME_PATTERN = re.compile(
 # known brand plus length guard.
 INSTANT_PATTERN = re.compile(
     r'\b(on|jp|jackpot|work|aman|luber|pecah|berhasil|gacor|mantul|restock|ristok|aktif|ready|'
-    r'nyala|masuk|udah pake|dikirim|cair|done|lancar|'
+    r'nyala|masuk|udah pake|dikirim|cair|done|lancar|cek|info|'
+    r'makasih|thx|thanks|makasi|mks|terima.?kasih|'
     r'potongan|idm|alfa|indomaret|ag|alfagift|voc|voucher|minbel|'
     r'r\+s\+t\+k|r\+s\+t\+c\+k|r\+st\+ck|cb|kesbek|c\+s\+h\+b\+c\+k|cash back|'
     r'qr|scan|edc|membership|member|mamber)\b',
@@ -176,7 +177,11 @@ class TelethonListener:
             brand = await context_tracker.get_context(chat_id)
 
         # Strict: ambiguous signals require a known brand (unless ALL-CAPS shout)
-        AMBIGUOUS = {'on', 'ready', 'aktif', 'restock', 'ristok'}
+        AMBIGUOUS = {
+            'on', 'ready', 'aktif', 'restock', 'ristok', 'cek', 'info',
+            'makasih', 'thx', 'thanks', 'makasi', 'mks', 'terimakasih',
+            'luber', 'pecah'
+        }
         found_sigs = set(INSTANT_PATTERN.findall(text_lower))
         if (not is_allcaps and brand == "Unknown"
                 and (found_sigs & AMBIGUOUS) and len(text) > 15):
@@ -231,6 +236,8 @@ class TelethonListener:
             valid_until="",
             status="active",
             links=promo_links[:3],
+            queue_time=(datetime.now(timezone.utc) - message_data['timestamp']).total_seconds(),
+            ai_time=0.0
         )
 
         tg_link = _make_tg_link(message_data['chat_id'], message_data['tg_msg_id'])
@@ -272,10 +279,7 @@ class TelethonListener:
                 asyncio.create_task(_flush_alert_buffer(delay=0.3))
             )
 
-        latency = (
-            datetime.now(timezone.utc) - message_data['timestamp']
-        ).total_seconds()
-        print(f"⚡ FAST-PATH: {brand} — {summary[:50]}  ({latency:.3f}s)")
+        print(f"⚡ FAST-PATH: {brand} — {summary[:50]}  ({fast_promo.queue_time:.3f}s)")
         return True
 
     # ── Message ingestion ─────────────────────────────────────────────────────

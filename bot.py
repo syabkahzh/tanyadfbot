@@ -354,16 +354,22 @@ class TelegramBot:
         status_emoji = "🔥" if p_data.status == 'active' else "💀"
         brand_tag = f"<b>{_esc(brand_label)}</b>"
         
-        # Latency breakdown
+        # Source & Latency breakdown
+        source_tag = "🤖 <b>AI Processed</b>" if source == 'ai' else "⚡ <b>Triggered Pythonly</b>"
+        
         perf_tag = ""
-        if p_data.queue_time is not None and p_data.ai_time is not None:
-            perf_tag = f"\n⏱ <code>Q:{p_data.queue_time:.0f}s | AI:{p_data.ai_time:.1f}s</code>"
+        if source == 'ai':
+            total_lat = (p_data.queue_time or 0) + (p_data.ai_time or 0)
+            perf_tag = f"\n⏱ <code>Total: {total_lat:.1f}s | Q: {p_data.queue_time or 0:.0f}s | AI: {p_data.ai_time or 0:.1f}s</code>"
+        else:
+            # Fast-path: queue_time was set to total latency in listener.py
+            perf_tag = f"\n⏱ <code>Latency: {p_data.queue_time or 0:.2f}s</code>"
 
         text = (
             f"{status_emoji} {brand_tag}\n"
             f"📝 {_esc(p_data.summary)}\n"
-            f"⏰ Jam: <code>{msg_wib}</code>"
-            f"{perf_tag}"
+            f"⏰ Jam: <code>{msg_wib}</code>\n"
+            f"{source_tag}{perf_tag}"
         )
 
         if p_data.conditions and p_data.conditions.lower() != 'none':
@@ -406,9 +412,16 @@ class TelegramBot:
         lines = []
         for p, link, ts, corr, ctexts, src in items:
             msg_wib = _to_wib(ts)
-            lines.append(f"• {_esc(p.summary)} (<code>{msg_wib}</code>)")
+            source_icon = "🤖" if src == 'ai' else "⚡"
+            if src == 'ai':
+                total_lat = (p.queue_time or 0) + (p.ai_time or 0)
+                lat_info = f"<code>{total_lat:.1f}s (Q{p.queue_time or 0:.0f}/A{p.ai_time or 0:.1f})</code>"
+            else:
+                lat_info = f"<code>{p.queue_time or 0:.2f}s</code>"
+            
+            lines.append(f"• {source_icon} {_esc(p.summary)} (<code>{msg_wib}</code>) | {lat_info}")
 
-        text = header + "\n".join(lines)
+        text = header + "\n" + "\n".join(lines)
         try:
             await self.app.bot.send_message(
                 chat_id=Config.OWNER_ID,
@@ -449,8 +462,10 @@ class TelegramBot:
         _last_error_alerts[component] = now
         
         keyboard = [[InlineKeyboardButton("🛠 Mark Fixed", callback_data=f"fix_{fid}")]]
+        now_wib = datetime.now(pytz.timezone("Asia/Jakarta")).strftime('%H:%M:%S')
         text = (
-            f"🚨 <b>Error in {component}</b>\n\n"
+            f"🚨 <b>Error in {component}</b>\n"
+            f"⏰ Time: <code>{now_wib}</code>\n\n"
             f"<code>{_esc(err_msg[:300])}</code>"
         )
         try:
