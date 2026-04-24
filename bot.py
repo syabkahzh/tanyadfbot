@@ -103,6 +103,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("ping", self.cmd_ping))
         self.app.add_handler(CommandHandler("help", self.cmd_help))
         self.app.add_handler(CommandHandler("status", self.cmd_status))
+        self.app.add_handler(CommandHandler("diag", self.cmd_diag))
         self.app.add_handler(CommandHandler("logs", self.cmd_logs))
         self.app.add_handler(CommandHandler("debug", self.cmd_debug))
         self.app.add_handler(CommandHandler("summary", self.cmd_summary))
@@ -305,6 +306,88 @@ class TelegramBot:
             f"⚡ CPU: `{cpu_usage:.1f}%`"
         )
         await status_msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+
+    @_owner_only
+    async def cmd_diag(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Deep-diagnosis of the processing pipeline.
+
+        Complements /status by surfacing the signals that tell you whether the
+        bot is STUCK (vs idle). Specifically:
+          - Loop heartbeat age (how long since `processing_loop` ticked)
+          - Last batch spawn age
+          - Oldest unprocessed message age
+          - Number of stuck in-progress claims
+          - AI RPM headroom + concurrent task count
+          - Listener connection state
+        """
+        if not update.message:
+            return
+
+        import time as _time
+        from datetime import datetime, timezone
+        import main as _main
+
+        now_m = _time.monotonic()
+        loop_tick = shared.get_loop_tick()
+        loop_age = (now_m - loop_tick) if loop_tick else -1
+        spawn_ts = getattr(shared, "_last_batch_spawn_ts", None)
+        spawn_age = (now_m - spawn_ts) if spawn_ts else -1
+
+        try:
+            oldest_age_sec = await self.db.get_oldest_unprocessed_age_sec()
+        except Exception:
+            oldest_age_sec = None
+
+        async with self.db.conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE processed=0"
+        ) as cur:
+            queue = (await cur.fetchone())[0]
+
+        # Stuck claims
+        stuck_claims = 0
+        oldest_claim_age = 0.0
+        async with _main._in_progress_lock:
+            stuck_claims = len(_main._in_progress_ids)
+            if _main._in_progress_ids:
+                oldest_claim_age = now_m - min(_main._in_progress_ids.values())
+
+        # Telethon listener state
+        try:
+            listener_connected = shared.listener.client.is_connected()
+        except Exception:
+            listener_connected = False
+
+        # Health verdict
+        verdict = "✅ HEALTHY"
+        reasons = []
+        if loop_age > 90:
+            reasons.append(f"loop stale {loop_age:.0f}s")
+        if queue > 50 and spawn_age > 60:
+            reasons.append(f"queue={queue} but no spawn in {spawn_age:.0f}s")
+        if oldest_age_sec and oldest_age_sec > 120:
+            reasons.append(f"oldest msg {oldest_age_sec:.0f}s unprocessed")
+        if stuck_claims > 30:
+            reasons.append(f"{stuck_claims} claims stuck")
+        if not listener_connected:
+            reasons.append("listener disconnected")
+        if reasons:
+            verdict = "🚑 DEGRADED — " + ", ".join(reasons)
+
+        from shared import gemini
+        rpm_used = sum(s.current_usage() for s in gemini._slots.values())
+        rpm_limit = sum(s.limit for s in gemini._slots.values())
+
+        text = (
+            f"🔬 *Diag*\n"
+            f"{verdict}\n\n"
+            f"🔁 Loop tick: `{loop_age:.1f}s` ago\n"
+            f"🧬 Last spawn: `{spawn_age:.1f}s` ago\n"
+            f"📩 Queue: `{queue}` (oldest: `{oldest_age_sec or 0:.0f}s`)\n"
+            f"🔒 Claims: `{stuck_claims}` (oldest: `{oldest_claim_age:.0f}s`)\n"
+            f"🤖 AI: `{shared._active_ai_tasks}` tasks, `{rpm_used}/{rpm_limit}` RPM\n"
+            f"📡 Listener: `{'connected' if listener_connected else 'DISCONNECTED'}`"
+        )
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
     @_owner_only
     async def cmd_hourly(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
