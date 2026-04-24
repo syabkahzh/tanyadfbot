@@ -195,7 +195,9 @@ async def test_alert_error_rate_limits_same_component():
     # Build a minimal bot instance without going through __init__.
     bot = TelegramBot.__new__(TelegramBot)
     bot.auth_ids = [42]
-    bot._send_with_retry = AsyncMock()
+    bot.app = MagicMock()
+    bot.app.bot = MagicMock()
+    bot.app.bot.send_message = AsyncMock()
     bot.db = MagicMock()
     bot.db.log_failure = AsyncMock(return_value=1)
     bot._error_alert_cooldown = {}
@@ -207,7 +209,7 @@ async def test_alert_error_rate_limits_same_component():
     await bot.alert_error("spike_detection_job", ValueError("boom again"))
 
     # _send_with_retry invoked once (first call) — second was throttled.
-    assert bot._send_with_retry.await_count == 1, (
+    assert bot.app.bot.send_message.await_count == 1, (
         f"expected 1 send, got {bot._send_with_retry.await_count}"
     )
     # But DB log was called both times (cheap + useful).
@@ -220,7 +222,9 @@ async def test_alert_error_distinct_components_not_throttled():
 
     bot = TelegramBot.__new__(TelegramBot)
     bot.auth_ids = [42]
-    bot._send_with_retry = AsyncMock()
+    bot.app = MagicMock()
+    bot.app.bot = MagicMock()
+    bot.app.bot.send_message = AsyncMock()
     bot.db = MagicMock()
     bot.db.log_failure = AsyncMock(return_value=1)
     bot._error_alert_cooldown = {}
@@ -229,4 +233,4 @@ async def test_alert_error_distinct_components_not_throttled():
     await bot.alert_error("job_a", RuntimeError("x"))
     await bot.alert_error("job_b", RuntimeError("x"))
 
-    assert bot._send_with_retry.await_count == 2
+    assert bot.app.bot.send_message.await_count == 2

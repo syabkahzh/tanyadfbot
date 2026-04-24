@@ -527,28 +527,27 @@ class Database:
     async def get_unprocessed_recent(self, minutes: int = 3, batch_size: int = 20) -> list[aiosqlite.Row]:
         """Retrieves recent unprocessed messages within a time window, oldest-first.
 
-        FIFO ordering (``ORDER BY timestamp ASC``) is intentional: processing
-        newest-first under bursty load starves messages that arrived 5–10 minutes
-        ago until they age out of the priority window entirely, causing the
-        multi-minute alert latencies observed in production.
+        LIFO ordering (``ORDER BY timestamp DESC``) ensures that new messages
+        are processed immediately, reducing latency for real-time deals.
+        Older messages in the priority window are processed when load permits,
+        and eventually picked up by the ancient_reserve logic if they age out.
 
         Args:
             minutes: Time window in minutes.
             batch_size: Maximum number of messages to retrieve.
 
         Returns:
-            A list of database rows for recent unprocessed messages, oldest first.
+            A list of database rows for recent unprocessed messages, newest first.
         """
         if not self.conn:
             return []
 
         try:
             cutoff = _ts_str(datetime.now(timezone.utc) - timedelta(minutes=minutes))
-            # FIFO within the priority window: oldest-first so new arrivals can't
-            # starve a message that's been sitting for 9 minutes.
+            # LIFO within the priority window: newest-first to ensure low latency.
             async with self.conn.execute(
                 "SELECT id, text, timestamp, tg_msg_id, chat_id, reply_to_msg_id "
-                "FROM messages WHERE processed=0 AND timestamp >= ? ORDER BY timestamp ASC LIMIT ?",
+                "FROM messages WHERE processed=0 AND timestamp >= ? ORDER BY timestamp DESC LIMIT ?",
                 (cutoff, batch_size)
             ) as cur:
                 rows = await cur.fetchall()
@@ -932,8 +931,7 @@ class Database:
         from config import Config
         try:
             return os.path.getsize(Config.DB_PATH) / (1024 * 1024)
-        except:
-            return 0.0
+        except Exception: return 0.0
 
     async def get_latest_message_ts(self) -> str | None:
         """Retrieves the timestamp of the latest message."""

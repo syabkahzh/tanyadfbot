@@ -1,3 +1,4 @@
+import pytz
 """main.py — TanyaDFBot Orchestrator.
 
 Central coordination for message ingestion, AI processing, scheduled jobs, 
@@ -14,7 +15,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Sequence
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import pytz
+
 
 from db import normalize_brand
 from processor import PromoExtraction
@@ -264,7 +265,7 @@ async def processing_loop() -> None:
                             if existing:
                                 try:
                                     texts = json.loads(existing['corroboration_texts'])
-                                except: texts = []
+                                except Exception: texts = []
                                 if snippet and snippet not in texts: texts.append(snippet)
                                 await db.conn.execute(
                                     "UPDATE pending_confirmations SET corroborations=corroborations+1, corroboration_texts=? WHERE id=?",
@@ -362,7 +363,7 @@ async def processing_loop() -> None:
                     try:
                         oldest_age = max((datetime.now(timezone.utc) - _parse_ts(r['timestamp'])).total_seconds() for r in ancient)
                         shared._last_observed_ancient_age = oldest_age
-                    except: pass
+                    except Exception: pass
 
             if not combined:
                 await asyncio.sleep(2)
@@ -444,7 +445,7 @@ async def processing_loop() -> None:
         except Exception as e:
             logger.error(f"processing_loop error: {e}", exc_info=True)
             try: await bot.alert_error("processing_loop", e)
-            except: pass
+            except Exception: pass
             await asyncio.sleep(5)
 
 # ── Runtime self-heal watchdogs ────────────────────────────────────────────────
@@ -484,7 +485,7 @@ async def _loop_heartbeat_watchdog() -> None:
     _last_loop_alert_ts = now_m
     logger.error(f"💔 processing_loop heartbeat stale: last tick {age:.0f}s ago")
     try: await bot.alert_error("processing_loop_heartbeat", RuntimeError(f"processing_loop stalled: no tick for {age:.0f}s"))
-    except: pass
+    except Exception: pass
 
 _LISTENER_WATCHDOG_QUIET_SEC: float = 60.0
 _last_listener_reconnect_ts: float = 0.0
@@ -499,7 +500,7 @@ async def _listener_health_watchdog() -> None:
             if _listener_reconnect_attempts > 0: _listener_reconnect_attempts = 0
             return
         try: mtproto_connected = bool(shared.listener.client.is_connected())
-        except: mtproto_connected = False
+        except Exception: mtproto_connected = False
         if mtproto_connected: return
         backoff = min(15.0 * (_listener_reconnect_attempts + 1), _LISTENER_RECONNECT_COOLDOWN_SEC)
         now_m = time.monotonic()

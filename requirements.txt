@@ -9,3 +9,4 @@ pytz
 psutil
 fasttext-wheel
 numpy
+pytz

@@ -1,3 +1,4 @@
+import pytz
 """jobs.py — Background Scheduled Jobs.
 
 Implements all asynchronous periodic tasks including digests, trend analysis, 
@@ -237,7 +238,7 @@ async def midnight_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
     """Generates a re-cap of overnight activity (02:00–05:00 WIB)."""
     logger.info("⏰ [Job] Starting midnight_digest_job...")
     try:
-        import pytz
+
         jakarta_tz = pytz.timezone("Asia/Jakarta")
         now_wib = datetime.now(jakarta_tz)
         # Anchor: today at 02:00 WIB

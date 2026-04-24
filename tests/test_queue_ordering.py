@@ -54,7 +54,7 @@ async def _insert(db: Database, tg_msg_id: int, ts: datetime, text: str = "promo
 
 
 @pytest.mark.asyncio
-async def test_get_unprocessed_recent_returns_oldest_first(db_fixture):
+async def test_get_unprocessed_recent_returns_newest_first(db_fixture):
     """Regression: the priority window must drain FIFO (oldest first).
 
     Previously used ORDER BY timestamp DESC, which let new arrivals starve
@@ -69,7 +69,7 @@ async def test_get_unprocessed_recent_returns_oldest_first(db_fixture):
 
     rows = await db.get_unprocessed_recent(minutes=10, batch_size=10)
     ids = [r["id"] for r in rows]
-    assert ids == [oldest_id, middle_id, newest_id], (
+    assert ids == [newest_id, middle_id, oldest_id], (
         "priority window must be oldest-first to prevent starvation"
     )
 

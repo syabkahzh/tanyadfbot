@@ -1,3 +1,4 @@
+import pytz
 """bot.py — Telegram Interface and Broadcast Layer.
 
 Handles all Telegram bot interactions including command processing, alert 
@@ -189,7 +190,7 @@ class TelegramBot:
         spawn_age = (now_m - spawn_ts) if spawn_ts else -1
 
         try: oldest_age_sec = await self.db.get_oldest_unprocessed_age_sec()
-        except: oldest_age_sec = None
+        except Exception: oldest_age_sec = None
 
         async with self.db.conn.execute("SELECT COUNT(*) FROM messages WHERE processed=0") as cur:
             queue = (await cur.fetchone())[0]
@@ -201,7 +202,7 @@ class TelegramBot:
         try:
             tg_client = shared.listener.client
             mtproto_connected = bool(tg_client.is_connected())
-        except: mtproto_connected = False
+        except Exception: mtproto_connected = False
         ingest_age = shared.seconds_since_last_ingest()
 
         listener_health = "DISCONNECTED"
@@ -375,7 +376,7 @@ class TelegramBot:
                 snippets = json.loads(corroboration_texts)
                 if snippets:
                     text += "\n" + "\n".join([f"  • <i>\"{_esc(s)}\"</i>" for s in snippets[:3]])
-            except: pass
+            except Exception: pass
 
         if p_data.links:
             text += "\n\n🔗 " + " ".join([f"<a href='{l}'>Link</a>" for l in p_data.links])
@@ -441,12 +442,13 @@ class TelegramBot:
         fid = await self.db.log_failure(component, err_msg, tb)
 
         # Rate-limit notifications: 120s per component
-        from shared import _last_error_alerts, _ERROR_ALERT_COOLDOWN
+
+        import time
         now = time.monotonic()
-        if component in _last_error_alerts and (now - _last_error_alerts[component]) < _ERROR_ALERT_COOLDOWN:
+        if component in shared._last_error_alerts and (now - shared._last_error_alerts[component]) < shared._ERROR_ALERT_COOLDOWN:
             return
         
-        _last_error_alerts[component] = now
+        shared._last_error_alerts[component] = now
         
         keyboard = [[InlineKeyboardButton("🛠 Mark Fixed", callback_data=f"fix_{fid}")]]
         text = (
@@ -491,7 +493,6 @@ def _to_wib(ts_str: str) -> str:
         dt = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
         WIB = pytz.timezone("Asia/Jakarta")
         return dt.astimezone(WIB).strftime('%H:%M')
-    except:
-        return "??"
+    except Exception: return "??"
 
-import pytz
+
