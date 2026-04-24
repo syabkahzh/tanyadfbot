@@ -568,10 +568,13 @@ class Database:
             logger.error(f"DB mark_processed_by_tg_id error: {e}")
 
     async def increment_ai_failure_count(self, ids: Sequence[int]) -> None:
-        """Increments failure count for a batch of messages. 
-        
-        Messages with high failure counts (>=3) are eventually marked processed 
-        to prevent permanent loop on 'poison' messages.
+        """Increments failure count for a batch of messages.
+
+        Messages with failure counts >=2 are marked processed so they stop
+        blocking the queue during an AI-provider outage. 2 attempts (each
+        with their own internal 3x retry against flaky Gemini 500s) is a
+        generous chance; holding msgs longer costs more queue-head-of-line
+        latency than the small extraction-recall loss from giving up early.
         """
         if not self.conn or not ids:
             return
@@ -582,9 +585,9 @@ class Database:
                 f"UPDATE messages SET ai_failure_count = ai_failure_count + 1 WHERE id IN ({ph})",
                 list(ids)
             )
-            # Mark those that reached 3 failures as processed so they don't block the queue forever
+            # Mark those that reached 2 failures as processed so they don't block the queue forever
             await self.conn.execute(
-                f"UPDATE messages SET processed=1 WHERE id IN ({ph}) AND ai_failure_count >= 3",
+                f"UPDATE messages SET processed=1 WHERE id IN ({ph}) AND ai_failure_count >= 2",
                 list(ids)
             )
             await self.conn.commit()

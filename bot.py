@@ -414,6 +414,18 @@ class TelegramBot:
         rpm_used = sum(s.current_usage() for s in gemini._slots.values())
         rpm_limit = sum(s.limit for s in gemini._slots.values())
 
+        circuit_wait = shared.ai_circuit_open_remaining()
+        circuit_line = ""
+        if circuit_wait > 0:
+            circuit_line = (
+                f"\n⛔ AI circuit *OPEN* — paused for `{circuit_wait:.0f}s` "
+                f"(failures: `{shared._ai_consecutive_failures}`)"
+            )
+        elif shared._ai_consecutive_failures > 0:
+            circuit_line = (
+                f"\n⚠️ Recent AI failures: `{shared._ai_consecutive_failures}`"
+            )
+
         text = (
             f"🔬 *Diag*\n"
             f"{verdict}\n\n"
@@ -423,6 +435,7 @@ class TelegramBot:
             f"🔒 Claims: `{stuck_claims}` (oldest: `{oldest_claim_age:.0f}s`)\n"
             f"🤖 AI: `{shared._active_ai_tasks}` tasks, `{rpm_used}/{rpm_limit}` RPM\n"
             f"📡 Listener: `{listener_health}`"
+            f"{circuit_line}"
         )
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 

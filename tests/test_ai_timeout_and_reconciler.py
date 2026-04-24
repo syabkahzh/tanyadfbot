@@ -14,19 +14,19 @@ def test_ai_timeout_is_30_seconds() -> None:
 
 
 def test_in_progress_reaper_threshold_matches_ai_timeout_total() -> None:
-    """_IN_PROGRESS_MAX_AGE_SEC must exceed the theoretical max batch AI time
-    (retries+1 × _AI_CALL_TIMEOUT_SEC = 3 × 30 = 90s) so normal slow batches
-    don't get double-claimed; but not much more, to recover fast from stuck
-    claims."""
+    """_IN_PROGRESS_MAX_AGE_SEC must exceed the MAX legitimate AI call time
+    including inter-retry slot-acquire overhead (3 × 30s + 2 × 8s + 12s ~= 118s),
+    but not much more, to recover fast from genuinely stuck claims."""
     import main
     from processor import GeminiProcessor
-    max_ai_time = 3 * GeminiProcessor._AI_CALL_TIMEOUT_SEC  # retries+1
-    assert main._IN_PROGRESS_MAX_AGE_SEC >= max_ai_time, (
-        f"reaper threshold {main._IN_PROGRESS_MAX_AGE_SEC}s must be >= max AI time {max_ai_time}s"
+    # 3 attempts × timeout + 2 inter-retry acquires × 8s + pick_model overhead 12s
+    max_legit_time = 3 * GeminiProcessor._AI_CALL_TIMEOUT_SEC + 2 * 8 + 12
+    assert main._IN_PROGRESS_MAX_AGE_SEC >= max_legit_time, (
+        f"reaper threshold {main._IN_PROGRESS_MAX_AGE_SEC}s must exceed "
+        f"max legit AI time {max_legit_time}s to prevent double-claiming"
     )
-    # Cap at 120s to ensure prompt recovery
-    assert main._IN_PROGRESS_MAX_AGE_SEC <= 120, (
-        "reaper threshold should be <=120s for prompt stuck-claim recovery"
+    assert main._IN_PROGRESS_MAX_AGE_SEC <= 180, (
+        "reaper threshold should be <=3min for prompt stuck-claim recovery"
     )
 
 

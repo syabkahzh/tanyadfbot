@@ -64,11 +64,15 @@ _in_progress_lock: asyncio.Lock = asyncio.Lock()
 
 # Claims older than this are considered stuck (AI crashed silently, task was
 # cancelled, etc.) and get evicted so the underlying message can be retried.
-# NOTE: must be larger than the MAX total time an AI call can take (3 retries
-# × processor._AI_CALL_TIMEOUT_SEC = 3 × 30s = 90s) so a normal slow batch
-# doesn't get double-claimed by the reaper. 100s is the sweet spot: recovers
-# from a stuck claim within ~100s of detection.
-_IN_PROGRESS_MAX_AGE_SEC: float = 100.0
+#
+# Must be larger than the MAX total time an AI call can legitimately take,
+# INCLUDING inter-retry slot-acquisition overhead:
+#   3 attempts × 30s timeout
+# + 2 inter-retry slot acquires × 8s each (processor._call retry path)
+# + _pick_model overhead up to ~12s (two 8s slot.acquire() attempts)
+# = ~106s best case, up to 122s if both retry acquires fall through fallbacks.
+# 130s gives comfortable headroom while still recovering stuck claims in <2min.
+_IN_PROGRESS_MAX_AGE_SEC: float = 130.0
 
 _alerted_hot_threads: dict[int, tuple[int, datetime]] = {}
 _triage_cycle_counter: int   = 0
@@ -219,6 +223,7 @@ async def processing_loop() -> None:
             raise
 
         if ai_failed:
+            shared.record_ai_outcome(success=False)
             await _release_claims()
             return
 
@@ -227,8 +232,12 @@ async def processing_loop() -> None:
         if promos is None:
             logger.warning(f"AI returned None — incrementing failure count for {len(msgs)} msgs.")
             await db.increment_ai_failure_count(msg_ids)
+            shared.record_ai_outcome(success=False)
             await _release_claims()
             return
+
+        # AI call succeeded (promos is a list, possibly empty) — reset breaker.
+        shared.record_ai_outcome(success=True)
 
         try:
             # Atomically filter duplicates AND pre-reserve the surviving keys
@@ -397,6 +406,15 @@ async def processing_loop() -> None:
             current_tasks = shared._active_ai_tasks
             if current_tasks >= _AI_MAX_INFLIGHT:
                 await asyncio.sleep(0.2)
+                continue
+
+            # Circuit breaker: during an AI-provider incident (Gemini 500
+            # storm, rolling timeouts), every batch fails in ~90s. Pausing
+            # for a cooldown lets the queue drain via fast-path / poison
+            # retirement rather than pile up behind doomed batches.
+            circuit_wait = shared.ai_circuit_open_remaining()
+            if circuit_wait > 0:
+                await asyncio.sleep(min(circuit_wait, 2.0))
                 continue
 
             # Dynamic drain size based on RPM pressure
