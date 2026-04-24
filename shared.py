@@ -1,6 +1,5 @@
 import asyncio
 import difflib
-import html
 import logging
 import re
 import time as _time_mod
