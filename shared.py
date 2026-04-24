@@ -1,10 +1,12 @@
 import asyncio
+import difflib
 import html
 import logging
 import re
+import time as _time_mod
 import uuid
-from collections import deque
-from datetime import datetime, timezone
+from collections import OrderedDict, deque
+from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence, cast
 
 from db import Database, normalize_brand
@@ -64,6 +66,104 @@ _fastpath_brand_lock: asyncio.Lock = asyncio.Lock()
 _stop_event: asyncio.Event = asyncio.Event()
 
 _listener_reconnecting: bool = False
+
+# ── Temporal Brand Context Tracker ────────────────────────────────────────────
+#
+# Tracks the *active conversational brand* per chat within a TTL window.
+# When a message explicitly mentions a brand (e.g. "sfood 80%"), we record
+# that brand. Subsequent brand-less signals ("nyala", "aman", "udah bisa")
+# within the TTL inherit the brand from context, preventing them from
+# falling to "Unknown" and being dropped by the fast-path.
+#
+# This is a long-term architectural fix: the previous code treated every
+# message in a vacuum, which is fundamentally incompatible with how
+# Indonesian deal-hunter chats actually flow (short bursts about one brand,
+# then a topic switch).
+
+class TemporalBrandTracker:
+    """TTL-based conversational brand context cache."""
+
+    def __init__(self, ttl_seconds: int = 180) -> None:
+        self.ttl = ttl_seconds
+        # chat_id → (brand, monotonic_timestamp)
+        self._active: OrderedDict[int, tuple[str, float]] = OrderedDict()
+        self._lock = asyncio.Lock()
+
+    async def update_brand(self, chat_id: int, brand: str) -> None:
+        """Record that `brand` is the active topic in `chat_id`."""
+        if not brand or brand == "Unknown":
+            return
+        async with self._lock:
+            self._active[chat_id] = (brand, _time_mod.monotonic())
+            self._active.move_to_end(chat_id)
+            # Evict stale entries beyond a generous cap
+            while len(self._active) > 500:
+                self._active.popitem(last=False)
+
+    async def get_context(self, chat_id: int) -> str:
+        """Return the active brand for `chat_id`, or 'Unknown' if expired/absent."""
+        async with self._lock:
+            if chat_id not in self._active:
+                return "Unknown"
+            brand, ts = self._active[chat_id]
+            if _time_mod.monotonic() - ts > self.ttl:
+                del self._active[chat_id]
+                return "Unknown"
+            return brand
+
+context_tracker: TemporalBrandTracker = TemporalBrandTracker()
+
+
+# ── Transit-noise gate for "aman" false positives ─────────────────────────────
+# "aman kak rutenya", "aman perjalanannya" should NOT trigger fast-path.
+
+TRANSIT_NOISE_PATTERN = re.compile(
+    r'\b(rute|jalan|macet|kereta|stasiun|paket|kirim|kurir|perjalanan|nyampe)\b',
+    re.IGNORECASE,
+)
+
+
+# ── Fuzzy semantic dedup ─────────────────────────────────────────────────────
+#
+# Rolling in-memory queue with difflib.SequenceMatcher fuzzy matching.
+# Applied BEFORE DB write / Telegram broadcast so near-identical alerts
+# ("CGV Tsel On" vs "CGV On ges") are collapsed in-memory without any
+# DB round-trip.
+
+_fuzzy_dedup_queue: list[dict[str, Any]] = []
+_fuzzy_dedup_lock = asyncio.Lock()
+
+async def is_fuzzy_duplicate(brand: str, summary: str,
+                              window_minutes: int = 15,
+                              threshold: float = 0.6) -> bool:
+    """Return True if a near-identical alert was seen within the window."""
+    global _fuzzy_dedup_queue
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=window_minutes)
+
+    async with _fuzzy_dedup_lock:
+        # Prune expired entries
+        _fuzzy_dedup_queue = [
+            a for a in _fuzzy_dedup_queue if a['time'] >= cutoff
+        ]
+
+        norm_brand = normalize_brand(brand).lower()
+        norm_summary = summary.lower()
+
+        for alert in _fuzzy_dedup_queue:
+            if alert['brand'] == norm_brand:
+                similarity = difflib.SequenceMatcher(
+                    None, alert['summary'], norm_summary
+                ).ratio()
+                if similarity > threshold:
+                    return True
+
+        _fuzzy_dedup_queue.append({
+            'brand': norm_brand,
+            'summary': norm_summary,
+            'time': now,
+        })
+        return False
 
 # Monotonic timestamp of the last processing_loop iteration. A dedicated
 # watchdog (main._loop_heartbeat_watchdog) alerts the owner if this goes
@@ -200,6 +300,21 @@ _BRAND_KEYWORDS: dict[str, str] = {
     'r+s+t+k': 'Restock', 'r+s+t+c+k': 'Restock', 'r+st+ck': 'Restock',
     'cb': 'Cashback', 'kesbek': 'Cashback', 'c+s+h+b+c+k': 'Cashback', 'cash back': 'Cashback',
     'pchematapril': 'PC HematApril',
+    # Brands discovered from raw data analysis (2026-04-24)
+    'sopi': 'Shopee', 'sopie': 'Shopee',             # common Shopee misspelling
+    'solaria': 'Solaria',                             # restaurant chain
+    'neo': 'Bank Neo Commerce', 'bank neo': 'Bank Neo Commerce',
+    'tmrw': 'TMRW', 'tmrw by uob': 'TMRW',          # TMRW bank
+    'hero': 'Hero', 'hero supermarket': 'Hero',       # Hero supermarket
+    'bsya': 'Bank Syariah',                           # Bank Syariah Indonesia
+    'fortklass': 'Fortklass',                         # brand seen in promos
+    'g2g': 'G2G',                                     # gaming marketplace
+    'burek': 'Burek',                                 # brand seen in promos
+    'aice': 'Aice', 'a+i+c+e': 'Aice',               # ice cream brand
+    'point coffee': 'Point Coffee', 'poin coffee': 'Point Coffee',
+    'tukpo': 'Tukar Poin',                            # point exchange feature
+    'svip': 'ShopeeFood',                             # ShopeeFood VIP promo
+    'spud': 'SPUD',                                   # ShopeeFood promo code
 }
 
 

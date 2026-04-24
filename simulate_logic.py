@@ -12,6 +12,11 @@ _STRONG_KEYWORDS: Set[str] = {
     'luber','pecah','flash','sale','deal','murah','hemat','bonus',
     'ongkir','gratis ongkir',
     'membership','member','mamber',
+    # Added from raw data analysis — missing deal-hunter slang
+    'tukpo','murce','sopi','tsel','cgv','svip','badut','war','fs',
+    'kreator','kopken','chatime','gindaco','solaria','rotio','spx',
+    'gopay','neo','tmrw','saqu','seabank','hero',
+    'gacor','mantul','nyala','cair','lancar',
 }
 
 _WORD_BOUNDARY_KEYWORDS = re.compile(
@@ -42,14 +47,25 @@ def is_worth_checking(text: str) -> bool:
 
 # --- FROM listener.py ---
 INSTANT_PATTERN = re.compile(
-    r'\b(on|jp|work|restock|ristok|luber|pecah|aktif|ready|potongan|idm|alfa|indomaret|ag|alfagift|voc|voucher|minbel|r\+s\+t\+k|r\+s\+t\+c\+k|r\+st\+ck|cb|kesbek|c\+s\+h\+b\+c\+k|cash back|membership|member|mamber)\b', re.IGNORECASE
+    r'\b(on|jp|jackpot|work|aman|luber|pecah|berhasil|gacor|mantul|restock|ristok|aktif|ready|'
+    r'nyala|masuk|udah pake|dikirim|cair|done|lancar|'
+    r'potongan|idm|alfa|indomaret|ag|alfagift|voc|voucher|minbel|'
+    r'r\+s\+t\+k|r\+s\+t\+c\+k|r\+st\+ck|cb|kesbek|c\+s\+h\+b\+c\+k|cash back|'
+    r'qr|scan|edc|membership|member|mamber)\b',
+    re.IGNORECASE
 )
 NEG_PATTERN = re.compile(
-    r'\b(kapan|kok|ga pernah|tidak|belom|belum|gaada|ngga|ga ada|'
-    r'iya|cuma|pas|tadi|gamau|'
+    r'\b(kapan|kok|ga pernah|tidak|belom|belum|gaada|ngga|ga ada|gak|nggak|bukan|jangan|'
+    r'iya|cuma|pas|tadi|gamau|jamber|jambrapa|jamberapa|'
+    r'b\+r\+p|brp|berapa|drmana|dimana|dmn|mana|d\+r\+m\+n|'
     r'tunggu|nunggu|nanti|besok|lusa|tar\b|dulu|sore|malem|malam|pagi|'
     r'harusnya|katanya|mungkin|kayaknya|kyknya|sepertinya|entah|'
+    r'koid|hangus|refund|batal|balsis|ngebadut|zonk|habis|sold|error|'
     r'coba|nyoba|semoga|mudah.mudahan|insya)\b',
+    re.IGNORECASE
+)
+TRANSIT_NOISE_PATTERN = re.compile(
+    r'\b(rute|jalan|macet|kereta|stasiun|paket|kirim|kurir|perjalanan|nyampe)\b',
     re.IGNORECASE
 )
 FAST_ALLCAPS = re.compile(r'^[^a-z]*[A-Z][^a-z]*$')
@@ -57,7 +73,10 @@ FAST_ALLCAPS = re.compile(r'^[^a-z]*[A-Z][^a-z]*$')
 def check_fast_path(text: str) -> bool:
     if not text: return False
     if FAST_ALLCAPS.match(text) and len(text) > 3: return True
-    if INSTANT_PATTERN.search(text) and not NEG_PATTERN.search(text): return True
+    if NEG_PATTERN.search(text): return False
+    # Transit-noise gate: "aman kak rutenya" is NOT a deal signal
+    if 'aman' in text.lower() and TRANSIT_NOISE_PATTERN.search(text): return False
+    if INSTANT_PATTERN.search(text): return True
     return False
 
 # --- SAMPLES BATCH 3 ---
