@@ -191,6 +191,8 @@ async def processing_loop() -> None:
 
             if filtered:
                 promos_to_save: list[tuple[int, PromoExtraction, str]] = []
+                low_confidence_promos: list[tuple[dict, Any, str, str, int]] = []
+                low_confidence_promos: list[tuple[dict, PromoExtraction, str, str, int]] = []
                 now_utc        = datetime.now(timezone.utc)
                 msg_id_map     = {m['id']: m for m in msgs}
 
@@ -253,30 +255,73 @@ async def processing_loop() -> None:
                             recently_alerted_brands.add(brand_key.lower())
                         else:
                             if brand_norm == "Unknown": continue
-                            if not db.conn: continue
-                            async with db.conn.execute(
-                                "SELECT id, corroboration_texts FROM pending_confirmations WHERE brand=? LIMIT 1",
-                                (brand_key,)
-                            ) as cur:
-                                existing = await cur.fetchone()
-                            
-                            snippet = (m['text'] or '')[:100].strip()
-                            if existing:
-                                try:
-                                    texts = json.loads(existing['corroboration_texts'])
-                                except: texts = []
-                                if snippet and snippet not in texts: texts.append(snippet)
-                                await db.conn.execute(
-                                    "UPDATE pending_confirmations SET corroborations=corroborations+1, corroboration_texts=? WHERE id=?",
-                                    (json.dumps(texts), existing['id'])
-                                )
-                            else:
-                                expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')
-                                texts = [snippet] if snippet else []
-                                await db.conn.execute(
-                                    "INSERT INTO pending_confirmations (brand, p_data_json, tg_link, timestamp, confidence, corroboration_texts, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                    (brand_key, p.model_dump_json(), tg_link, m['timestamp'], confidence, json.dumps(texts), expires_at)
-                                )
+                            low_confidence_promos.append((m, p, tg_link, brand_key, confidence))
+
+
+                if db.conn and low_confidence_promos:
+                    brands_to_query = list({brand_key for _, _, _, brand_key, _ in low_confidence_promos})
+                    placeholders = ','.join('?' * len(brands_to_query))
+
+                    existing_records = {}
+                    if brands_to_query:
+                        async with db.conn.execute(
+                            f"SELECT id, brand, corroboration_texts, corroborations FROM pending_confirmations WHERE brand IN ({placeholders})",
+                            brands_to_query
+                        ) as cur:
+                            rows = await cur.fetchall()
+                            for row in rows:
+                                existing_records[row['brand']] = dict(row)
+
+                    updates_by_id = {}
+                    inserts_by_brand = {}
+
+                    for m, p, tg_link, brand_key, confidence in low_confidence_promos:
+                        snippet = (m['text'] or '')[:100].strip()
+                        if brand_key in existing_records:
+                            existing = existing_records[brand_key]
+                            try:
+                                texts = json.loads(existing['corroboration_texts'])
+                            except: texts = []
+                            if snippet and snippet not in texts: texts.append(snippet)
+                            existing['corroboration_texts'] = json.dumps(texts)
+                            existing['corroborations'] += 1
+                            updates_by_id[existing['id']] = (existing['corroborations'], existing['corroboration_texts'], existing['id'])
+                        elif brand_key in inserts_by_brand:
+                            ins = inserts_by_brand[brand_key]
+                            texts = ins['texts']
+                            if snippet and snippet not in texts: texts.append(snippet)
+                        else:
+                            expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')
+                            texts = [snippet] if snippet else []
+                            inserts_by_brand[brand_key] = {
+                                'brand_key': brand_key,
+                                'p_data': p.model_dump_json(),
+                                'tg_link': tg_link,
+                                'timestamp': m['timestamp'],
+                                'confidence': confidence,
+                                'texts': texts,
+                                'expires_at': expires_at
+                            }
+
+                    if updates_by_id:
+                        await db.conn.executemany(
+                            "UPDATE pending_confirmations SET corroborations=?, corroboration_texts=? WHERE id=?",
+                            list(updates_by_id.values())
+                        )
+
+                    if inserts_by_brand:
+                        insert_rows = [
+                            (
+                                ins['brand_key'], ins['p_data'], ins['tg_link'],
+                                ins['timestamp'], ins['confidence'], json.dumps(ins['texts']),
+                                ins['expires_at']
+                            )
+                            for ins in inserts_by_brand.values()
+                        ]
+                        await db.conn.executemany(
+                            "INSERT INTO pending_confirmations (brand, p_data_json, tg_link, timestamp, confidence, corroboration_texts, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            insert_rows
+                        )
 
                 if db.conn: await db.conn.commit()
 

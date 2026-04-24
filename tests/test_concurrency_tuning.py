@@ -35,9 +35,9 @@ def test_model_slots_use_real_rpm_limit():
     assert Config.MODEL_ID in gp._slots
     assert Config.MODEL_FALLBACK in gp._slots
     for slot in gp._slots.values():
-        assert slot.limit == 12, (
-            f"Model {slot.model_id} limit={slot.limit}, expected 12. "
-            "Dropping below 12 wastes available RPM headroom."
+        assert slot.limit == 15, (
+            f"Model {slot.model_id} limit={slot.limit}, expected 15. "
+            "Dropping below 15 wastes available RPM headroom."
         )
 
 

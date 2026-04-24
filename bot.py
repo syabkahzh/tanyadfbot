@@ -455,6 +455,7 @@ class TelegramBot:
 
         # Rate-limit notifications: 120s per component
         from shared import _last_error_alerts, _ERROR_ALERT_COOLDOWN
+        import time
         now = time.monotonic()
         if component in _last_error_alerts and (now - _last_error_alerts[component]) < _ERROR_ALERT_COOLDOWN:
             return
@@ -469,10 +470,9 @@ class TelegramBot:
             f"<code>{_esc(err_msg[:300])}</code>"
         )
         try:
-            await self.app.bot.send_message(
+            await self._send_with_retry(
                 chat_id=Config.OWNER_ID,
                 text=text,
-                parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
         except Exception as e:

@@ -378,7 +378,7 @@ class GeminiProcessor:
                         return None
                     continue
                 logger.error(f"AI call timed out after {retries + 1} attempts.")
-                return None
+                raise TimeoutError(f"Transient AI error after {retries + 1} attempts: AI timed out")
             except Exception as e:
                 err = str(e)
                 is_rate = "429" in err or "resource_exhausted" in err.lower()
@@ -418,6 +418,8 @@ class GeminiProcessor:
                 if attempt == retries:
                     logger.error(f"AI call failed after {retries + 1} attempts: {err[:200]}")
                     self._slots[slot_acquired].release_last()
+                    if is_rate or is_internal:
+                        raise TimeoutError(f"Transient AI error after {retries + 1} attempts: {err[:120]}")
                     return None
 
                 await asyncio.sleep(1.5 ** attempt)

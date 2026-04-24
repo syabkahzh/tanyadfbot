@@ -62,10 +62,13 @@ async def test_ai_timeout_propagates_through_call(monkeypatch) -> None:
     await proc._slots["secondary"].try_acquire_nowait()
 
     start = asyncio.get_event_loop().time()
-    result = await proc._call("batch", {}, "primary", retries=0)
+    try:
+        await proc._call("batch", {}, "primary", retries=0)
+        assert False, "Should have raised TimeoutError"
+    except TimeoutError:
+        pass
     elapsed = asyncio.get_event_loop().time() - start
 
-    assert result is None, "Hung AI call must return None, not block indefinitely."
     assert elapsed < 3.0, f"Timeout didn't fire promptly: {elapsed:.2f}s"
 
 
