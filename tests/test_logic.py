@@ -154,3 +154,45 @@ def test_is_worth_checking_improved():
 
     # Valid short phrase
     assert gp._is_worth_checking("aman spx")
+
+
+def test_check_fast_path_comprehensive():
+    from listener import check_fast_path
+
+    # Empty and None cases
+    assert not check_fast_path(None)
+    assert not check_fast_path("")
+
+    # Fast path ALL CAPS
+    assert check_fast_path("PROMO") is True
+    assert check_fast_path("GRATIS") is True
+    assert not check_fast_path("PRO") # <= 3
+    assert check_fast_path("PROMO123")
+
+    # Instant Pattern Matches (Positive Cases)
+    assert check_fast_path("gacor bosku") is True
+    assert check_fast_path("restock kak") is True
+    assert check_fast_path("sudah cair") is True
+    assert check_fast_path("mantul gan") is True
+    assert check_fast_path("ag") is True
+    assert check_fast_path("voc") is True
+
+    # Negation Pattern Matches (Negative Cases)
+    assert not check_fast_path("kapan on")
+    assert not check_fast_path("gaada promo")
+    assert not check_fast_path("kok gak bisa")
+    assert not check_fast_path("belum masuk")
+    assert not check_fast_path("nunggu restock")
+    assert not check_fast_path("coba dulu")
+    assert not check_fast_path("error kak")
+    assert not check_fast_path("sold out")
+
+    # Transit noise logic
+    assert not check_fast_path("aman di jalan")
+    assert not check_fast_path("paketnya aman nyampe")
+
+    # Real World Samples
+    assert not check_fast_path("kak mau tanya dongg dlu udh pernah buka linknya di email tp blm dipake nah pas aku buka lagi kok udh ke reedem ya")
+    assert not check_fast_path("Bentar buka appny dulu lemot")
+    assert not check_fast_path("Kena colong kah?soale pas awal2 pubg ad case bgini dia kecolong")
+    assert not check_fast_path("Ih kok ak blm buka plz😭")
