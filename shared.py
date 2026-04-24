@@ -172,15 +172,6 @@ def _make_tg_link(chat_id: int | str, msg_id: int | str) -> str:
     return f"https://t.me/c/{cid}/{msg_id}"
 
 
-def _esc(text: str | None) -> str:
-    """Escapes MarkdownV2 special characters."""
-    if not text:
-        return ""
-    return (text.replace("*", "\\*").replace("_", "\\_")
-                .replace("[", "\\[").replace("]", "\\]")
-                .replace("`", "\\`"))
-
-
 async def _reconnect_listener(gap_minutes: float) -> None:
     """Handles Telethon client reconnection and history catchup."""
     global _listener_reconnecting
