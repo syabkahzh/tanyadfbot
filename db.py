@@ -1236,11 +1236,11 @@ class Database:
 
     # ── Maintenance ───────────────────────────────────────────────────────────
 
-    async def prune_old_messages(self) -> None:
+    async def prune_old_messages(self, ignore_vacuum: bool = False) -> None:
         """Deletes processed messages older than 1 day that are not backing a promo."""
         if not self.conn:
             return
-            
+
         try:
             await self.conn.execute("""
                 DELETE FROM messages
@@ -1252,19 +1252,20 @@ class Database:
                 )
             """)
             await self.conn.commit()
-            
+
             # Checkpoint after commit. Use PASSIVE to avoid 'database is locked' errors
             # if other tasks are reading/writing.
             await self.conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
 
-            # VACUUM only if fragmentation is significant — check freelist ratio
-            async with self.conn.execute("PRAGMA freelist_count") as cur:
-                free = (await cur.fetchone())[0]
-            async with self.conn.execute("PRAGMA page_count") as cur:
-                total = (await cur.fetchone())[0]
-            if total > 0 and free / total > 0.20:
-                logger.info(f"Running VACUUM (fragmentation: {100*free//total}%)")
-                await self.conn.execute("VACUUM")
+            if not ignore_vacuum:
+                # VACUUM only if fragmentation is significant — check freelist ratio
+                async with self.conn.execute("PRAGMA freelist_count") as cur:
+                    free = (await cur.fetchone())[0]
+                async with self.conn.execute("PRAGMA page_count") as cur:
+                    total = (await cur.fetchone())[0]
+                if total > 0 and free / total > 0.20:
+                    logger.info(f"Running VACUUM (fragmentation: {100*free//total}%)")
+                    await self.conn.execute("VACUUM")
 
             logger.info("Database maintenance: OLD messages pruned, WAL checkpointed.")
         except Exception as e:
