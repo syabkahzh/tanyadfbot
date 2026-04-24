@@ -243,6 +243,18 @@ class Database:
             )
         """)
 
+        # ── ai_corrections (User Feedback) ───────────────────────────────────
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS ai_corrections (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_msg_id  INTEGER NOT NULL,
+                brand            TEXT,
+                summary          TEXT,
+                correction       TEXT NOT NULL,
+                created_at       TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S+00:00','now'))
+            )
+        """)
+
         await self.conn.commit()
 
         # ── Safe migrations (idempotent) ──────────────────────────────────────
