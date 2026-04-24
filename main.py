@@ -549,10 +549,33 @@ async def processing_loop() -> None:
                     regex_noise_ids.append(r['id'])
                     continue
                 
-                # Tier 2: FastText Semantic Filter (New)
-                # We use to_thread because ft.predict can be CPU intensive for huge batches
-                # although for e2-micro it's likely fine, we stick to safety.
-                label, confidence = await asyncio.to_thread(shared.predict_is_promo, r['text'])
+                # ── Level 2 Filter: Semantic Analysis (The Traffic Cop) ──
+            # We only let the model kill a message if it's NOT a high-signal keyword.
+            # This prevents the model from accidentally dropping "aman jsm" or "jp".
+            _PROTECTED_SIGNALS = re.compile(r'\b(jsm|psm|aman|on|jp|work|luber|pecah)\b', re.IGNORECASE)
+            
+            for r in combined:
+                text = r['text'] or ""
+                # Tier 1: Dumb Regex (Zero cost)
+                if not gemini._is_worth_checking(text):
+                    regex_noise_ids.append(r['id'])
+                    continue
+                
+                # Tier 2: FastText Semantic Filter
+                # IF the message contains a protected word, we ALWAYS pass it to AI (Safe path)
+                if _PROTECTED_SIGNALS.search(text):
+                    to_ai.append({
+                        "id":               r['id'],
+                        "text":             r['text'],
+                        "timestamp":        r['timestamp'],
+                        "tg_msg_id":        r['tg_msg_id'],
+                        "chat_id":          r['chat_id'],
+                        "reply_to_msg_id":  r['reply_to_msg_id'],
+                    })
+                    continue
+
+                # Otherwise, let the Traffic Cop decide
+                label, confidence = await asyncio.to_thread(shared.predict_is_promo, text)
                 
                 if label == "__label__JUNK" and confidence > 0.85:
                     semantic_noise_ids.append(r['id'])
