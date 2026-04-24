@@ -41,7 +41,8 @@ async def main():
             continue
         
         # Check for time mentions roughly
-        has_time = any(w in message.text.lower() for w in ['jam','menit','detik','sore','siang','pagi','malam'])
+        from listener import TIME_PATTERN
+        has_time = bool(TIME_PATTERN.search(message.text))
         
         buffer.append((
             message.id, chat.id, message.sender_id,
