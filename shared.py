@@ -173,20 +173,36 @@ def _make_tg_link(chat_id: int | str, msg_id: int | str) -> str:
 
 
 async def _reconnect_listener(gap_minutes: float) -> None:
-    """Handles Telethon client reconnection and history catchup."""
+    """Handles Telethon client reconnection and history catchup with lock resilience."""
     global _listener_reconnecting
     if _listener_reconnecting:
         return
     _listener_reconnecting = True
     try:
-        logger.info(f"Reconnecting listener (lag: {int(gap_minutes)}m)...")
+        logger.info(f"🔄 Reconnecting listener (lag: {int(gap_minutes)}m)...")
         try:
             await listener.client.disconnect()
         except Exception:
             pass
-        await asyncio.sleep(3)
-        await listener.client.connect()
+        await asyncio.sleep(2)
+
+        # Retry loop for Telethon connect to handle 'database is locked'
+        for attempt in range(3):
+            try:
+                await listener.client.connect()
+                break
+            except Exception as e:
+                if "locked" in str(e).lower() and attempt < 2:
+                    wait = 2 * (attempt + 1)
+                    logger.warning(f"⚠️ Telethon session locked, retrying in {wait}s...")
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+
+        # Catch up on missed history
         await listener.sync_history(hours=min(gap_minutes / 60 + 0.25, 3.0))
+    except Exception as e:
+        logger.error(f"❌ _reconnect_listener failed: {e}")
     finally:
         _listener_reconnecting = False
 

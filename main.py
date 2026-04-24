@@ -735,9 +735,9 @@ async def main() -> None:
     # Launch background loops
     asyncio.create_task(processing_loop())
     await listener.start()
-    asyncio.create_task(
-        listener.sync_history(2, catchup_hours=BOOT_CATCHUP_WINDOW / 3600)
-    )
+    
+    # NEW: Trigger initial sync via the resilient reconnect wrapper
+    asyncio.create_task(_reconnect_listener(BOOT_CATCHUP_WINDOW / 60))
 
     # ── Scheduled jobs ─────────────────────────────────────────────────────────
     # Adaptive Jitter: varied timing to avoid patterns and 'rush hour' spikes

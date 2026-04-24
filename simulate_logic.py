@@ -14,9 +14,6 @@ _STRONG_KEYWORDS: Set[str] = {
     'membership','member','mamber',
 }
 
-    'membership','member','mamber',
-}
-
 _WORD_BOUNDARY_KEYWORDS = re.compile(
     r'\b(off|on|aman|work|bs|jp|mm)\b', re.IGNORECASE
 )

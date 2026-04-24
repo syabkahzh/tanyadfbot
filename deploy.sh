@@ -11,8 +11,8 @@ rsync -avz --progress \
   --exclude 'venv' \
   --exclude '__pycache__' \
   --exclude '.git' \
-  --exclude '*.db' \
-  --exclude '*.session' \
+  --exclude '*.db*' \
+  --exclude '*.session*' \
   --exclude '.env' \
   ./ "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}"
 
