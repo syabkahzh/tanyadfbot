@@ -53,6 +53,14 @@ _alerted_aman_parents: set[int] = set()
 _alerted_aman_parents_deque: deque[int] = deque(maxlen=500)
 _aman_lock: asyncio.Lock = asyncio.Lock()
 
+# Brand-level dedup for the fast-path. Suppresses repeat alerts for the same
+# brand within a short window so a 20-message "aman toped" burst produces ONE
+# alert instead of 20. Remaining messages fall through to the AI path, where
+# `filter_duplicates` catches them via `_recent_alerts_history`.
+FASTPATH_BRAND_DEDUP_SEC: float = 90.0
+_fastpath_brand_last_fired: dict[str, float] = {}
+_fastpath_brand_lock: asyncio.Lock = asyncio.Lock()
+
 _stop_event: asyncio.Event = asyncio.Event()
 
 _listener_reconnecting: bool = False
@@ -147,29 +155,41 @@ async def _reconnect_listener(gap_minutes: float) -> None:
         shared._listener_reconnecting = False
 
 
+_ELONGATION_RE = re.compile(r'([a-zA-Z])\1{2,}')
+
+
 def _guess_brand(text: str | None) -> str:
-    """Fast, pattern-based brand identification with strict short-word matching."""
+    """Fast, pattern-based brand identification with strict short-word matching.
+
+    Also collapses letter elongations (e.g. 'topeddd' → 'toped', 'amannn' →
+    'aman') before matching, so burst-chat slang like "Aman topeddd yeay",
+    "Gaib bgt topedddd", "aman alfaaa" still resolves correctly. Collapsing to
+    a single letter is safe because every keyword in `_BRAND_KEYWORDS` uses at
+    most a single repeated letter (e.g. 'tokopedia' → 'tokopedia' is unchanged;
+    'GooFood' would collapse to 'gofood', matching the canonical key).
+    """
     if not text:
         return 'Unknown'
-    
-    t = text.lower()
-    import re
-    
+
+    t_raw = text.lower()
+    # Normalize 3+ repeats down to 1: "topeddd" → "toped", "amannn" → "aman"
+    t_norm = _ELONGATION_RE.sub(r'\1', t_raw)
+
     for kw, brand in _BRAND_KEYWORDS.items():
-        # For very short or commonly substringed keywords, require word boundaries
+        # For very short or commonly substringed keywords, require word boundaries.
+        # The custom boundary handles the '+' literal in some keywords.
         if len(kw) <= 3 or '+' in kw:
-            # We use a custom boundary check to handle the '+' literal in some keywords
             pattern = rf'(^|[^a-zA-Z0-9]){re.escape(kw)}($|[^a-zA-Z0-9])'
-            if re.search(pattern, t):
+            if re.search(pattern, t_raw) or re.search(pattern, t_norm):
                 return brand
         elif len(kw) <= 5:
             # BUG S4 FIX: short keywords (4-5 chars like 'grab') also need boundary
             pattern = rf'(^|[^a-zA-Z0-9]){re.escape(kw)}($|[^a-zA-Z0-9])'
-            if re.search(pattern, t):
+            if re.search(pattern, t_raw) or re.search(pattern, t_norm):
                 return brand
-        elif kw in t:
+        elif kw in t_raw or kw in t_norm:
             return brand
-            
+
     return 'Unknown'
 
 

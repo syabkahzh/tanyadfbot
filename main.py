@@ -64,8 +64,14 @@ _in_progress_lock: asyncio.Lock = asyncio.Lock()
 _alerted_hot_threads: dict[int, tuple[int, datetime]] = {}
 _triage_cycle_counter: int   = 0
 
-# ── FIXED: Reduced to 4 concurrent AI batches (2 models x 11 RPM = 22 RPM total capacity)
-_AI_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(4)
+# AI concurrency cap. Two Gemma models × 11 RPM = 22 RPM aggregate, and the
+# `_ModelSlot` limiter in `processor.py` already enforces that rate cap cleanly.
+# So this semaphore just exists to cap in-flight asyncio tasks (memory / event
+# loop scheduling pressure) — it is NOT the rate limit. Raised from 4 → 16 so
+# the pipeline can actually saturate 22 RPM during bursts. At ~1GB RAM / 2% CPU
+# budget, 16 in-flight batches is comfortably safe.
+_AI_MAX_INFLIGHT: int = 16
+_AI_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(_AI_MAX_INFLIGHT)
 
 _META_PATTERNS = re.compile(
     r"(user bertanya|tidak ada informasi|tidak disebutkan|no information|"
@@ -163,22 +169,26 @@ async def processing_loop() -> None:
             async with _in_progress_lock:
                 _in_progress_ids.difference_update(msg_ids)
 
-        # SCOPE FIX: Semaphore only for the actual AI call
-        async with _AI_SEMAPHORE:
-            shared._active_ai_tasks += 1
-            try:
-                promos = await gemini.process_batch(msgs, db)
-            except TimeoutError:
-                logger.warning(f"AI rate limits exhausted — requeuing {len(msgs)} msgs for later.")
-                await _release_claims()
-                return
-            except Exception as e:
-                logger.error(f"AI processing error: {e}", exc_info=True)
-                await db.increment_ai_failure_count(msg_ids)
-                await _release_claims()
-                return
-            finally:
-                shared._active_ai_tasks -= 1
+        # Count this batch as in-flight from the moment it exists (including
+        # time spent waiting on the semaphore), so the processing_loop's
+        # spawn-gate accurately reflects total pending work — not just tasks
+        # that have already acquired the semaphore.
+        shared._active_ai_tasks += 1
+        try:
+            async with _AI_SEMAPHORE:
+                try:
+                    promos = await gemini.process_batch(msgs, db)
+                except TimeoutError:
+                    logger.warning(f"AI rate limits exhausted — requeuing {len(msgs)} msgs for later.")
+                    await _release_claims()
+                    return
+                except Exception as e:
+                    logger.error(f"AI processing error: {e}", exc_info=True)
+                    await db.increment_ai_failure_count(msg_ids)
+                    await _release_claims()
+                    return
+        finally:
+            shared._active_ai_tasks -= 1
 
         ai_duration = time.monotonic() - ai_start
 
@@ -328,13 +338,17 @@ async def processing_loop() -> None:
                 await _auto_triage_queue()
                 queue_size = await db.get_queue_size()
 
-            # ── FIXED: Cap maximum concurrent AI tasks strictly.
+            # Cap maximum concurrent AI tasks. The real rate limit is enforced
+            # by `_ModelSlot` in processor.py (22 RPM total). This cap exists
+            # only to bound event-loop / memory pressure from too many
+            # simultaneously-spawned batches. When we're at the cap, we yield
+            # briefly rather than sleeping a full second so drain resumes ASAP.
             current_tasks = shared._active_ai_tasks
-            if current_tasks >= 4:
-                await asyncio.sleep(1.0)
+            if current_tasks >= _AI_MAX_INFLIGHT:
+                await asyncio.sleep(0.2)
                 continue
 
-            # Dynamic drain size based on pressure
+            # Dynamic drain size based on RPM pressure
             now_m = time.monotonic()
             total_used = sum(
                 len([t for t in slot._calls if now_m - t < 60])
@@ -343,21 +357,31 @@ async def processing_loop() -> None:
             total_cap    = sum(s.limit for s in gemini._slots.values())
             headroom_pct = max(0.0, 1.0 - (total_used / max(total_cap, 1)))
 
-            # Larger batches so the loop actually keeps up with deal-hunter
-            # group bursts (~150 msgs/min per HANDOVER.md). The previous
-            # 15–30 ceiling made the processing queue balloon under load,
-            # which (combined with the DESC priority ordering fixed in db.py)
-            # was the root cause of the 10–30-min alert latencies.
+            # Smaller batches → lower per-message latency + more parallelism.
+            # Sweet spot for gemma-4-31b-it: 15–25 msgs per call (~3–6s each).
+            # Under emergency pressure we can size up a bit for throughput, but
+            # never so large that a single batch stalls the drain pipeline.
             if _queue_emergency_mode:
-                batch_size = int(50 + 50 * headroom_pct)   # 50-100
+                batch_size = int(25 + 25 * headroom_pct)   # 25–50
             else:
-                batch_size = int(30 + 30 * headroom_pct)   # 30-60
+                batch_size = int(15 + 15 * headroom_pct)   # 15–30
 
             # ── CORE FIX: fetch AND claim inside the same lock acquisition ──────
             combined: list[Any] = []
             async with _in_progress_lock:
-                # If queue is backing up, reserve 25% of the batch for strictly chronological backlog drainage
-                backlog_reserve = int(batch_size * 0.25) if queue_size > 50 else 0
+                # Under mild pressure give backlog 25% of the batch; under
+                # severe pressure (queue > 200) give it 50% so aged-out
+                # messages drain at equal speed with fresh ones. This was the
+                # core driver of the multi-minute tail latencies: a message
+                # that missed the 10-min priority window previously drained at
+                # 1/4 the rate of fresh traffic, so under a sustained burst it
+                # could sit for 15–20 minutes.
+                if queue_size > 200:
+                    backlog_reserve = int(batch_size * 0.5)
+                elif queue_size > 50:
+                    backlog_reserve = int(batch_size * 0.25)
+                else:
+                    backlog_reserve = 0
                 priority_cap = batch_size - backlog_reserve
 
                 priority_raw = await db.get_unprocessed_recent(minutes=10, batch_size=priority_cap + 20)
@@ -414,9 +438,12 @@ async def processing_loop() -> None:
             logger.info(f"🧬 Spawning batch: {len(to_ai)} msgs "
                         f"(tasks={shared._active_ai_tasks}, headroom={headroom_pct:.0%}, queue={queue_size})")
 
-            # ONE task per iteration. Sleep briefly so task registers in _active_ai_tasks.
+            # Spawn one task per iteration and yield briefly so the new task
+            # registers in `_active_ai_tasks` before we re-check the cap.
+            # 50ms is enough for the asyncio scheduler to run the task up to
+            # its first `await`, without artificially throttling drain rate.
             asyncio.create_task(process_one_batch(to_ai))
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.05)
         except Exception as e:
             logger.error(f"processing_loop error: {e}", exc_info=True)
             try:
