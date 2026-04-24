@@ -469,7 +469,7 @@ class Database:
             
         try:
             async with self.conn.execute("""
-                SELECT id, text, timestamp, sender_name, tg_msg_id, chat_id, reply_to_msg_id
+                SELECT id, text, timestamp, sender_name, tg_msg_id, chat_id, reply_to_msg_id, has_photo
                 FROM messages WHERE processed=0 ORDER BY id ASC LIMIT ?
             """, (batch_size,)) as cur:
                 rows = await cur.fetchall()
