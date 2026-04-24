@@ -183,10 +183,10 @@ def _esc(text: str | None) -> str:
 
 async def _reconnect_listener(gap_minutes: float) -> None:
     """Handles Telethon client reconnection and history catchup."""
-    from shared import listener
-    if shared._listener_reconnecting:
+    global _listener_reconnecting
+    if _listener_reconnecting:
         return
-    shared._listener_reconnecting = True
+    _listener_reconnecting = True
     try:
         logger.info(f"Reconnecting listener (lag: {int(gap_minutes)}m)...")
         try:
@@ -197,7 +197,7 @@ async def _reconnect_listener(gap_minutes: float) -> None:
         await listener.client.connect()
         await listener.sync_history(hours=min(gap_minutes / 60 + 0.25, 3.0))
     finally:
-        shared._listener_reconnecting = False
+        _listener_reconnecting = False
 
 
 _ELONGATION_RE = re.compile(r'([a-zA-Z])\1{2,}')
