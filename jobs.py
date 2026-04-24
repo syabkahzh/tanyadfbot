@@ -94,23 +94,41 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
         now_wib = datetime.now(WIB)
 
         # Only look at active, recent promos to keep this fast.
-        async with db.conn.execute(
-            "SELECT id, brand, summary, conditions, valid_until, tg_link "
-            "FROM promos "
-            "WHERE status='active' AND reminder_fired=0 "
-            "  AND created_at >= strftime('%Y-%m-%d %H:%M:%S+00:00','now','-24 hours') "
-            "ORDER BY id DESC LIMIT 200"
-        ) as cur:
+        # Join with messages to get reply context.
+        async with db.conn.execute("""
+            SELECT p.id, p.brand, p.summary, p.conditions, p.valid_until, p.tg_link,
+                   m.reply_to_msg_id, m.chat_id,
+                   (SELECT text FROM messages WHERE tg_msg_id = m.reply_to_msg_id AND chat_id = m.chat_id LIMIT 1) as parent_text
+            FROM promos p
+            JOIN messages m ON p.source_msg_id = m.id
+            WHERE p.status='active' AND p.reminder_fired=0 
+              AND p.created_at >= strftime('%Y-%m-%d %H:%M:%S+00:00','now','-24 hours') 
+            ORDER BY p.id DESC LIMIT 200
+        """) as cur:
             rows = await cur.fetchall()
 
         if not rows:
             logger.info("✅ [Job] time_reminder_job: no candidates")
             return
 
+        # Pre-classify summaries in batch to weigh them with FastText
+        summaries = [r['summary'] for r in rows if r['summary']]
+        ft_results = {}
+        if summaries:
+            classifications = await shared.classify_batch(summaries)
+            ft_results = {summaries[i]: classifications[i] for i in range(len(summaries))}
+
         fired = 0
         from telegram.constants import ParseMode
 
         for r in rows:
+            # 1. FastText Weighting: Skip if it's very likely JUNK (> 0.90 confidence)
+            ft_label, ft_conf = ft_results.get(r['summary'], ("__label__PROMO", 0.0))
+            if ft_label == "__label__JUNK" and ft_conf > 0.90:
+                # Mark as fired so we don't re-scan noise.
+                await db.conn.execute("UPDATE promos SET reminder_fired=1 WHERE id=?", (r['id'],))
+                continue
+
             # Prefer valid_until if it contains a time; otherwise scan the
             # summary and conditions for an explicit HH:MM.
             haystack = " ".join(
@@ -145,17 +163,30 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
             # Fire when the stated time is between 2 and 3 minutes away
             if 2.0 <= minutes_to <= 3.0:
                 now_str = now_wib.strftime('%H:%M:%S')
+                
+                # Format reply context if available
+                context_header = ""
+                if r['parent_text']:
+                    p_text = r['parent_text'].replace('\n', ' ')[:100]
+                    context_header = f"💬 _Balasan untuk: \"{p_text}...\"_\n\n"
+
                 text = (
                     f"⏰ **Sinyal Waktu — 2 menit lagi!**\n"
                     f"⏰ Skrg: `{now_str}`\n"
                     f"🏪 **{r['brand']}**\n"
-                    f"🕒 Target: `{target.strftime('%H:%M WIB')}`\n"
+                    f"🕒 Target: `{target.strftime('%H:%M WIB')}`\n\n"
+                    f"{context_header}"
                     f"📝 {r['summary']}\n"
                 )
+                
                 if r['conditions']:
                     text += f"ℹ️ _{r['conditions']}_\n"
+                
+                # Show FastText status for transparency
+                text += f"\n🛡️ FT: `{ft_label.replace('__label__', '')} ({ft_conf:.2f})`"
+                
                 if r['tg_link']:
-                    text += f"\n🔗 [Lihat Promo]({r['tg_link']})"
+                    text += f"\n\n🔗 Lihat Promo:\n{r['tg_link']}"
 
                 try:
                     await bot.send_plain(text)
