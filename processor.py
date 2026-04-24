@@ -246,10 +246,13 @@ class GeminiProcessor:
         self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
         self._dedup_lock = asyncio.Lock()
 
-        # Both models get the same RPM limit (11 each = 22 total)
+        # Both models get the same RPM limit (12 each = 24 total aggregate).
+        # Matches the real per-model Gemini rate limit; the _ModelSlot
+        # synchronous release-last keeps our count accurate on retries so we
+        # can safely use the full allotment without triggering 429s.
         self._slots: dict[str, _ModelSlot] = {
-            Config.MODEL_ID:       _ModelSlot(Config.MODEL_ID,       11),
-            Config.MODEL_FALLBACK: _ModelSlot(Config.MODEL_FALLBACK, 11),
+            Config.MODEL_ID:       _ModelSlot(Config.MODEL_ID,       12),
+            Config.MODEL_FALLBACK: _ModelSlot(Config.MODEL_FALLBACK, 12),
         }
 
         # Strict round-robin index — incremented BEFORE use
@@ -269,38 +272,47 @@ class GeminiProcessor:
         """Strictly alternating round-robin with fallback to the other model.
 
         Returns the model_id whose slot has been acquired.
+
+        The blocking acquire timeout is intentionally short (~8s) so that
+        processing_loop can retry a different batch quickly rather than
+        burning 90s per call waiting for a slot when both models are
+        momentarily saturated. The caller (`process_batch`) maps a final
+        TimeoutError into a requeue, which is cheap.
         """
         primaries = [Config.MODEL_ID, Config.MODEL_FALLBACK]
 
+        # Take rr_idx under lock, then release it — we don't want to hold
+        # rr_lock across any blocking acquire, since that would serialize
+        # every caller behind a single slow waiter.
         async with self._rr_lock:
             self._rr_idx = (self._rr_idx + 1) % len(primaries)
             primary_idx = self._rr_idx
-            
-            primary = primaries[primary_idx]
-            secondary = primaries[1 - primary_idx]
 
-            # 1. Try primary non-blocking
-            if await self._slots[primary].try_acquire_nowait():
-                return primary
+        primary = primaries[primary_idx]
+        secondary = primaries[1 - primary_idx]
 
-            # 2. Try secondary non-blocking
-            if await self._slots[secondary].try_acquire_nowait():
-                return secondary
+        # 1. Try primary non-blocking
+        if await self._slots[primary].try_acquire_nowait():
+            return primary
 
-        # 3. Both full — wait on whichever has more headroom (or primary if equal)
+        # 2. Try secondary non-blocking
+        if await self._slots[secondary].try_acquire_nowait():
+            return secondary
+
+        # 3. Both full — pick the one with more headroom and wait briefly.
         now = time.monotonic()
         p_avail = self._slots[primary].available(now)
         s_avail = self._slots[secondary].available(now)
         wait_on = primary if p_avail >= s_avail else secondary
+        other   = secondary if wait_on == primary else primary
 
-        logger.debug(f"Both models at capacity, waiting on {wait_on}...")
-        acquired = await self._slots[wait_on].acquire(timeout=45.0)
+        logger.debug(f"Both models at capacity, waiting briefly on {wait_on}...")
+        acquired = await self._slots[wait_on].acquire(timeout=8.0)
         if acquired:
             return wait_on
 
-        # Last resort: wait on the other one
-        other = secondary if wait_on == primary else primary
-        acquired = await self._slots[other].acquire(timeout=45.0)
+        # Last resort: quick try on the other one before giving up.
+        acquired = await self._slots[other].acquire(timeout=4.0)
         if acquired:
             return other
 

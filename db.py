@@ -491,6 +491,27 @@ class Database:
         except Exception as e:
             logger.error(f"DB mark_batch_processed error: {e}")
 
+    async def mark_processed_by_tg_id(self, tg_msg_id: int, chat_id: int) -> None:
+        """Marks a message as processed by its Telegram id (race-safe).
+
+        Called from the listener's fast-path after a successful alert so the AI
+        loop doesn't re-process a message that already fired. Tolerant of the
+        race with `_save_to_db`: if the row isn't yet in `messages`, the UPDATE
+        affects 0 rows (no error) and the row will be picked up normally by the
+        AI loop later (where `_recent_alerts_history` dedup catches it).
+        """
+        if not self.conn:
+            return
+        try:
+            await self.conn.execute(
+                "UPDATE messages SET processed=1 "
+                "WHERE tg_msg_id=? AND chat_id=? AND processed=0",
+                (tg_msg_id, chat_id),
+            )
+            await self.conn.commit()
+        except Exception as e:
+            logger.error(f"DB mark_processed_by_tg_id error: {e}")
+
     async def increment_ai_failure_count(self, ids: Sequence[int]) -> None:
         """Increments failure count for a batch of messages. 
         
