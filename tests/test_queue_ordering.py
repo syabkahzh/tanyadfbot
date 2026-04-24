@@ -9,7 +9,6 @@ minutes because:
      in a busy group, so messages that aged out of the 10-min window sat
      forever as `processed=0`.
 """
-import asyncio
 import tempfile
 from datetime import datetime, timedelta, timezone
 

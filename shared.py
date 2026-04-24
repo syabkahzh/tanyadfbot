@@ -1,17 +1,15 @@
 import asyncio
 import difflib
-import html
 import logging
 import re
 import time as _time_mod
 import uuid
 from collections import OrderedDict, deque
 from datetime import datetime, timedelta, timezone
-from typing import Any, Sequence, cast
+from typing import Any
 
 from db import Database, normalize_brand
 from processor import GeminiProcessor, PromoExtraction, _CURRENCY_DISCOUNT_PATTERN
-from utils import _esc
 
 logger = logging.getLogger(__name__)
 

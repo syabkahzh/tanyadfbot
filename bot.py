@@ -8,7 +8,7 @@ import asyncio
 import html
 import json
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Any, Sequence, Callable, TypeVar, cast
 
 import pytz
@@ -329,7 +329,6 @@ class TelegramBot:
             return
 
         import time as _time
-        from datetime import datetime, timezone
         import main as _main
 
         now_m = _time.monotonic()
@@ -664,8 +663,6 @@ class TelegramBot:
         """Internal logic to attempt retrying a failed component/job."""
         try:
             import jobs
-            import sys
-            import main
             # This is a bit tricky as we need the right arguments.
             # For now, we'll map common background jobs.
             if component == "hourly_digest_job":
@@ -1041,7 +1038,8 @@ class TelegramBot:
             error: The exception instance.
         """
         now_wib = datetime.now(WIB).strftime('%H:%M:%S WIB')
-        import traceback, time as _time
+        import traceback
+        import time as _time
         tb = traceback.format_exc()
 
         # Always log to DB (cheap + no external call).

@@ -943,7 +943,6 @@ class Database:
         if not self.conn or not reply_ids:
             return {}
 
-        results: dict[int, str] = {}
         current_to_fetch = list(set(reply_ids))
         
         # Mapping for current level lookup: child_tg_id -> parent_tg_id
@@ -1030,7 +1029,7 @@ class Database:
         if not self.conn:
             return []
             
-        async with self.conn.execute(f"""
+        async with self.conn.execute("""
             SELECT
                 m_parent.id, m_parent.tg_msg_id, m_parent.chat_id,
                 m_parent.text, m_parent.sender_name, m_parent.timestamp,
