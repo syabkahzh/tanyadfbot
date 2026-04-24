@@ -118,7 +118,7 @@ context_tracker: TemporalBrandTracker = TemporalBrandTracker()
 # "aman kak rutenya", "aman perjalanannya" should NOT trigger fast-path.
 
 TRANSIT_NOISE_PATTERN = re.compile(
-    r'\b(rute|jalan|macet|kereta|stasiun|paket|kirim|kurir|perjalanan|nyampe)\b',
+    r'\b(rute|jalan|macet|kereta|stasiun|paket|kirim|kurir|perjalanan|nyampe)(nya|an)?\b',
     re.IGNORECASE,
 )
 

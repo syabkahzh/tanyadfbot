@@ -79,6 +79,10 @@ class TelegramBot:
 
         request = HTTPXRequest(connect_timeout=30.0, read_timeout=60.0)
         self.app = ApplicationBuilder().token(Config.BOT_TOKEN).request(request).build()
+        
+        # Track users in feedback flow: {user_id: original_msg_id}
+        self._awaiting_feedback: dict[int, int] = {}
+        
         self._setup_handlers()
 
     def _owner_only(func: T) -> T:
@@ -561,8 +565,27 @@ class TelegramBot:
 
     @_owner_only
     async def handle_qa(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handles natural language questions about recent promos."""
+        """Handles natural language questions or feedback corrections."""
         if not update.message or not update.message.text: return
+        user_id = update.effective_user.id
+        
+        # Check if user is providing feedback for a specific promo
+        if user_id in self._awaiting_feedback:
+            orig_msg_id = self._awaiting_feedback.pop(user_id)
+            correction = update.message.text
+            
+            try:
+                await self.db.conn.execute(
+                    "INSERT INTO ai_corrections (original_msg_id, correction) VALUES (?, ?)",
+                    (orig_msg_id, correction)
+                )
+                await self.db.conn.commit()
+                await update.message.reply_text("✅ <b>Feedback Saved!</b>\n\nI will analyze this to improve my detection. Thank you, mawmaw!", parse_mode=ParseMode.HTML)
+            except Exception as e:
+                logger.error(f"Failed to save ai_correction: {e}")
+                await update.message.reply_text(f"❌ Failed to save feedback: {e}")
+            return
+
         wait_msg = await update.message.reply_text("🤔 <b>Thinking...</b>", parse_mode=ParseMode.HTML)
         rows = await self.db.get_promos(hours=12, limit=50)
         context_text = "\n".join([f"- {r['brand']}: {r['summary']}" for r in rows])
@@ -578,16 +601,19 @@ class TelegramBot:
         
         data = query.data or ""
         
-        if data.startswith("expire_"):
-            internal_id = int(data.split("_")[1])
-            await self.db.conn.execute(
-                "UPDATE promos SET status = 'expired' WHERE source_msg_id = ?", (internal_id,)
+        if data.startswith("feed_"):
+            orig_msg_id = int(data.split("_")[1])
+            user_id = update.effective_user.id
+            self._awaiting_feedback[user_id] = orig_msg_id
+            
+            await query.message.reply_text(
+                "📝 <b>Correction Mode</b>\n\n"
+                "What's wrong with this promo? Send me the correct details "
+                "(e.g., 'Wrong brand, it should be McD' or 'Expired').\n\n"
+                "I will learn from this!",
+                parse_mode=ParseMode.HTML
             )
-            await self.db.conn.commit()
-            if query.message:
-                await query.edit_message_text(
-                    text=f"{query.message.text}\n\n✅ *Marked Expired*", parse_mode=ParseMode.MARKDOWN
-                )
+            return
 
         elif data.startswith("fix_"):
             fid = int(data.split("_")[1])
@@ -766,7 +792,7 @@ class TelegramBot:
         """
         keyboard = [[
             InlineKeyboardButton("🛒 Buka", url=tg_link),
-            InlineKeyboardButton("❌ Expired", callback_data=f"expire_{p_data.original_msg_id}")
+            InlineKeyboardButton("🔧 Feedback", callback_data=f"feed_{p_data.original_msg_id}")
         ]]
         brand_label = p_data.brand if p_data.brand.lower() not in ('unknown', 'sunknown', '') else "❓ Unknown"
 

@@ -141,8 +141,6 @@ async def _auto_triage_queue() -> None:
         
         # FIX: replies are no longer unconditionally preserved.
         # A reply with no promo signal is still noise.
-        if not text:
-            continue
         if not gemini._is_worth_checking(text):
             discard_ids.append(r['id'])
         if len(discard_ids) >= triage_limit:

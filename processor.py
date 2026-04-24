@@ -22,8 +22,8 @@ _WORD_BOUNDARY_KEYWORDS = re.compile(
     r'\b(off|on|aman|work|bs|jp|mm)\b', re.IGNORECASE
 )
 _SOCIAL_FILLER = re.compile(
-    r'^(wkwk|haha|hehe|iya|noted|oke|ok|makasih|thanks|thx|mantap|gas|'
-    r'siap|sip|lol|anjir|anjay|btw|oot|gws|semangat)[!.\s]*$',
+    r'^((wkwk|haha|hehe|iya|noted|oke|ok|makasih|thanks|thx|mantap|gas|'
+    r'siap|sip|lol|anjir|anjay|btw|oot|gws|semangat)[!.\s]*)+$',
     re.IGNORECASE
 )
 _NON_PROMO = re.compile(

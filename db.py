@@ -243,6 +243,18 @@ class Database:
             )
         """)
 
+        # ── ai_corrections (User Feedback) ───────────────────────────────────
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS ai_corrections (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_msg_id  INTEGER NOT NULL,
+                brand            TEXT,
+                summary          TEXT,
+                correction       TEXT NOT NULL,
+                created_at       TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S+00:00','now'))
+            )
+        """)
+
         await self.conn.commit()
 
         # ── Safe migrations (idempotent) ──────────────────────────────────────
@@ -281,9 +293,11 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_messages_queue "
             "ON messages(processed, id ASC)"
         )
+        # Drop the old DESC index if it exists to ensure the new ASC index takes effect
+        await self.conn.execute("DROP INDEX IF EXISTS idx_messages_queue_ts")
         await self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_queue_ts "
-            "ON messages(processed, timestamp DESC) WHERE processed=0"
+            "ON messages(processed, timestamp ASC) WHERE processed=0"
         )
         await self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_timestamp "
