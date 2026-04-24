@@ -92,6 +92,23 @@ def mark_batch_spawned() -> None:
     global _last_batch_spawn_ts
     import time as _time
     _last_batch_spawn_ts = _time.monotonic()
+
+# Wall-clock timestamp of the last message we ingested from the target group.
+# Primary signal for "is Telethon actually delivering updates" — much more
+# reliable than `client.is_connected()`, which returns False transiently
+# during MTProto reconnects even while messages are actively flowing.
+_last_message_ingest_ts: float | None = None
+
+def mark_message_ingested() -> None:
+    global _last_message_ingest_ts
+    import time as _time
+    _last_message_ingest_ts = _time.monotonic()
+
+def seconds_since_last_ingest() -> float | None:
+    import time as _time
+    if _last_message_ingest_ts is None:
+        return None
+    return _time.monotonic() - _last_message_ingest_ts
 _last_trend_alert: str = ""
 _last_spike_alert: datetime = datetime.min.replace(tzinfo=timezone.utc)
 _last_hourly_digest: str = ""

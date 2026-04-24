@@ -351,11 +351,32 @@ class TelegramBot:
             if _main._in_progress_ids:
                 oldest_claim_age = now_m - min(_main._in_progress_ids.values())
 
-        # Telethon listener state
+        # Telethon listener health — use time-since-last-message as the primary
+        # signal, with is_connected() as secondary. `is_connected()` returns
+        # False transiently during MTProto reconnects even while messages are
+        # flowing, so relying on it alone produces false DISCONNECTED alerts.
         try:
-            listener_connected = shared.listener.client.is_connected()
+            mtproto_connected = bool(shared.listener.client.is_connected())
         except Exception:
-            listener_connected = False
+            mtproto_connected = False
+        ingest_age = shared.seconds_since_last_ingest()
+
+        # Final verdict: listener is healthy if we've seen a message in the
+        # last 5 min (normal chat activity), OR MTProto socket is up and we
+        # simply haven't had traffic yet (common at quiet hours / right after
+        # startup). Only degrade if BOTH signals are bad.
+        if ingest_age is not None and ingest_age < 300:
+            listener_health = f"receiving (last msg {ingest_age:.0f}s ago)"
+            listener_degraded = False
+        elif mtproto_connected:
+            listener_health = (
+                f"connected, no msgs yet" if ingest_age is None
+                else f"connected, quiet for {ingest_age:.0f}s"
+            )
+            listener_degraded = ingest_age is not None and ingest_age > 900
+        else:
+            listener_health = "DISCONNECTED"
+            listener_degraded = True
 
         # Health verdict
         verdict = "✅ HEALTHY"
@@ -368,8 +389,8 @@ class TelegramBot:
             reasons.append(f"oldest msg {oldest_age_sec:.0f}s unprocessed")
         if stuck_claims > 30:
             reasons.append(f"{stuck_claims} claims stuck")
-        if not listener_connected:
-            reasons.append("listener disconnected")
+        if listener_degraded:
+            reasons.append("listener " + listener_health)
         if reasons:
             verdict = "🚑 DEGRADED — " + ", ".join(reasons)
 
@@ -385,7 +406,7 @@ class TelegramBot:
             f"📩 Queue: `{queue}` (oldest: `{oldest_age_sec or 0:.0f}s`)\n"
             f"🔒 Claims: `{stuck_claims}` (oldest: `{oldest_claim_age:.0f}s`)\n"
             f"🤖 AI: `{shared._active_ai_tasks}` tasks, `{rpm_used}/{rpm_limit}` RPM\n"
-            f"📡 Listener: `{'connected' if listener_connected else 'DISCONNECTED'}`"
+            f"📡 Listener: `{listener_health}`"
         )
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
