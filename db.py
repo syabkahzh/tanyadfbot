@@ -912,6 +912,62 @@ class Database:
             row = await cur.fetchone()
             return cast(int, row[0]) if row else 0
 
+    async def get_total_messages(self) -> int:
+        """Retrieves the total count of messages in the database."""
+        if not self.conn: return 0
+        async with self.conn.execute("SELECT COUNT(*) FROM messages") as cur:
+            row = await cur.fetchone()
+            return cast(int, row[0]) if row else 0
+
+    async def get_total_promos(self) -> int:
+        """Retrieves the total count of promos in the database."""
+        if not self.conn: return 0
+        async with self.conn.execute("SELECT COUNT(*) FROM promos") as cur:
+            row = await cur.fetchone()
+            return cast(int, row[0]) if row else 0
+
+    async def get_db_size_mb(self) -> float:
+        """Calculates the size of the database file in MB."""
+        import os
+        from config import Config
+        try:
+            return os.path.getsize(Config.DB_PATH) / (1024 * 1024)
+        except:
+            return 0.0
+
+    async def get_latest_message_ts(self) -> str | None:
+        """Retrieves the timestamp of the latest message."""
+        if not self.conn: return None
+        async with self.conn.execute("SELECT MAX(timestamp) FROM messages") as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
+
+    async def get_recent_failures(self, limit: int = 5) -> list[aiosqlite.Row]:
+        """Retrieves the most recent failures from the database."""
+        if not self.conn: return []
+        async with self.conn.execute(
+            "SELECT * FROM failures ORDER BY created_at DESC LIMIT ?", (limit,)
+        ) as cur:
+            rows = await cur.fetchall()
+            return list(rows) if rows else []
+
+    async def get_raw_messages(self, limit: int = 10) -> list[aiosqlite.Row]:
+        """Retrieves the most recent raw messages from the database."""
+        if not self.conn: return []
+        async with self.conn.execute(
+            "SELECT * FROM messages ORDER BY timestamp DESC LIMIT ?", (limit,)
+        ) as cur:
+            rows = await cur.fetchall()
+            return list(rows) if rows else []
+
+    async def clear_queue(self) -> int:
+        """Marks all unprocessed messages as processed (clears the queue)."""
+        if not self.conn: return 0
+        cursor = await self.conn.execute("UPDATE messages SET processed=1 WHERE processed=0")
+        count = cursor.rowcount
+        await self.conn.commit()
+        return count
+
     # ── Context / thread helpers ──────────────────────────────────────────────
 
     async def get_reply_sources_bulk(self, reply_msg_ids: Sequence[int], chat_id: int) -> dict[int, str]:
