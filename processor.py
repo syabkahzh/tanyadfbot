@@ -325,12 +325,15 @@ class GeminiProcessor:
 
         raise TimeoutError("Both model slots exhausted — rate limit exceeded")
 
-    # Hard ceiling on a single generate_content call. The Gemini SDK has been
-    # observed hanging forever on large-prompt 500s — without this timeout the
-    # calling task's claims leak until the `_in_progress_reaper` fires (5 min),
-    # producing multi-minute bot silences. 90s is a safe upper bound: typical
-    # latency is ~1-6s; anything >90s is effectively a hang.
-    _AI_CALL_TIMEOUT_SEC: float = 90.0
+    # Hard ceiling on a single generate_content call. Gemini's Gemma-4 models
+    # occasionally hang on large-prompt 500s; we observed runs where a batch
+    # took 90s × 3 retries = 270s to fail, during which 7 messages sat in the
+    # queue because they were claimed by the hung batch.
+    #
+    # 30s is generous (typical latency is 1-6s) but fails fast enough that
+    # (retries + 1) × timeout = 3 × 30s = 90s max — keeping queue-tail
+    # latency bounded even when the AI provider is flaky.
+    _AI_CALL_TIMEOUT_SEC: float = 30.0
 
     async def _call(self, contents: Any, config: dict[str, Any], model_id: str, retries: int = 2) -> Any:
         """Execute an AI call on an already-acquired model slot."""

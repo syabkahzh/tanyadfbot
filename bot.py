@@ -433,9 +433,19 @@ class TelegramBot:
             return
         msg = await update.message.reply_text("🔌 Reconnecting listener…")
         try:
+            # Capture whether a reconnect was already in flight BEFORE we call
+            # `_reconnect_listener` so we don't mislead the operator about
+            # whether our call actually performed a reconnect. The helper
+            # returns immediately (no-op) when the guard is already set.
+            was_reconnecting = shared._listener_reconnecting
             from shared import _reconnect_listener
             await _reconnect_listener(gap_minutes=0.5)
-            await msg.edit_text("✅ Listener reconnected.")
+            if was_reconnecting:
+                await msg.edit_text(
+                    "⚠️ Another reconnect already in progress — skipped."
+                )
+            else:
+                await msg.edit_text("✅ Listener reconnected.")
         except Exception as e:
             await msg.edit_text(f"❌ Reconnect failed: `{e}`", parse_mode=ParseMode.MARKDOWN)
 

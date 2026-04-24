@@ -64,10 +64,11 @@ _in_progress_lock: asyncio.Lock = asyncio.Lock()
 
 # Claims older than this are considered stuck (AI crashed silently, task was
 # cancelled, etc.) and get evicted so the underlying message can be retried.
-# NOTE: must be larger than the AI-call timeout in processor._AI_CALL_TIMEOUT_SEC
-# (90s) so a normal slow call doesn't get double-claimed by the reaper. 120s is
-# the sweet spot: recovers from a hung claim within ~2 min of detection.
-_IN_PROGRESS_MAX_AGE_SEC: float = 120.0
+# NOTE: must be larger than the MAX total time an AI call can take (3 retries
+# × processor._AI_CALL_TIMEOUT_SEC = 3 × 30s = 90s) so a normal slow batch
+# doesn't get double-claimed by the reaper. 100s is the sweet spot: recovers
+# from a stuck claim within ~100s of detection.
+_IN_PROGRESS_MAX_AGE_SEC: float = 100.0
 
 _alerted_hot_threads: dict[int, tuple[int, datetime]] = {}
 _triage_cycle_counter: int   = 0
@@ -565,6 +566,33 @@ async def _alert_watchdog():
     await db.recover_stuck_alerts()
 
 
+async def _active_ai_tasks_reconciler() -> None:
+    """Self-heal the `_active_ai_tasks` counter against the real task set.
+
+    The counter should equal the number of live `process_one_batch` tasks in
+    `_active_spawn_tasks`. If a counter-leak ever happens (e.g. a coroutine
+    is cancelled between the `+= 1` and the `try`, so the finally's `-= 1`
+    never runs), the counter drifts high and the spawn-gate throttles new
+    batches even though the system has headroom.
+
+    Every minute, if the counter is higher than the live task count, we
+    pull it down to the live task count. This is a safety net — the main
+    code already has defensive `finally:` / `except BaseException:` paths;
+    this just guards against future regressions.
+    """
+    live_tasks = sum(1 for t in _active_spawn_tasks if not t.done())
+    counter = shared._active_ai_tasks
+    if counter > live_tasks:
+        drift = counter - live_tasks
+        logger.warning(
+            f"⚠️ _active_ai_tasks counter drift: counter={counter} "
+            f"live_tasks={live_tasks} — reconciling down by {drift}"
+        )
+        # Race-safe adjust: if the counter moved since we read it, we'll
+        # just under-correct, and the next run will fix the rest.
+        shared._active_ai_tasks = max(0, shared._active_ai_tasks - drift)
+
+
 async def _in_progress_reaper() -> None:
     """Evict `_in_progress_ids` entries older than _IN_PROGRESS_MAX_AGE_SEC.
 
@@ -802,6 +830,12 @@ async def main() -> None:
     # batch don't block the queue indefinitely.
     scheduler.add_job(
         _in_progress_reaper, "interval", minutes=1, id="in_progress_reaper"
+    )
+    # Self-heal the `_active_ai_tasks` counter if it drifts higher than the
+    # real number of live process_one_batch tasks. Prevents counter leaks
+    # from throttling new batch spawns.
+    scheduler.add_job(
+        _active_ai_tasks_reconciler, "interval", minutes=1, id="ai_tasks_reconciler"
     )
     # Alert if processing_loop stops ticking (heartbeat > 90s stale).
     scheduler.add_job(
