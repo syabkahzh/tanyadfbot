@@ -1036,7 +1036,17 @@ async def db_maintenance_job(db: Database, bot: TelegramBot) -> None:
     """Executes periodic database cleanup and optimization."""
     logger.info("⏰ [Job] Starting db_maintenance_job...")
     try:
-        await db.prune_old_messages()
+        # Skip heavy VACUUM during peak deal hours (9 AM - 11 PM WIB)
+        import pytz
+        jakarta_tz = pytz.timezone("Asia/Jakarta")
+        now_wib = datetime.now(jakarta_tz)
+        
+        ignore_vacuum = False
+        if 9 <= now_wib.hour <= 23:
+            logger.info("⚡ Peak hours detected (9 AM - 11 PM), skipping VACUUM.")
+            ignore_vacuum = True
+            
+        await db.prune_old_messages(ignore_vacuum=ignore_vacuum)
         logger.info("✅ [Job] Finished db_maintenance_job")
     except Exception as e:
         logger.error(f"db_maintenance_job error: {e}", exc_info=True)
