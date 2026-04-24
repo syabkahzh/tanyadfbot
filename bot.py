@@ -104,6 +104,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("help", self.cmd_help))
         self.app.add_handler(CommandHandler("status", self.cmd_status))
         self.app.add_handler(CommandHandler("diag", self.cmd_diag))
+        self.app.add_handler(CommandHandler("reconnect", self.cmd_reconnect))
         self.app.add_handler(CommandHandler("logs", self.cmd_logs))
         self.app.add_handler(CommandHandler("debug", self.cmd_debug))
         self.app.add_handler(CommandHandler("summary", self.cmd_summary))
@@ -351,32 +352,47 @@ class TelegramBot:
             if _main._in_progress_ids:
                 oldest_claim_age = now_m - min(_main._in_progress_ids.values())
 
-        # Telethon listener health — use time-since-last-message as the primary
-        # signal, with is_connected() as secondary. `is_connected()` returns
-        # False transiently during MTProto reconnects even while messages are
-        # flowing, so relying on it alone produces false DISCONNECTED alerts.
+        # Telethon listener health — inspect multiple signals to avoid the
+        # false DISCONNECTED that `is_connected()` alone produces.
         try:
-            mtproto_connected = bool(shared.listener.client.is_connected())
+            tg_client = shared.listener.client
+            mtproto_connected = bool(tg_client.is_connected())
+            sender = getattr(tg_client, "_sender", None)
+            sender_has_user_conn = bool(getattr(sender, "_user_connected", False)) if sender else False
         except Exception:
             mtproto_connected = False
+            sender_has_user_conn = False
         ingest_age = shared.seconds_since_last_ingest()
 
-        # Final verdict: listener is healthy if we've seen a message in the
-        # last 5 min (normal chat activity), OR MTProto socket is up and we
-        # simply haven't had traffic yet (common at quiet hours / right after
-        # startup). Only degrade if BOTH signals are bad.
+        # Verdict:
+        #   fresh ingest (<5min) → HEALTHY regardless of socket state
+        #   socket up → HEALTHY (just quiet)
+        #   no recent ingest AND socket down → degraded and we trigger reconnect
+        reconnect_triggered = False
         if ingest_age is not None and ingest_age < 300:
             listener_health = f"receiving (last msg {ingest_age:.0f}s ago)"
             listener_degraded = False
-        elif mtproto_connected:
+        elif mtproto_connected or sender_has_user_conn:
             listener_health = (
-                f"connected, no msgs yet" if ingest_age is None
+                "connected, no msgs yet" if ingest_age is None
                 else f"connected, quiet for {ingest_age:.0f}s"
             )
             listener_degraded = ingest_age is not None and ingest_age > 900
         else:
             listener_health = "DISCONNECTED"
             listener_degraded = True
+            # Proactively trigger a reconnect. Idempotent via the
+            # `_listener_reconnecting` guard in shared._reconnect_listener.
+            try:
+                import asyncio as _aio
+                from shared import _reconnect_listener as _reconn
+                if not shared._listener_reconnecting:
+                    _aio.create_task(_reconn(gap_minutes=0.5))
+                    reconnect_triggered = True
+            except Exception:
+                pass
+            if reconnect_triggered:
+                listener_health += " (reconnecting…)"
 
         # Health verdict
         verdict = "✅ HEALTHY"
@@ -409,6 +425,19 @@ class TelegramBot:
             f"📡 Listener: `{listener_health}`"
         )
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+    @_owner_only
+    async def cmd_reconnect(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Force a Telethon listener reconnect (owner-only manual recovery)."""
+        if not update.message:
+            return
+        msg = await update.message.reply_text("🔌 Reconnecting listener…")
+        try:
+            from shared import _reconnect_listener
+            await _reconnect_listener(gap_minutes=0.5)
+            await msg.edit_text("✅ Listener reconnected.")
+        except Exception as e:
+            await msg.edit_text(f"❌ Reconnect failed: `{e}`", parse_mode=ParseMode.MARKDOWN)
 
     @_owner_only
     async def cmd_hourly(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

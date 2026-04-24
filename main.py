@@ -622,6 +622,58 @@ async def _loop_heartbeat_watchdog() -> None:
         pass
 
 
+_LISTENER_WATCHDOG_QUIET_SEC: float = 180.0   # 3 min without an ingest
+_last_listener_reconnect_ts: float = 0.0
+_LISTENER_RECONNECT_COOLDOWN_SEC: float = 300.0
+
+
+async def _listener_health_watchdog() -> None:
+    """Reconnect Telethon proactively if the listener appears silent.
+
+    Runs every 60s. Logic:
+      - If we've ingested a message in the last _LISTENER_WATCHDOG_QUIET_SEC
+        seconds, do nothing (listener is healthy).
+      - Otherwise check MTProto socket state. If disconnected, attempt a
+        reconnect (rate-limited to once per cooldown window).
+
+    This complements `heartbeat_job`'s 20-min lag check with a much tighter
+    detection loop for the "silent dead listener" failure mode.
+    """
+    global _last_listener_reconnect_ts
+    try:
+        ingest_age = shared.seconds_since_last_ingest()
+        # Fresh ingest → healthy, done.
+        if ingest_age is not None and ingest_age < _LISTENER_WATCHDOG_QUIET_SEC:
+            return
+
+        try:
+            mtproto_connected = bool(shared.listener.client.is_connected())
+        except Exception:
+            mtproto_connected = False
+
+        # Socket says connected AND we haven't been silent that long → fine.
+        # We only intervene when the socket itself reports disconnected.
+        if mtproto_connected:
+            return
+
+        # Rate-limit reconnect attempts.
+        now_m = time.monotonic()
+        if now_m - _last_listener_reconnect_ts < _LISTENER_RECONNECT_COOLDOWN_SEC:
+            return
+        if shared._listener_reconnecting:
+            return
+
+        _last_listener_reconnect_ts = now_m
+        logger.warning(
+            f"🔌 Listener watchdog: socket disconnected and no ingest for "
+            f"{(ingest_age or 0):.0f}s — forcing reconnect."
+        )
+        from shared import _reconnect_listener
+        asyncio.create_task(_reconnect_listener(gap_minutes=0.5))
+    except Exception as e:
+        logger.error(f"listener_health_watchdog error: {e}", exc_info=True)
+
+
 # ── Main Entry Point ───────────────────────────────────────────────────────────
 
 async def main() -> None:
@@ -754,6 +806,12 @@ async def main() -> None:
     # Alert if processing_loop stops ticking (heartbeat > 90s stale).
     scheduler.add_job(
         _loop_heartbeat_watchdog, "interval", seconds=30, id="loop_heartbeat"
+    )
+    # Listener watchdog: every 60s, if we haven't ingested a message in 3 min
+    # AND MTProto socket claims disconnected, force a reconnect. Complements
+    # the existing heartbeat_job (which only reconnects on 20min+ lag).
+    scheduler.add_job(
+        _listener_health_watchdog, "interval", seconds=60, id="listener_health"
     )
     # Sinyal waktu: T-2min reminders for time-bounded promos.
     scheduler.add_job(
