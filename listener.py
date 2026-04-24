@@ -48,6 +48,32 @@ NEG_PATTERN = re.compile(
 # All-caps: has at least one uppercase, zero lowercase letters
 FAST_ALLCAPS = re.compile(r'^[^a-z]*[A-Z][^a-z]*$')
 
+def check_fast_path(text: str) -> bool:
+    """Synchronous logic check for fast-path eligibility."""
+    if not text:
+        return False
+    t = text.strip()
+    tl = t.lower()
+    
+    # 1. Gate: Negation (skip if contains question or negation)
+    if '?' in t or NEG_PATTERN.search(tl):
+        return False
+        
+    # 2. Gate: Transit-noise (skip "aman rutenya" etc)
+    from shared import TRANSIT_NOISE_PATTERN
+    if 'aman' in tl and TRANSIT_NOISE_PATTERN.search(tl):
+        return False
+        
+    # 3. Trigger: ALL-CAPS (length > 3)
+    if FAST_ALLCAPS.match(t) and len(t) > 3:
+        return True
+        
+    # 4. Trigger: Instant keywords
+    if INSTANT_PATTERN.search(t):
+        return True
+        
+    return False
+
 
 class TelethonListener:
     def __init__(self, db_manager):

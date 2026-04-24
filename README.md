@@ -7,6 +7,7 @@ TanyaDFBot is a high-performance Telegram bot designed for real-time promotion t
 - **AI-Powered Analysis**: Utilizes Google Gemini models to parse raw chat text, extract structured promotion data, and summarize discussions.
 - **Community Corroboration**: Features a "Confirmation Gate" that waits for multiple user reports before broadcasting a deal, reducing false positives.
 - **Thread Analysis**: Automatically identifies and summarizes "hot" discussion threads.
+- **Feedback Pipeline**: Allows owners to provide direct corrections via a **"🔧 Feedback"** button, creating a ground-truth dataset for AI learning. See [Feedback Skill](.agents/skills/feedback-pipeline/SKILL.md).
 - **Resilient Pipeline**: Built with robust asynchronous message ingestion, batch database processing, and auto-reconnection logic.
 
 ## Architecture

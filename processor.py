@@ -22,8 +22,7 @@ _WORD_BOUNDARY_KEYWORDS = re.compile(
     r'\b(off|on|aman|work|bs|jp|mm)\b', re.IGNORECASE
 )
 _SOCIAL_FILLER = re.compile(
-    r'^((wkwk|haha|hehe|iya|noted|oke|ok|makasih|thanks|thx|mantap|gas|'
-    r'siap|sip|lol|anjir|anjay|btw|oot|gws|semangat)[!.\s]*)+$',
+    r'^((wkwk|haha|hehe|iya|noted|oke|ok|makasih|thanks|thx|mantap|gas|bos|guys|gais|bang|kak|siap|sip|lol|anjir|anjay|btw|oot|gws|semangat)[!.\s]*)+$',
     re.IGNORECASE
 )
 _NON_PROMO = re.compile(
@@ -105,7 +104,7 @@ Context ditulis sebagai C: sebelum MSG: — gunakan untuk resolve brand jika pes
 Summary: 1 kalimat informatif, sertakan harga/diskon jika ada. Jika tidak ada angka, cukup sebutkan status + brand.
 Brand: Gunakan nama yang konsisten — "HopHop" bukan "Hophop". Jika ragu → "Unknown" (bukan "sunknown" atau variasi lain).
 
-PENTING: Jika kamu tidak yakin ada promo nyata, JANGAN isi summary dengan deskripsi tentang pesan itu sendiri seperti "User bertanya tentang..." atau "Pesan ini membahas...". Lebih baik SKIP sama sekali.
+PENTING: Jika kamu tidak yakin ada promo nyata, JANGAN isi summary with deskripsi tentang pesan itu sendiri seperti "User bertanya tentang..." atau "Pesan ini membahas...". Lebih baik SKIP sama sekali.
 
 ATURAN BRAND (PENTING — sering salah):
 - `brand` = MERCHANT/TOKO tempat promo ditebus, BUKAN metode pembayaran.
@@ -146,7 +145,7 @@ TUGASMU: Tentukan apakah gambar ini berisi informasi promo yang bisa dimanfaatka
 PROMO VALID — ekstrak jika gambar berisi:
 - Poster/banner promo brand (diskon, cashback, voucher, harga spesial)
 - Screenshot aplikasi yang menampilkan harga/voucher/deal aktif
-- Bukti transaksi dengan promo (struk, order confirmation dengan diskon)
+- Bukti transaksi dengan promo (struk, order confirmation with diskon)
 - Screenshot chat/grup yang membahas promo konkret with angka/brand jelas
 
 TOLAK (isi summary="SKIP", brand="SKIP") jika gambar adalah:
@@ -187,23 +186,8 @@ _STRONG_KEYWORDS: set[str] = {
     'luber','pecah','flash','sale','deal','murah','hemat','bonus',
     'ongkir','gratis ongkir',
     'membership','member','mamber',
-    # Slang discovered from raw data analysis (2026-04-24)
-    'tukpo','tukar poin',            # tukar poin (point exchange)
-    'murce','murmer',                 # murah/cheap slang
-    'sopi','sopie',                   # Shopee misspelling
-    'tsel','mytsel',                  # Telkomsel slang
-    'cgv','xxi',                      # cinema brands
-    'svip',                           # ShopeeFood VIP
-    'badut',                          # deal-camping slang
-    'war',                            # war = competing for deals
-    'begal',                          # aggressive deal grab
-    'kreator','live kreator',         # Shopee/Tokped live creator events
-    'kopken','chatime','gindaco',     # food brands seen in data
-    'solaria','rotio',                # restaurant brands
-    'spx','shopee xpress',            # logistics brand
-    'gopay','spay','shopeepay','ovo', # payment brands
-    'neo','tmrw','saqu','seabank',    # digital bank brands
-    'hero',                           # Hero supermarket
+    'tukpo','murce','murmer','sopi','tsel','cgv','xxi','svip','badut','war','begal','kreator','live kreator',
+    'kopken','chatime','gindaco','solaria','rotio','spx','gopay','spay','shopeepay','ovo','neo','tmrw','saqu','seabank','hero',
 }
 
 _JUNK_SUMMARIES: set[str] = {'summary','none','n/a','-','tidak ada','tidak ditemukan'}
@@ -294,9 +278,6 @@ class GeminiProcessor:
         self._dedup_lock = asyncio.Lock()
 
         # Both models get the same RPM limit (12 each = 24 total aggregate).
-        # Matches the real per-model Gemini rate limit; the _ModelSlot
-        # synchronous release-last keeps our count accurate on retries so we
-        # can safely use the full allotment without triggering 429s.
         self._slots: dict[str, _ModelSlot] = {
             Config.MODEL_ID:       _ModelSlot(Config.MODEL_ID,       12),
             Config.MODEL_FALLBACK: _ModelSlot(Config.MODEL_FALLBACK, 12),
@@ -319,32 +300,23 @@ class GeminiProcessor:
         """Strictly alternating round-robin with fallback to the other model.
 
         Returns the model_id whose slot has been acquired.
-
-        The blocking acquire timeout is intentionally short (~8s) so that
-        processing_loop can retry a different batch quickly rather than
-        burning 90s per call waiting for a slot when both models are
-        momentarily saturated. The caller (`process_batch`) maps a final
-        TimeoutError into a requeue, which is cheap.
         """
         primaries = [Config.MODEL_ID, Config.MODEL_FALLBACK]
 
-        # Take rr_idx under lock, then release it — we don't want to hold
-        # rr_lock across any blocking acquire, since that would serialize
-        # every caller behind a single slow waiter.
         async with self._rr_lock:
             self._rr_idx = (self._rr_idx + 1) % len(primaries)
             primary_idx = self._rr_idx
 
-        primary = primaries[primary_idx]
-        secondary = primaries[1 - primary_idx]
+            primary = primaries[primary_idx]
+            secondary = primaries[1 - primary_idx]
 
-        # 1. Try primary non-blocking
-        if await self._slots[primary].try_acquire_nowait():
-            return primary
+            # 1. Try primary non-blocking
+            if await self._slots[primary].try_acquire_nowait():
+                return primary
 
-        # 2. Try secondary non-blocking
-        if await self._slots[secondary].try_acquire_nowait():
-            return secondary
+            # 2. Try secondary non-blocking
+            if await self._slots[secondary].try_acquire_nowait():
+                return secondary
 
         # 3. Both full — pick the one with more headroom and wait briefly.
         now = time.monotonic()
@@ -365,14 +337,7 @@ class GeminiProcessor:
 
         raise TimeoutError("Both model slots exhausted — rate limit exceeded")
 
-    # Hard ceiling on a single generate_content call. Gemini's Gemma-4 models
-    # occasionally hang on large-prompt 500s; we observed runs where a batch
-    # took 90s × 3 retries = 270s to fail, during which 7 messages sat in the
-    # queue because they were claimed by the hung batch.
-    #
-    # 30s is generous (typical latency is 1-6s) but fails fast enough that
-    # (retries + 1) × timeout = 3 × 30s = 90s max — keeping queue-tail
-    # latency bounded even when the AI provider is flaky.
+    # Hard ceiling on a single generate_content call.
     _AI_CALL_TIMEOUT_SEC: float = 30.0
 
     async def _call(self, contents: Any, config: dict[str, Any], model_id: str, retries: int = 2) -> Any:
@@ -391,12 +356,8 @@ class GeminiProcessor:
                 logger.info(f"✨ [AI] Response from {target}")
                 return res
             except asyncio.TimeoutError:
-                # AI call exceeded _AI_CALL_TIMEOUT_SEC — treat as a retryable
-                # transient. Release the slot synchronously so other batches
-                # aren't starved, and try the alternate model next attempt.
                 logger.warning(
-                    f"AI ({target}) timed out after "
-                    f"{self._AI_CALL_TIMEOUT_SEC:.0f}s on attempt {attempt + 1}."
+                    f"AI ({target}) timed out after {self._AI_CALL_TIMEOUT_SEC:.0f}s on attempt {attempt + 1}."
                 )
                 self._slots[slot_acquired].release_last()
                 if attempt < retries:
@@ -407,7 +368,6 @@ class GeminiProcessor:
                             target = other[0]
                             slot_acquired = target
                             continue
-                    # Fall back to same model with a short backoff
                     acquired = await self._slots[target].acquire(timeout=8.0)
                     if acquired:
                         slot_acquired = target
@@ -475,31 +435,24 @@ class GeminiProcessor:
             return False
 
         words = t.split()
-
-        # Strong signal bypass — check FIRST, before any length/question gates.
-        # This ensures brand mentions and deal keywords always reach AI.
-        if any(kw in t for kw in _STRONG_KEYWORDS):
-            return True
-        if _WORD_BOUNDARY_KEYWORDS.search(t):
-            return True
-
-        if len(words) < 2:
+        if len(words) < 2 and not any(kw in t for kw in ['sfood','gfood','grab','aman','on','jp']):
             return False
 
-        # Questions with a brand or deal keyword are still worth checking —
-        # they provide trend context ("ada 99% lg kah?", "cgv masih on?").
-        # Only drop pure questions with zero deal signal.
         question_words = {'ga','gak','nggak','apa','gimana','berapa','kapan','dimana','kenapa','ada','masih'}
         if t.endswith('?') and words and words[0] in question_words:
-            if not _PROMO.search(t):
-                return False
-        if len(words) <= 3 and t.endswith('?'):
-            if not _PROMO.search(t):
-                return False
+            return False
+        if len(words) <= 4 and t.endswith('?'):
+            return False
 
         if _SOCIAL_FILLER.match(t):
             return False
 
+        # Strong signal bypass
+        if any(kw in t for kw in _STRONG_KEYWORDS):
+            return True
+        if _WORD_BOUNDARY_KEYWORDS.search(t):
+            return True
+        
         # If no strong keywords, require more length to be considered "content"
         if len(words) <= 4:
             return False
@@ -572,19 +525,7 @@ class GeminiProcessor:
 
     async def filter_duplicates(self, new_promos: Sequence[PromoExtraction],
                                  recent_alerts: Sequence[dict[str, Any]]) -> list[PromoExtraction]:
-        """Aggressively filters duplicates using brand context and keyword overlap.
-
-        The caller (main.process_one_batch) already holds `_recent_alerts_lock`
-        for the full compare-and-reserve window, which is what actually makes
-        this atomic across concurrent AI batches. We don't take `_dedup_lock`
-        here anymore — it was redundant with the caller's lock and could mask
-        races (the old code released it before the caller had appended to
-        history, opening the window for the 4x-Sayurbox production bug).
-
-        Also does INTRA-BATCH dedup: if the same batch extracts three phrasings
-        of the same Sayurbox promo, we keep only the first and drop the rest,
-        so a single big batch can't fire duplicates on its own.
-        """
+        """Aggressively filters duplicates using brand context and keyword overlap."""
         if not new_promos:
             return []
 
@@ -613,8 +554,7 @@ class GeminiProcessor:
 
             p_words = set(re.findall(r'\w+', p.summary.lower())[:8])
 
-            # Cross-batch fuzzy dedup: same brand + ≥2 shared words in the
-            # first 8 tokens = near-duplicate of something already alerted.
+            # Cross-batch fuzzy dedup
             if (brand_key in recent_brands_set
                     and brand_key != 'unknown'
                     and p.status == 'active'):
@@ -628,12 +568,7 @@ class GeminiProcessor:
                 if is_dupe:
                     continue
 
-            # Intra-batch fuzzy dedup: same brand + ≥2 shared words with
-            # another promo already accepted in this same batch = duplicate.
-            # Handles the case where a single batch of Sayurbox messages
-            # produces multiple slightly-different extractions of the same
-            # promo, which the cross-batch check can't catch because neither
-            # is in history yet.
+            # Intra-batch fuzzy dedup
             if brand_key != 'unknown':
                 for prev_words in intra_batch_by_brand.get(brand_key, ()):
                     if len(p_words & prev_words) >= 2:
@@ -729,21 +664,7 @@ class GeminiProcessor:
         res.original_msg_id = original_msg_id
         return res
 
-    @staticmethod
-    def _row_get(m: Any, key: str, default: Any = None) -> Any:
-        """Safely access a key from a dict or aiosqlite.Row.
-
-        aiosqlite.Row (sqlite3.Row) does not have a .get() method,
-        so we need this helper to avoid AttributeError when rows
-        come directly from DB queries (e.g. get_recent_messages).
-        """
-        try:
-            val = m[key]
-            return val if val is not None else default
-        except (KeyError, IndexError):
-            return default
-
-    async def generate_narrative(self, messages: Sequence[dict[str, Any] | Any],
+    async def generate_narrative(self, messages: Sequence[dict[str, Any]],
                                   db: Any = None) -> list[TrendItem]:
         """Generates structured trend narratives for recent traffic."""
         if not messages:
@@ -753,12 +674,9 @@ class GeminiProcessor:
         parent_map: dict[int, str] = {}
         if db is not None:
             try:
-                chat_id = self._row_get(messages[0], 'chat_id')
-                reply_ids = [
-                    self._row_get(m, 'reply_to_msg_id')
-                    for m in messages
-                    if self._row_get(m, 'reply_to_msg_id')
-                ]
+                chat_id = messages[0]['chat_id']
+                reply_ids = [m['reply_to_msg_id'] for m in messages
+                             if m['reply_to_msg_id']]
                 if chat_id is not None and reply_ids:
                     parent_map = await db.get_deep_context_bulk(
                         reply_ids, chat_id, max_depth=2
@@ -769,16 +687,12 @@ class GeminiProcessor:
         lines: list[str] = []
         for m in messages[:50]:
             ctx = ""
-            rid = self._row_get(m, 'reply_to_msg_id')
+            rid = m['reply_to_msg_id']
             if rid and rid in parent_map:
                 parent_txt = (parent_map[rid] or "")[-120:].replace("\n", " ")
                 if parent_txt:
                     ctx = f" [reply→ {parent_txt}]"
-            lines.append(
-                f"ID:{self._row_get(m, 'tg_msg_id', '?')} "
-                f"{self._row_get(m, 'sender_name', '?')}:{ctx} "
-                f"{self._row_get(m, 'text', '')}"
-            )
+            lines.append(f"ID:{m['tg_msg_id']} {m['sender_name']}:{ctx} {m['text']}")
         context = "\n- ".join(lines)
         target  = await self._pick_model()
         
@@ -794,7 +708,7 @@ class GeminiProcessor:
         }
         response = await self._call(contents=f"Pesan grup:\n{context}", config=config, model_id=target)
         
-        # Cross-trend dedup: skip phrasings that are near-identical to already accepted ones
+        # Cross-trend dedup
         seen_topics: list[set[str]] = []
         unique_trends: list[TrendItem] = []
         if response and response.parsed:
@@ -813,7 +727,6 @@ class GeminiProcessor:
         if not context_msgs:
             return None
             
-        # Count keyword occurrences to help AI understand dominance
         word_counts = {}
         for w in hot_words:
             word_counts[w] = sum(1 for msg in context_msgs if w.lower() in msg.lower())
@@ -831,7 +744,6 @@ class GeminiProcessor:
         )
         
         target = await self._pick_model()
-        # Give AI the most recent messages (tail) as context
         context_block = "\n".join([f"- {msg[:150]}" for msg in context_msgs[-40:]])
         
         response = await self._call(

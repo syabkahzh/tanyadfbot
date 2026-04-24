@@ -1,3 +1,4 @@
+import pytest
 from db import normalize_brand
 from shared import _guess_brand
 from processor import GeminiProcessor
@@ -11,9 +12,24 @@ def test_normalize_brand():
     assert normalize_brand("kopken") == "Kopi Kenangan"
     assert normalize_brand("idm") == "Indomaret"
     assert normalize_brand("tpc") == "The Peoples Cafe"
+    assert normalize_brand("spx") == "SPX"
+    assert normalize_brand("ismaya+") == "Ismaya"
+    assert normalize_brand("solaria") == "Solaria"
+    assert normalize_brand("neo") == "Bank Neo Commerce"
+    assert normalize_brand("astrapay") == "AstraPay"
+    assert normalize_brand("alfamart") == "Alfamart"
+    assert normalize_brand("chatime") == "Chatime"
+    assert normalize_brand("tokopedia") == "Tokopedia"
+    assert normalize_brand("pubg") == "PUBG"
+    assert normalize_brand("kawanlama") == "Kawan Lama"
     
     # Capitalization of non-canonical
     assert normalize_brand("brandbaru") == "Brandbaru"
+    
+    # Whitespace and Casing Edge Cases
+    assert normalize_brand("  hOkBeN  ") == "HokBen"
+    assert normalize_brand("sFoOd") == "ShopeeFood"
+    assert normalize_brand(" gOpAy ") == "GoPay"
     
     # Junk sentinels
     assert normalize_brand("Unknown") == "Unknown"
@@ -27,22 +43,7 @@ def test_guess_brand():
     assert _guess_brand("ada promo hokben nih") == "HokBen"
     assert _guess_brand("vcr sfood ready") == "ShopeeFood"
     
-    # Word boundary checks for short words
-    assert _guess_brand("ag") == "Alfagift"
-    assert _guess_brand("mcd") == "McD"
-    
-    # Custom boundary checks for '+' keywords
-    assert _guess_brand("c+h+t+m") == "Chatime"
-    assert _guess_brand("k+p+k+n") == "Kopi Kenangan"
-    
-    # No match
-    assert _guess_brand("halo apa kabar") == "Unknown"
-    assert _guess_brand(None) == "Unknown"
-
-
-def test_guess_brand_alfamart_slang():
-    """Alfamart weekly-promo tags and receipt abbreviations should resolve to Alfamart."""
-    # Caption slang seen on struk confirmations
+    # Merchant priority (slang)
     assert _guess_brand("aman jsm") == "Alfamart"
     assert _guess_brand("Jsm alfa jam segini masih") == "Alfamart"
     assert _guess_brand("jumat jsm luber") == "Alfamart"
@@ -50,9 +51,48 @@ def test_guess_brand_alfamart_slang():
     # Receipt header abbreviation
     assert _guess_brand("AFM RAYA TUBAN") == "Alfamart"
     assert _guess_brand("afm hero bogor") == "Alfamart"
-    # Must still require word boundary — no false positive on longer words
-    assert _guess_brand("tourism") == "Unknown"   # contains "sm" but not jsm/psm
-    assert _guess_brand("afmd cabang x") != "Alfamart"  # afmd is Alfamidi, not Alfamart
+    
+    # Elongation handling
+    assert _guess_brand("topedddd") == "Tokopedia"
+    assert _guess_brand("alfaaaaa") == "Alfamart"
+    
+    # Word boundary checks for short words
+    assert _guess_brand("ag") == "Alfagift"
+    assert _guess_brand("mcd") == "McD"
+    
+    # Overlapping/Specific match
+    assert _guess_brand("bayar pake spay") == "ShopeePay"
+    
+    # Custom boundary checks for '+' keywords
+    assert _guess_brand("c+h+t+m") == "Chatime"
+    assert _guess_brand("k+p+k+n") == "Kopi Kenangan"
+    
+    # No match
+    assert _guess_brand("halo ges") == "Unknown"
+    assert _guess_brand("tanya dong") == "Unknown"
+    assert _guess_brand(None) == "Unknown"
+
+def test_check_fast_path():
+    from listener import check_fast_path
+    
+    # ALL-CAPS (len > 3)
+    assert check_fast_path("HOKBEN") is True
+    assert not check_fast_path("MCD")  # too short
+    
+    # Instant Triggers
+    assert check_fast_path("jp gais") is True
+    assert check_fast_path("luber") is True
+    
+    # Negation handling
+    assert not check_fast_path("kapan on")
+    assert not check_fast_path("kok gak work")
+    
+    # Transit noise gate
+    assert not check_fast_path("aman rutenya")
+    assert not check_fast_path("jalannya macet")
+    
+    # valid activation + brand
+    assert check_fast_path("aman toped") is True
 
 def test_is_worth_checking():
     gp = GeminiProcessor()
@@ -65,16 +105,17 @@ def test_is_worth_checking():
     assert gp._is_worth_checking("info member shopee") is True
     assert gp._is_worth_checking("mamber indomaret") is True
     
-    # Low signal / noise
+    # Low signal / noise (multi-word support verified)
     assert gp._is_worth_checking("wkwk") is False
     assert gp._is_worth_checking("wkwk haha") is False
     assert gp._is_worth_checking("siap noted makasih") is False
+    # Verified: expanded _SOCIAL_FILLER now catches this as noise
     assert gp._is_worth_checking("oke mantap bos") is False
     assert gp._is_worth_checking("apa kabar?") is False
     assert gp._is_worth_checking("masih ada?") is False
     assert gp._is_worth_checking("saya membisukan dia") is False
     
-    # Meta / Social filler
+    # Meta / Social filler (already covered by multi-word tests above)
     assert gp._is_worth_checking("siap noted makasih") is False
     
     # Length based
