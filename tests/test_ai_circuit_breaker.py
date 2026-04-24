@@ -1,9 +1,7 @@
 """Circuit breaker behavior when Gemini is in a failure streak."""
 from __future__ import annotations
 
-import time
 
-import pytest
 
 
 def _reset() -> None:

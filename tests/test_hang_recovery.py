@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import pytest
 
-import shared
 
 
 @pytest.mark.asyncio
@@ -170,7 +169,8 @@ async def test_in_progress_max_age_shorter_than_old_default() -> None:
 async def test_get_unprocessed_ancient_returns_old_rows() -> None:
     """The 3-tier queue policy relies on being able to fetch rows older than
     a threshold, ordered oldest-first, so nothing can starve indefinitely."""
-    import tempfile, os
+    import tempfile
+    import os
     from db import Database
     from config import Config
     from datetime import datetime, timezone, timedelta

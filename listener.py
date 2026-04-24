@@ -74,8 +74,7 @@ class TelethonListener:
         """
         from shared import (
             _make_tg_link, _guess_brand, _flush_alert_buffer,
-            db, gemini, bot,
-            _alerted_aman_parents, _alerted_aman_parents_deque, _aman_lock,
+            db, _alerted_aman_parents, _alerted_aman_parents_deque, _aman_lock,
             _recent_alerts_history, _recent_alerts_lock,
             _fastpath_brand_last_fired, _fastpath_brand_lock,
             FASTPATH_BRAND_DEDUP_SEC,
@@ -352,7 +351,7 @@ class TelethonListener:
         from db import _ts_str
         
         from datetime import timezone
-        PROCESS_CUTOFF = datetime.now(timezone.utc) - timedelta(minutes=30)
+        datetime.now(timezone.utc) - timedelta(minutes=30)
 
         last_id = await self.db.get_last_msg_id(chat_id)
         if not last_id:

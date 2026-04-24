@@ -1,4 +1,3 @@
-import pytest
 from db import normalize_brand
 from shared import _guess_brand
 from processor import GeminiProcessor

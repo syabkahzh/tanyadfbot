@@ -69,7 +69,7 @@ def analyze_chat():
     # 4. Question Analysis
     cur.execute("SELECT text FROM messages WHERE text LIKE '%?%'")
     total_questions = cur.fetchall()
-    print(f"\n--- ❓ Question Frequency ---")
+    print("\n--- ❓ Question Frequency ---")
     print(f"Messages containing a question mark: {len(total_questions)} ({(len(total_questions)/total_msgs)*100:.1f}%)")
 
     conn.close()

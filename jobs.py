@@ -7,13 +7,13 @@ spike detection, and database maintenance.
 import asyncio
 import html
 import re
-import sys
+
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Any, Sequence, cast
+from typing import Any, cast
 
 from db import Database
-from processor import GeminiProcessor, PromoExtraction
+from processor import GeminiProcessor
 from bot import TelegramBot
 from utils import _esc
 import shared
@@ -685,7 +685,7 @@ async def trend_job(db: Database, gemini: GeminiProcessor, bot: TelegramBot) -> 
             lines.append(f"• {html.escape(t.topic)}\n  🔗 <a href='{link}'>Lihat Pesan</a>")
 
         full_text = (
-            f"📈 <b>Narasi Tren (15m):</b>\n\n"
+            "📈 <b>Narasi Tren (15m):</b>\n\n"
             + "\n\n".join(lines)
         )
         
@@ -774,7 +774,7 @@ async def spike_detection_job(db: Database, gemini: GeminiProcessor, bot: Telegr
 
             from telegram.constants import ParseMode
             header_lines = [
-                f"🚀 <b>Lonjakan Pesan!</b>",
+                "🚀 <b>Lonjakan Pesan!</b>",
                 f"📊 Kecepatan: <code>{count} msg/min</code>",
                 f"📈 Rata-rata: <code>{avg_per_min:.1f} msg/min</code>",
             ]
@@ -807,7 +807,7 @@ async def spike_detection_job(db: Database, gemini: GeminiProcessor, bot: Telegr
 async def dead_promo_reaper_job(db: Database, bot: TelegramBot) -> None:
     """Closes expired promotions based on subsequent community chat signals."""
     logger.info("⏰ [Job] Starting dead_promo_reaper_job...")
-    EXPIRY_SIGNALS = re.compile(
+    re.compile(
         r'\b(nt|abis|habis|sold.?out|expired|kehabisan|ga bisa|gabisa|'
         r'udah mati|mati|nonaktif|hangus|error terus|ga work|gak work|off)\b',
         re.IGNORECASE
