@@ -246,6 +246,7 @@ class Database:
             "ALTER TABLE promos ADD COLUMN valid_until TEXT DEFAULT ''",
             "ALTER TABLE promos ADD COLUMN status_history TEXT DEFAULT '[]'",
             "ALTER TABLE promos ADD COLUMN via_fastpath INTEGER DEFAULT 0",
+            "ALTER TABLE promos ADD COLUMN reminder_fired INTEGER DEFAULT 0",
             # created_at format fix for older rows
         ]
         for sql in migrations:
@@ -610,18 +611,26 @@ class Database:
                 if clean_brand == "Unknown" and (not p.summary or len(p.summary) < 15):
                     continue
                 status = p.status if p.status in ('active', 'expired', 'unknown') else 'unknown'
-                promo_data.append((source_id, p.summary, clean_brand, p.conditions or '', link, status))
+                valid_until = (getattr(p, 'valid_until', '') or '').strip()
+                promo_data.append((source_id, p.summary, clean_brand, p.conditions or '',
+                                   link, status, valid_until))
 
             if promo_data:
+                # Persist `valid_until` too so the time-reminder job can find
+                # promos with a time-of-day window (e.g. "s/d 12:00", "jam 14").
                 await self.conn.executemany("""
                     INSERT INTO promos
-                        (source_msg_id, summary, brand, conditions, tg_link, status, via_fastpath)
-                    VALUES (?, ?, ?, ?, ?, ?, 0)
+                        (source_msg_id, summary, brand, conditions, tg_link, status, via_fastpath, valid_until)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, ?)
                     ON CONFLICT(brand, summary) DO UPDATE SET
-                        status      = excluded.status,
-                        tg_link     = excluded.tg_link,
+                        status        = excluded.status,
+                        tg_link       = excluded.tg_link,
                         source_msg_id = COALESCE(excluded.source_msg_id, source_msg_id),
-                        created_at  = strftime('%Y-%m-%d %H:%M:%S+00:00','now')
+                        valid_until   = CASE
+                            WHEN excluded.valid_until != '' THEN excluded.valid_until
+                            ELSE valid_until
+                        END,
+                        created_at    = strftime('%Y-%m-%d %H:%M:%S+00:00','now')
                 """, promo_data)
 
             if processed_msg_ids:

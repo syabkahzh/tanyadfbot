@@ -845,19 +845,40 @@ class TelegramBot:
         if self.auth_ids:
             await asyncio.gather(*[_safe_send(uid) for uid in self.auth_ids])
 
+    # Rate-limit error alerts per (component, error-class) tuple so a crash
+    # loop can't flood the owner with thousands of identical pings.
+    _error_alert_cooldown: dict[tuple[str, str], float] = {}
+    _ERROR_ALERT_COOLDOWN_SEC: float = 120.0
+
     async def alert_error(self, component: str, error: Exception) -> None:
         """Notifies the owner of a critical system error and logs it for retry.
+
+        Same (component, error_class) pair is silenced on Telegram for
+        _ERROR_ALERT_COOLDOWN_SEC, but is still written to the failures
+        table so nothing is lost.
 
         Args:
             component: The system component where the error occurred.
             error: The exception instance.
         """
         now_wib = datetime.now(WIB).strftime('%H:%M:%S WIB')
-        import traceback
+        import traceback, time as _time
         tb = traceback.format_exc()
 
-        # Log to DB
+        # Always log to DB (cheap + no external call).
         fid = await self.db.log_failure(component, str(error), tb)
+
+        # Rate-limit the Telegram push.
+        key = (component, type(error).__name__)
+        now_m = _time.monotonic()
+        last = self._error_alert_cooldown.get(key, 0.0)
+        if now_m - last < self._ERROR_ALERT_COOLDOWN_SEC:
+            logger.warning(
+                f"alert_error throttled (component={component}, err={type(error).__name__}); "
+                f"still logged to failures table as fid={fid}."
+            )
+            return
+        self._error_alert_cooldown[key] = now_m
 
         tb_short = tb[-1000:] if len(tb) > 1000 else tb
 

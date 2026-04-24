@@ -64,6 +64,20 @@ _fastpath_brand_lock: asyncio.Lock = asyncio.Lock()
 _stop_event: asyncio.Event = asyncio.Event()
 
 _listener_reconnecting: bool = False
+
+# Monotonic timestamp of the last processing_loop iteration. A dedicated
+# watchdog (main._loop_heartbeat_watchdog) alerts the owner if this goes
+# stale for >90s — i.e. the loop is blocked.
+_last_loop_tick: float | None = None
+
+def set_loop_tick() -> None:
+    """Record that the processing_loop just ticked (called at top of each iter)."""
+    global _last_loop_tick
+    import time as _time
+    _last_loop_tick = _time.monotonic()
+
+def get_loop_tick() -> float | None:
+    return _last_loop_tick
 _last_trend_alert: str = ""
 _last_spike_alert: datetime = datetime.min.replace(tzinfo=timezone.utc)
 _last_hourly_digest: str = ""

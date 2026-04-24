@@ -56,10 +56,15 @@ BOOT_CATCHUP_WINDOW: int       = 3600  # extended dynamically in main()
 
 _queue_emergency_mode: bool  = False
 
-# ── FIXED: Use a proper asyncio.Lock-guarded set so tasks can safely
-#           claim IDs before yielding control.
-_in_progress_ids: set[int]   = set()
+# ── FIXED: Use a proper asyncio.Lock-guarded dict so tasks can safely
+#           claim IDs before yielding control. The value is the monotonic
+#           timestamp at claim time, used by the stuck-claim reaper below.
+_in_progress_ids: dict[int, float] = {}
 _in_progress_lock: asyncio.Lock = asyncio.Lock()
+
+# Claims older than this are considered stuck (AI crashed silently, task was
+# cancelled, etc.) and get evicted so the underlying message can be retried.
+_IN_PROGRESS_MAX_AGE_SEC: float = 300.0  # 5 minutes
 
 _alerted_hot_threads: dict[int, tuple[int, datetime]] = {}
 _triage_cycle_counter: int   = 0
@@ -106,7 +111,7 @@ async def _auto_triage_queue() -> None:
         return
 
     async with _in_progress_lock:
-        current_in_progress = frozenset(_in_progress_ids)
+        current_in_progress = frozenset(_in_progress_ids.keys())
 
     async with db.conn.execute(
         "SELECT id, text, reply_to_msg_id FROM messages "
@@ -150,6 +155,9 @@ async def processing_loop() -> None:
                 "summary": rp['summary'],
             })
 
+    # Mark loop alive for the heartbeat watchdog below.
+    shared.set_loop_tick()
+
     async def process_one_batch(msgs: Sequence[dict[str, Any]]) -> None:
         """Processes a single batch of messages.
 
@@ -167,7 +175,8 @@ async def processing_loop() -> None:
             blocked `get_unprocessed_batch` from ever surfacing fresher backlog.
             """
             async with _in_progress_lock:
-                _in_progress_ids.difference_update(msg_ids)
+                for mid in msg_ids:
+                    _in_progress_ids.pop(mid, None)
 
         # Count this batch as in-flight from the moment it exists (including
         # time spent waiting on the semaphore), so the processing_loop's
@@ -199,9 +208,27 @@ async def processing_loop() -> None:
             return
 
         try:
+            # Atomically filter duplicates AND pre-reserve the surviving keys
+            # in `_recent_alerts_history` in a single critical section. This
+            # fixes a cross-batch race where N parallel AI batches could each
+            # read the same stale history, conclude "no duplicate", and all
+            # fire near-identical alerts seconds apart (the 4x Sayurbox /
+            # "Daging Sapi Rendang" alerts reported in production).
+            #
+            # The reservation is optimistic: we append every survivor even
+            # before we know its final confidence. If it ends up being
+            # dropped (low confidence → pending_confirmations, or rejected
+            # meta-commentary), leaving it in history is harmless — it just
+            # prevents re-extracting the same phrasing in the next batch,
+            # which is the correct behavior for dedup purposes.
             async with _recent_alerts_lock:
                 history_snapshot = list(_recent_alerts_history)
                 filtered = await gemini.filter_duplicates(promos, history_snapshot)
+                for _p in filtered:
+                    _recent_alerts_history.append({
+                        "brand":   normalize_brand(_p.brand),
+                        "summary": _p.summary,
+                    })
 
             if filtered:
                 promos_to_save: list[tuple[int, PromoExtraction, str]] = []
@@ -259,11 +286,8 @@ async def processing_loop() -> None:
                                 brand_key, p.model_dump_json(), tg_link, m['timestamp'],
                                 source='ai', commit=False # commit=False + single commit at end
                             )
-                            async with _recent_alerts_lock:
-                                _recent_alerts_history.append({
-                                    "brand":   brand_key,
-                                    "summary": p.summary,
-                                })
+                            # History was already appended inside the dedup
+                            # critical section above — don't double-append.
                             recently_alerted_brands.add(brand_key.lower())
                         else:
                             if brand_norm == "Unknown":
@@ -329,6 +353,7 @@ async def processing_loop() -> None:
     logger.info("Processing Loop started.")
     while True:
         try:
+            shared.set_loop_tick()
             await db.ensure_connection()
 
             queue_size = await db.get_queue_size()
@@ -402,8 +427,9 @@ async def processing_loop() -> None:
 
                 combined = priority + old_batch
                 if combined:
+                    claim_ts = time.monotonic()
                     for r in combined:
-                        _in_progress_ids.add(r['id'])
+                        _in_progress_ids[r['id']] = claim_ts
 
             if not combined:
                 await asyncio.sleep(2)
@@ -428,7 +454,8 @@ async def processing_loop() -> None:
             if noise_ids:
                 await db.mark_batch_processed(noise_ids)
                 async with _in_progress_lock:
-                    _in_progress_ids.difference_update(noise_ids)
+                    for nid in noise_ids:
+                        _in_progress_ids.pop(nid, None)
                 logger.debug(f"🧹 Filtered {len(noise_ids)} noise messages from batch.")
 
             if not to_ai:
@@ -452,11 +479,68 @@ async def processing_loop() -> None:
                 pass
             await asyncio.sleep(5)
 
-# ── Alert watchdog (runtime) ───────────────────────────────────────────────────
+# ── Runtime self-heal watchdogs ────────────────────────────────────────────────
 
 async def _alert_watchdog():
-    """Periodically un-sticks pending_alerts rows orphaned by mid-flush crashes."""
+    """Un-stick `pending_alerts` rows orphaned by mid-flush crashes."""
     await db.recover_stuck_alerts()
+
+
+async def _in_progress_reaper() -> None:
+    """Evict `_in_progress_ids` entries older than _IN_PROGRESS_MAX_AGE_SEC.
+
+    An entry stuck here means a batch claimed rows but never released them —
+    possibly because `process_one_batch` was cancelled mid-flight (e.g. the
+    model slot was lost, a connection timed out, or the task was GC'd before
+    finally ran). Left unchecked, these rows sit at `processed=0` forever and
+    eventually cause the same multi-minute tail latencies as the original bug.
+    """
+    now_m = time.monotonic()
+    evicted: list[int] = []
+    async with _in_progress_lock:
+        for mid, claim_ts in list(_in_progress_ids.items()):
+            if now_m - claim_ts > _IN_PROGRESS_MAX_AGE_SEC:
+                evicted.append(mid)
+                _in_progress_ids.pop(mid, None)
+    if evicted:
+        logger.warning(
+            f"⚠️ In-progress reaper freed {len(evicted)} stuck claims "
+            f"(ages > {_IN_PROGRESS_MAX_AGE_SEC:.0f}s). Messages will be retried."
+        )
+
+
+_last_loop_alert_ts: float = 0.0
+_LOOP_ALERT_COOLDOWN_SEC: float = 600.0
+
+
+async def _loop_heartbeat_watchdog() -> None:
+    """Alert the owner if `processing_loop` hasn't ticked in >90s.
+
+    The loop ticks every iteration (top of the `while True`). If no tick has
+    been observed for 90s, something has blocked the loop — a runaway AI call
+    holding the event loop, a DB deadlock, or an exception we're not catching.
+    We rate-limit the alert to at most once per 10 minutes so a long block
+    doesn't produce a storm of pings.
+    """
+    global _last_loop_alert_ts
+    last_tick = shared.get_loop_tick()
+    if last_tick is None:
+        return   # loop hasn't started yet
+    age = time.monotonic() - last_tick
+    if age < 90.0:
+        return
+    now_m = time.monotonic()
+    if now_m - _last_loop_alert_ts < _LOOP_ALERT_COOLDOWN_SEC:
+        return
+    _last_loop_alert_ts = now_m
+    logger.error(f"💔 processing_loop heartbeat stale: last tick {age:.0f}s ago")
+    try:
+        await bot.alert_error(
+            "processing_loop_heartbeat",
+            RuntimeError(f"processing_loop stalled: no tick for {age:.0f}s"),
+        )
+    except Exception:
+        pass
 
 
 # ── Main Entry Point ───────────────────────────────────────────────────────────
@@ -579,9 +663,23 @@ async def main() -> None:
         jobs.db_maintenance_job, "cron", hour="*/4", minute=5,
         id="db_maint", args=[db, bot]
     )
-    # NEW: runtime watchdog for stuck pending_alerts
+    # runtime watchdog for stuck pending_alerts
     scheduler.add_job(
         _alert_watchdog, "interval", minutes=1, id="alert_watchdog"
+    )
+    # Evict stale `_in_progress_ids` claims so messages stuck from a crashed
+    # batch don't block the queue indefinitely.
+    scheduler.add_job(
+        _in_progress_reaper, "interval", minutes=1, id="in_progress_reaper"
+    )
+    # Alert if processing_loop stops ticking (heartbeat > 90s stale).
+    scheduler.add_job(
+        _loop_heartbeat_watchdog, "interval", seconds=30, id="loop_heartbeat"
+    )
+    # Sinyal waktu: T-2min reminders for time-bounded promos.
+    scheduler.add_job(
+        jobs.time_reminder_job, "interval", minutes=1,
+        id="time_reminder", args=[db, bot, WIB]
     )
 
     scheduler.start()
