@@ -544,7 +544,7 @@ class GeminiProcessor:
         # Cross-batch history (what the caller already alerted on recently)
         history_tail = list(recent_alerts)[-50:]
         recent_keys = {
-            f"{normalize_brand(r.get('brand', '')).lower()}:{r.get('summary', '')[:35].lower()}"
+            f"{normalize_brand(r['brand']).lower()}:{r['summary'][:35].lower()}"
             for r in recent_alerts
         }
         recent_brands_set = {
@@ -573,8 +573,8 @@ class GeminiProcessor:
                     and p.status == 'active'):
                 is_dupe = False
                 for r in reversed(history_tail):
-                    if normalize_brand(r.get('brand', '')).lower() == brand_key:
-                        r_words = set(re.findall(r'\w+', r.get('summary', '').lower())[:8])
+                    if normalize_brand(r['brand']).lower() == brand_key:
+                        r_words = set(re.findall(r'\w+', r['summary'].lower())[:8])
                         if len(p_words & r_words) >= 2:
                             is_dupe = True
                             break
@@ -682,22 +682,19 @@ class GeminiProcessor:
         res.original_msg_id = original_msg_id
         return res
 
-    async def generate_narrative(self, messages: Sequence[dict[str, Any]],
+    async def generate_narrative(self, messages: Sequence[dict[str, Any] | Any],
                                   db: Any = None) -> list[TrendItem]:
         """Generates structured trend narratives for recent traffic."""
         if not messages:
             return []
 
         # Enrich with reply-parent text so the model can weight thread context.
-        # Without this the model reads "Bau" as a standalone complaint when in
-        # reality it's a reply to a `ywwa` (yang wangi-wangi aja) thread where
-        # `bau` is slang for an unlucky/stepchild account.
         parent_map: dict[int, str] = {}
         if db is not None:
             try:
-                chat_id = messages[0].get('chat_id')
-                reply_ids = [m.get('reply_to_msg_id') for m in messages
-                             if m.get('reply_to_msg_id')]
+                chat_id = messages[0]['chat_id']
+                reply_ids = [m['reply_to_msg_id'] for m in messages
+                             if m['reply_to_msg_id']]
                 if chat_id is not None and reply_ids:
                     parent_map = await db.get_deep_context_bulk(
                         reply_ids, chat_id, max_depth=2
@@ -708,7 +705,7 @@ class GeminiProcessor:
         lines: list[str] = []
         for m in messages[:50]:
             ctx = ""
-            rid = m.get('reply_to_msg_id')
+            rid = m['reply_to_msg_id']
             if rid and rid in parent_map:
                 parent_txt = (parent_map[rid] or "")[-120:].replace("\n", " ")
                 if parent_txt:
@@ -716,16 +713,15 @@ class GeminiProcessor:
             lines.append(f"ID:{m['tg_msg_id']} {m['sender_name']}:{ctx} {m['text']}")
         context = "\n- ".join(lines)
         target  = await self._pick_model()
+        
+        slang_desc = "\n".join([f"- `{k}` = {v}" for k, v in _SLANG_KAMUS.items()])
         config = {
             "response_mime_type": "application/json",
             "response_schema": TrendResponse,
             "system_instruction": (
                 "Kamu analis sentimen deal-hunter Indonesia. Simpulkan 1-3 tren utama dengan link ID pesan.\n"
-                "Konteks slang:\n"
-                "- `ywwa` (yang wangi wangi aja) = thread pamer promo/akun hoki.\n"
-                "- `bau` = akun yang tidak hoki / tidak 'wangi' / tidak kebagian promo.\n"
-                "- `cibu` = cashback / cb / kesbek.\n"
-                "- `aman` = promo work / berhasil ditebus."
+                "Gunakan konteks kamus slang berikut agar tidak salah paham:\n"
+                f"{slang_desc}"
             ),
         }
         response = await self._call(contents=f"Pesan grup:\n{context}", config=config, model_id=target)
