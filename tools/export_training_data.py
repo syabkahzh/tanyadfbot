@@ -1,6 +1,7 @@
 import sqlite3
 import re
 import random
+import os
 
 def clean_text(text):
     if not text: return ""
@@ -25,6 +26,13 @@ def export_v2():
     """)
     promos = [clean_text(row['text']) for row in cur.fetchall()]
 
+    # 1c. Fetch PROMO SUMMARIES (Often formal/structured text)
+    cur.execute("""
+        SELECT DISTINCT summary FROM promos 
+        WHERE summary IS NOT NULL AND length(summary) > 10
+    """)
+    summaries = [clean_text(row['summary']) for row in cur.fetchall()]
+    
     # 1b. Fetch USER CORRECTIONS (Ground Truth - Force into PROMO)
     cur.execute("""
         SELECT DISTINCT m.text FROM messages m
@@ -33,33 +41,58 @@ def export_v2():
     """)
     corrections = [clean_text(row['text']) for row in cur.fetchall()]
     
-    # Add corrections to promos and remove duplicates
-    promos = list(set(promos + corrections))
+    # Add everything to promos and remove duplicates
+    promos = list(set(promos + summaries + corrections))
 
-    # 2. Fetch HIGH-QUALITY Noise (messages the AI actually looked at but skipped)
-    # CRITICAL: Exclude messages that were later corrected by user!
-    cur.execute("""
-        SELECT DISTINCT m.text FROM messages m
-        WHERE m.skip_reason = 'ai_skip' 
-        AND m.text IS NOT NULL AND length(m.text) > 4
-        AND m.id NOT IN (SELECT original_msg_id FROM ai_corrections)
-    """)
-    ai_noise = [clean_text(row['text']) for row in cur.fetchall()]
+    # 1d. Manual SEED DATA (Force-feeding the model specific logic)
+    seed_path = "data/seed_data.txt"
+    seeds = []
+    if os.path.exists(seed_path):
+        with open(seed_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("__label__PROMO "):
+                    seeds.append(clean_text(line.replace("__label__PROMO ", "")))
+    
+    promos = list(set(promos + seeds))
 
-    # 3. Fetch REGEX-FILTERED Noise (low-level chatter)
+    # 2. Fetch HIGH-QUALITY JUNK (Dynamic Discovery)
+    # We find where we started recording skip reasons to avoid hardcoding IDs.
+    cur.execute("SELECT MIN(id) FROM messages WHERE skip_reason IS NOT NULL AND skip_reason != ''")
+    row = cur.fetchone()
+    modern_start_id = row[0] if (row and row[0]) else 0
+    
+    # If the DB is fresh, ensure we at least look back far enough
+    if modern_start_id == 0:
+        cur.execute("SELECT MAX(id) FROM messages")
+        max_id = cur.fetchone()[0] or 0
+        modern_start_id = max(0, max_id - 10000)
+
+    print(f"🧹 Fetching verified JUNK from modern range (ID >= {modern_start_id})...")
     cur.execute("""
         SELECT DISTINCT text FROM messages 
-        WHERE skip_reason = 'regex' 
+        WHERE id >= ? 
+        AND skip_reason IN ('ai_skip', 'triage', 'regex', 'fasttext')
         AND text IS NOT NULL AND length(text) > 4
-    """)
-    regex_noise = [clean_text(row['text']) for row in cur.fetchall()]
+        AND id NOT IN (SELECT original_msg_id FROM ai_corrections)
+    """, (modern_start_id,))
+    modern_noise = [clean_text(row['text']) for row in cur.fetchall()]
+
+    # 3. Fetch Legacy REGEX Noise (to maintain volume)
+    cur.execute("""
+        SELECT DISTINCT text FROM messages 
+        WHERE (skip_reason = 'regex' OR skip_reason IS NULL)
+        AND id < ?
+        AND text IS NOT NULL AND length(text) > 4
+    """, (modern_start_id,))
+    legacy_noise = [clean_text(row['text']) for row in cur.fetchall()]
+
 
     conn.close()
 
     # BALANCING LOGIC
-    # We want plenty of noise so the model isn't trigger-happy.
-    # Total JUNK = AI-skipped (high value) + Sampled Regex-skipped
-    final_noise = ai_noise + random.sample(regex_noise, min(len(regex_noise), 3000))
+    # We prioritize modern_noise (verified by logic/AI) over legacy samples.
+    final_noise = modern_noise + random.sample(legacy_noise, min(len(legacy_noise), 2000))
+
     
     # Shuffle
     random.shuffle(promos)

@@ -1051,3 +1051,60 @@ async def db_maintenance_job(db: Database, bot: TelegramBot) -> None:
     except Exception as e:
         logger.error(f"db_maintenance_job error: {e}", exc_info=True)
         await bot.alert_error("db_maintenance_job", e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Model Retraining
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def fasttext_retrain_job(db: Database, bot: TelegramBot) -> None:
+    """Automatically exports data and retrains the FastText model."""
+    logger.info("⏰ [Job] Starting FastText autonomous retraining...")
+    try:
+        import os
+        import subprocess
+        import sys
+        
+        # 1. Path setup
+        venv_python = os.path.join(os.getcwd(), "venv", "bin", "python3")
+        if not os.path.exists(venv_python):
+            venv_python = sys.executable  # Fallback to current python
+            
+        export_script = os.path.join(os.getcwd(), "tools", "export_training_data.py")
+        train_script = os.path.join(os.getcwd(), "tools", "train_model.py")
+        
+        # 2. Export Data
+        logger.info("📡 Exporting training data...")
+        process = await asyncio.create_subprocess_exec(
+            venv_python, export_script,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            raise RuntimeError(f"Export failed: {stderr.decode()}")
+            
+        # 3. Train Model
+        logger.info("🧠 Training FastText model...")
+        process = await asyncio.create_subprocess_exec(
+            venv_python, train_script, "--data", "data/training.txt", "--out", "model.ftz",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            raise RuntimeError(f"Training failed: {stderr.decode()}")
+            
+        # 4. Reload Model in memory
+        import shared
+        reloaded = await shared.load_classifier("model.ftz")
+        
+        if reloaded:
+            logger.info("✅ [Job] FastText retraining complete and reloaded.")
+        else:
+            logger.warning("⚠️ [Job] FastText trained but failed to reload.")
+            
+    except Exception as e:
+        logger.error(f"fasttext_retrain_job error: {e}", exc_info=True)
+        await bot.alert_error("fasttext_retrain_job", e)
+

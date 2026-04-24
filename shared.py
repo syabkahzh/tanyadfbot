@@ -118,6 +118,10 @@ _recent_alerts_history: deque[dict[str, Any]] = deque(maxlen=500)
 _recent_alerts_lock: asyncio.Lock = asyncio.Lock()
 _flush_lock: asyncio.Lock = asyncio.Lock()
 
+# Alert rate limiting state
+_last_error_alerts: dict[str, float] = {}
+_ERROR_ALERT_COOLDOWN: float = 120.0
+
 _alerted_aman_parents: set[int] = set()
 _alerted_aman_parents_deque: deque[int] = deque(maxlen=500)
 _aman_lock: asyncio.Lock = asyncio.Lock()

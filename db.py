@@ -633,6 +633,77 @@ class Database:
         except Exception as e:
             logger.error(f"DB increment_ai_failure_count error: {e}")
 
+    # ── Pending Confirmations ──────────────────────────────────────────────────
+
+    async def bulk_upsert_pending_confirmations(self, batch: list[dict[str, Any]]) -> None:
+        """Processes multiple pending confirmations in a batch to avoid N+1 queries.
+        
+        Args:
+            batch: List of dictionaries containing brand, p_data_json, tg_link, 
+                   timestamp, confidence, and snippet.
+        """
+        if not self.conn or not batch:
+            return
+
+        import json
+        from datetime import datetime, timedelta, timezone
+
+        try:
+            # 1. Fetch all existing records for these brands in one go
+            brands = [item['brand'] for item in batch]
+            placeholders = ",".join("?" * len(brands))
+            
+            async with self.conn.execute(
+                f"SELECT id, brand, corroboration_texts FROM pending_confirmations WHERE brand IN ({placeholders})",
+                brands
+            ) as cur:
+                rows = await cur.fetchall()
+                existing_map = {row['brand']: row for row in rows}
+
+            # 2. Prepare data for updates and inserts
+            to_update = []
+            to_insert = []
+            
+            for item in batch:
+                brand = item['brand']
+                snippet = item['snippet']
+                
+                if brand in existing_map:
+                    row = existing_map[brand]
+                    try:
+                        texts = json.loads(row['corroboration_texts'] or "[]")
+                    except:
+                        texts = []
+                    
+                    if snippet and snippet not in texts:
+                        texts.append(snippet)
+                    
+                    to_update.append((json.dumps(texts), row['id']))
+                else:
+                    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')
+                    texts = [snippet] if snippet else []
+                    to_insert.append((
+                        brand, item['p_data_json'], item['tg_link'], 
+                        item['timestamp'], item['confidence'], json.dumps(texts), expires_at
+                    ))
+
+            # 3. Execute in transaction
+            if to_update:
+                await self.conn.executemany(
+                    "UPDATE pending_confirmations SET corroborations=corroborations+1, corroboration_texts=? WHERE id=?",
+                    to_update
+                )
+            
+            if to_insert:
+                await self.conn.executemany(
+                    "INSERT INTO pending_confirmations (brand, p_data_json, tg_link, timestamp, confidence, corroboration_texts, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    to_insert
+                )
+                
+        except Exception as e:
+            logger.error(f"Error in bulk_upsert_pending_confirmations: {e}")
+            raise
+
     async def get_last_msg_id(self, chat_id: int) -> int:
         """Retrieves the highest Telegram message ID seen in a chat.
 

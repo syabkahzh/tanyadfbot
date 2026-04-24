@@ -195,6 +195,7 @@ async def processing_loop() -> None:
 
             if filtered:
                 promos_to_save: list[tuple[int, PromoExtraction, str]] = []
+                pending_confirmations_batch: list[dict[str, Any]] = []
                 now_utc        = datetime.now(timezone.utc)
                 msg_id_map     = {m['id']: m for m in msgs}
 
@@ -371,9 +372,14 @@ async def processing_loop() -> None:
             # Level 2 Safeguard: Protect strong signals from model error
             _PROTECTED_SIGNALS = re.compile(
                 r'\b(jsm|psm|aman|on|jp|work|luber|pecah|cair|nyala|'
-                r'berhasil|lancar|masuk|murce|murmer|big|badut|syarat|snk|serbu)\b', 
+                r'berhasil|lancar|masuk|murce|murmer|big|badut|syarat|snk|serbu|'
+                r'alhamdulillah|alhamdullilah|alhamd|almd|tembus|dapet|'
+                r'unlimited|kuota|prioritas|paket|pembelian|erafone|ibox|samsung|'
+                r'iklan|klaim|goco|ultravoucher|uv|fitbar|watsons|cinepolis|bogo)\b', 
                 re.IGNORECASE
             )
+            
+            _MARKETPLACE_URLS = re.compile(r'https?://(?!t\.me)[^\s]+', re.IGNORECASE)
             
             candidates = []
             for r in combined:
@@ -384,8 +390,8 @@ async def processing_loop() -> None:
                     regex_noise_ids.append(r['id'])
                     continue
                 
-                # Safeguard: ALWAYS pass holy-grail keywords or photos to AI
-                if has_photo or _PROTECTED_SIGNALS.search(text):
+                # Safeguard: ALWAYS pass holy-grail keywords, marketplace links, or photos to AI
+                if has_photo or _PROTECTED_SIGNALS.search(text) or _MARKETPLACE_URLS.search(text):
                     to_ai.append({
                         "id":               r['id'],
                         "text":             r['text'],
@@ -565,6 +571,7 @@ async def main() -> None:
     scheduler.add_job(jobs.dead_promo_reaper_job, "interval", minutes=20, id="reaper", args=[db, bot])
     scheduler.add_job(jobs.confirmation_gate_job, "interval", minutes=1, id="confirm_gate", args=[db])
     scheduler.add_job(jobs.db_maintenance_job, "cron", hour="*/4", minute=5, id="db_maint", args=[db, bot])
+    scheduler.add_job(jobs.fasttext_retrain_job, "cron", hour="*/6", minute=15, id="ft_retrain", args=[db, bot], jitter=300)
     scheduler.add_job(_alert_watchdog, "interval", minutes=1, id="alert_watchdog")
     scheduler.add_job(_in_progress_reaper, "interval", minutes=1, id="in_progress_reaper")
     scheduler.add_job(_active_ai_tasks_reconciler, "interval", minutes=1, id="ai_tasks_reconciler")
