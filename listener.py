@@ -304,7 +304,24 @@ class TelethonListener:
             # DB save as separate task - never blocks fast-path
             asyncio.create_task(self._save_to_db(event))
 
-        await self.client.start()
+        # BUG FIX: Retry loop for Telethon start to handle 'database is locked'
+        # which happens if a previous instance is still cleaning up or if
+        # multiple startup tasks conflict.
+        import logging as _logging
+        _l = _logging.getLogger(__name__)
+        
+        for attempt in range(5):
+            try:
+                await self.client.start()
+                break
+            except Exception as e:
+                if "locked" in str(e).lower() and attempt < 4:
+                    wait = 3 * (attempt + 1)
+                    _l.warning(f"⚠️ Telethon session locked on start, retrying in {wait}s...")
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+
         print("🚀 Telethon Listener started.")
 
     async def sync_history(self, hours=6, catchup_hours=2):
