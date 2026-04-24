@@ -318,6 +318,13 @@ class GeminiProcessor:
 
         raise TimeoutError("Both model slots exhausted — rate limit exceeded")
 
+    # Hard ceiling on a single generate_content call. The Gemini SDK has been
+    # observed hanging forever on large-prompt 500s — without this timeout the
+    # calling task's claims leak until the `_in_progress_reaper` fires (5 min),
+    # producing multi-minute bot silences. 90s is a safe upper bound: typical
+    # latency is ~1-6s; anything >90s is effectively a hang.
+    _AI_CALL_TIMEOUT_SEC: float = 90.0
+
     async def _call(self, contents: Any, config: dict[str, Any], model_id: str, retries: int = 2) -> Any:
         """Execute an AI call on an already-acquired model slot."""
         primaries = [Config.MODEL_ID, Config.MODEL_FALLBACK]
@@ -327,11 +334,38 @@ class GeminiProcessor:
         for attempt in range(retries + 1):
             try:
                 logger.info(f"🤖 [AI] Requesting {target} (attempt {attempt + 1})...")
-                res = await self.client.aio.models.generate_content(
-                    model=target, contents=contents, config=config
-                )
+                async with asyncio.timeout(self._AI_CALL_TIMEOUT_SEC):
+                    res = await self.client.aio.models.generate_content(
+                        model=target, contents=contents, config=config
+                    )
                 logger.info(f"✨ [AI] Response from {target}")
                 return res
+            except asyncio.TimeoutError:
+                # AI call exceeded _AI_CALL_TIMEOUT_SEC — treat as a retryable
+                # transient. Release the slot synchronously so other batches
+                # aren't starved, and try the alternate model next attempt.
+                logger.warning(
+                    f"AI ({target}) timed out after "
+                    f"{self._AI_CALL_TIMEOUT_SEC:.0f}s on attempt {attempt + 1}."
+                )
+                self._slots[slot_acquired].release_last()
+                if attempt < retries:
+                    other = [m for m in primaries if m != target]
+                    if other:
+                        acquired = await self._slots[other[0]].acquire(timeout=8.0)
+                        if acquired:
+                            target = other[0]
+                            slot_acquired = target
+                            continue
+                    # Fall back to same model with a short backoff
+                    acquired = await self._slots[target].acquire(timeout=8.0)
+                    if acquired:
+                        slot_acquired = target
+                    else:
+                        return None
+                    continue
+                logger.error(f"AI call timed out after {retries + 1} attempts.")
+                return None
             except Exception as e:
                 err = str(e)
                 is_rate = "429" in err or "resource_exhausted" in err.lower()

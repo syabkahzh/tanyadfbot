@@ -78,6 +78,20 @@ def set_loop_tick() -> None:
 
 def get_loop_tick() -> float | None:
     return _last_loop_tick
+
+# Max age (seconds) of the oldest row we observed in the ancient tier on the
+# last batch fetch. Used by /diag to surface tail-latency risk.
+_last_observed_ancient_age: float = 0.0
+
+# Monotonic timestamp of the last time any AI batch was spawned. /diag
+# reports (now - this) so the owner can see if batching has stalled even
+# when the loop is still ticking (e.g. queue empty or semaphore saturated).
+_last_batch_spawn_ts: float | None = None
+
+def mark_batch_spawned() -> None:
+    global _last_batch_spawn_ts
+    import time as _time
+    _last_batch_spawn_ts = _time.monotonic()
 _last_trend_alert: str = ""
 _last_spike_alert: datetime = datetime.min.replace(tzinfo=timezone.utc)
 _last_hourly_digest: str = ""

@@ -64,7 +64,10 @@ _in_progress_lock: asyncio.Lock = asyncio.Lock()
 
 # Claims older than this are considered stuck (AI crashed silently, task was
 # cancelled, etc.) and get evicted so the underlying message can be retried.
-_IN_PROGRESS_MAX_AGE_SEC: float = 300.0  # 5 minutes
+# NOTE: must be larger than the AI-call timeout in processor._AI_CALL_TIMEOUT_SEC
+# (90s) so a normal slow call doesn't get double-claimed by the reaper. 120s is
+# the sweet spot: recovers from a hung claim within ~2 min of detection.
+_IN_PROGRESS_MAX_AGE_SEC: float = 120.0
 
 _alerted_hot_threads: dict[int, tuple[int, datetime]] = {}
 _triage_cycle_counter: int   = 0
@@ -77,6 +80,11 @@ _triage_cycle_counter: int   = 0
 # budget, 16 in-flight batches is comfortably safe.
 _AI_MAX_INFLIGHT: int = 16
 _AI_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(_AI_MAX_INFLIGHT)
+
+# Strong references to spawned `process_one_batch` tasks. Without this set,
+# asyncio can GC a task whose only reference is the scheduler's weak queue
+# mid-flight, leaving claims stuck in `_in_progress_ids` until the reaper.
+_active_spawn_tasks: set[asyncio.Task] = set()
 
 _META_PATTERNS = re.compile(
     r"(user bertanya|tidak ada informasi|tidak disebutkan|no information|"
@@ -183,21 +191,35 @@ async def processing_loop() -> None:
         # spawn-gate accurately reflects total pending work — not just tasks
         # that have already acquired the semaphore.
         shared._active_ai_tasks += 1
+        # Outer try/finally catches CancelledError / BaseException too, so a
+        # task that gets cancelled mid-AI-call still releases its claims.
+        # (Pre-fix: reaper had to mop up stuck claims every 5 min, causing
+        # multi-minute silences during API hiccups.)
+        promos: list[Any] | None = None
+        ai_failed = False
         try:
-            async with _AI_SEMAPHORE:
-                try:
-                    promos = await gemini.process_batch(msgs, db)
-                except TimeoutError:
-                    logger.warning(f"AI rate limits exhausted — requeuing {len(msgs)} msgs for later.")
-                    await _release_claims()
-                    return
-                except Exception as e:
-                    logger.error(f"AI processing error: {e}", exc_info=True)
-                    await db.increment_ai_failure_count(msg_ids)
-                    await _release_claims()
-                    return
-        finally:
-            shared._active_ai_tasks -= 1
+            try:
+                async with _AI_SEMAPHORE:
+                    try:
+                        promos = await gemini.process_batch(msgs, db)
+                    except TimeoutError:
+                        logger.warning(f"AI rate limits exhausted — requeuing {len(msgs)} msgs for later.")
+                        ai_failed = True
+                    except Exception as e:
+                        logger.error(f"AI processing error: {e}", exc_info=True)
+                        await db.increment_ai_failure_count(msg_ids)
+                        ai_failed = True
+            finally:
+                shared._active_ai_tasks -= 1
+        except BaseException:
+            # CancelledError or any other BaseException: release claims so
+            # the rows become eligible for re-processing, then re-raise.
+            await _release_claims()
+            raise
+
+        if ai_failed:
+            await _release_claims()
+            return
 
         ai_duration = time.monotonic() - ai_start
 
@@ -386,50 +408,98 @@ async def processing_loop() -> None:
             # Sweet spot for gemma-4-31b-it: 15–25 msgs per call (~3–6s each).
             # Under emergency pressure we can size up a bit for throughput, but
             # never so large that a single batch stalls the drain pipeline.
+            # Batch-size cap at 25 is deliberate: Gemini's Gemma-4 models
+            # time out erratically on very large prompts (observed ≥50-msg
+            # batches hanging forever with no response), so we keep any
+            # single batch small enough that (a) it completes fast under
+            # normal latency, and (b) a stall on one batch doesn't take
+            # down a huge chunk of the queue.
             if _queue_emergency_mode:
-                batch_size = int(25 + 25 * headroom_pct)   # 25–50
+                batch_size = int(15 + 10 * headroom_pct)   # 15–25
             else:
-                batch_size = int(15 + 15 * headroom_pct)   # 15–30
+                batch_size = int(10 + 10 * headroom_pct)   # 10–20
 
             # ── CORE FIX: fetch AND claim inside the same lock acquisition ──────
+            #
+            # 3-tier queue policy — designed so NO row can sit >~3 min under
+            # any realistic queue shape:
+            #
+            #   ancient_reserve  — rows >= 15 min old. Always claim ≥ 30% of
+            #                      the batch from the very tail of the queue.
+            #                      This is the anti-starvation guarantee: a
+            #                      row that got stuck for 15 min skips ahead
+            #                      of fresher backlog and gets processed.
+            #   priority         — rows < 10 min old, FIFO within that window.
+            #   backlog_reserve  — rows between 10–15 min old, catching the
+            #                      middle tier so the handoff is smooth.
+            #
+            # Previously a row that missed the 10 min window drained at 25%
+            # of the batch, and the `_last_observed_ancient_age` telemetry
+            # showed rows occasionally sitting 20+ min. The 30% ancient
+            # reserve caps the observed age tightly.
             combined: list[Any] = []
             async with _in_progress_lock:
-                # Under mild pressure give backlog 25% of the batch; under
-                # severe pressure (queue > 200) give it 50% so aged-out
-                # messages drain at equal speed with fresh ones. This was the
-                # core driver of the multi-minute tail latencies: a message
-                # that missed the 10-min priority window previously drained at
-                # 1/4 the rate of fresh traffic, so under a sustained burst it
-                # could sit for 15–20 minutes.
+                ancient_reserve = int(batch_size * 0.3)  # always 30%
                 if queue_size > 200:
-                    backlog_reserve = int(batch_size * 0.5)
+                    backlog_reserve = int(batch_size * 0.3)
                 elif queue_size > 50:
-                    backlog_reserve = int(batch_size * 0.25)
+                    backlog_reserve = int(batch_size * 0.2)
                 else:
                     backlog_reserve = 0
-                priority_cap = batch_size - backlog_reserve
 
-                priority_raw = await db.get_unprocessed_recent(minutes=10, batch_size=priority_cap + 20)
-                priority = [r for r in priority_raw if r['id'] not in _in_progress_ids][:priority_cap]
+                priority_cap = max(1, batch_size - ancient_reserve - backlog_reserve)
 
-                backlog_needed = batch_size - len(priority)
+                # Tier 1: ancient rows (>15 min old) — always first to claim
+                ancient_raw = await db.get_unprocessed_ancient(
+                    min_age_minutes=15, batch_size=ancient_reserve + 100,
+                )
+                ancient = [
+                    r for r in ancient_raw
+                    if r['id'] not in _in_progress_ids
+                ][:ancient_reserve]
+
+                # Tier 2: fresh priority (<10 min old)
+                priority_raw = await db.get_unprocessed_recent(
+                    minutes=10, batch_size=priority_cap + 20,
+                )
+                seen_ids = {r['id'] for r in ancient}
+                priority = [
+                    r for r in priority_raw
+                    if r['id'] not in _in_progress_ids and r['id'] not in seen_ids
+                ][:priority_cap]
+
+                # Tier 3: middle backlog (10–15 min old or whatever's left)
+                filled = len(ancient) + len(priority)
+                backlog_needed = batch_size - filled
                 if backlog_needed > 0:
                     # Oversample generously so any residual stuck rows in
                     # `_in_progress_ids` can't drown out fresher backlog.
                     old_raw = await db.get_unprocessed_batch(batch_size=backlog_needed + 200)
-                    seen = {r['id'] for r in priority}
+                    seen_ids.update(r['id'] for r in priority)
                     old_batch = [
                         r for r in old_raw
-                        if r['id'] not in seen and r['id'] not in _in_progress_ids
+                        if r['id'] not in seen_ids and r['id'] not in _in_progress_ids
                     ][:backlog_needed]
                 else:
                     old_batch = []
 
-                combined = priority + old_batch
+                combined = ancient + priority + old_batch
                 if combined:
                     claim_ts = time.monotonic()
                     for r in combined:
                         _in_progress_ids[r['id']] = claim_ts
+
+                # Telemetry — max observed claim age so /diag can report it
+                if ancient:
+                    try:
+                        oldest_age = max(
+                            (datetime.now(timezone.utc)
+                             - _parse_ts(r['timestamp'])).total_seconds()
+                            for r in ancient
+                        )
+                        shared._last_observed_ancient_age = oldest_age
+                    except Exception:
+                        pass
 
             if not combined:
                 await asyncio.sleep(2)
@@ -469,7 +539,16 @@ async def processing_loop() -> None:
             # registers in `_active_ai_tasks` before we re-check the cap.
             # 50ms is enough for the asyncio scheduler to run the task up to
             # its first `await`, without artificially throttling drain rate.
-            asyncio.create_task(process_one_batch(to_ai))
+            shared.mark_batch_spawned()
+            # Save a reference to the task so it isn't GC'd mid-flight.
+            # Under heavy load Python's task finalizer can collect a task
+            # whose only reference is the asyncio loop's internal deque
+            # if no one awaits it; if that fires before `finally` in
+            # process_one_batch, the claims leak. Saving and discarding
+            # via add_done_callback closes the window entirely.
+            _spawned_task = asyncio.create_task(process_one_batch(to_ai))
+            _active_spawn_tasks.add(_spawned_task)
+            _spawned_task.add_done_callback(_active_spawn_tasks.discard)
             await asyncio.sleep(0.05)
         except Exception as e:
             logger.error(f"processing_loop error: {e}", exc_info=True)

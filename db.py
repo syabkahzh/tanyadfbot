@@ -441,6 +441,52 @@ class Database:
             logger.error(f"DB get_unprocessed_batch error: {e}")
             return []
 
+    async def get_unprocessed_ancient(self, min_age_minutes: int = 15,
+                                       batch_size: int = 20) -> list[aiosqlite.Row]:
+        """Rows older than `min_age_minutes` that haven't been processed.
+
+        Used by the 3-tier queue policy in main.processing_loop to guarantee
+        a starvation cap: any row this old skips ahead of fresher backlog.
+        Returns oldest first so the very tail of the queue drains first.
+        """
+        if not self.conn:
+            return []
+        try:
+            cutoff = _ts_str(datetime.now(timezone.utc) - timedelta(minutes=min_age_minutes))
+            async with self.conn.execute(
+                "SELECT id, text, timestamp, tg_msg_id, chat_id, reply_to_msg_id "
+                "FROM messages WHERE processed=0 AND timestamp < ? "
+                "ORDER BY timestamp ASC LIMIT ?",
+                (cutoff, batch_size)
+            ) as cur:
+                rows = await cur.fetchall()
+                return list(rows) if rows else []
+        except Exception as e:
+            logger.error(f"DB get_unprocessed_ancient error: {e}")
+            return []
+
+    async def get_oldest_unprocessed_age_sec(self) -> float | None:
+        """Seconds since the oldest unprocessed message was received, or None."""
+        if not self.conn:
+            return None
+        try:
+            async with self.conn.execute(
+                "SELECT MIN(timestamp) FROM messages WHERE processed=0"
+            ) as cur:
+                row = await cur.fetchone()
+            if not row or not row[0]:
+                return None
+            try:
+                oldest = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+                if oldest.tzinfo is None:
+                    oldest = oldest.replace(tzinfo=timezone.utc)
+            except Exception:
+                return None
+            return (datetime.now(timezone.utc) - oldest).total_seconds()
+        except Exception as e:
+            logger.error(f"DB get_oldest_unprocessed_age_sec error: {e}")
+            return None
+
     async def get_unprocessed_recent(self, minutes: int = 3, batch_size: int = 20) -> list[aiosqlite.Row]:
         """Retrieves recent unprocessed messages within a time window, oldest-first.
 
