@@ -71,6 +71,13 @@ _BRAND_KEYWORDS: dict[str, str] = {
     'gfood': 'GoFood', 'gofood': 'GoFood', 'g+f+d': 'GoFood', 'g+o+f+o+o+d': 'GoFood',
     'spx': 'SPX', 'shopee xpress': 'SPX', 's+p+x': 'SPX',
     'alfamart': 'Alfamart', 'alfa': 'Alfamart', 'a+l+f+a': 'Alfamart', 'a+l+f+a+m+a+r+t': 'Alfamart',
+    # Alfamart's own weekly promo tags & receipt abbreviations — seen as `jsm`
+    # (Jumat Sabtu Minggu), `psm` (Promo Spesial Minggu), or `AFM …` on the
+    # physical struk. These MUST win over payment-method brands when a deal
+    # redeems at an Alfamart store (even if paid via ShopeePay/DANA/etc.).
+    'jsm': 'Alfamart', 'j+s+m': 'Alfamart',
+    'psm': 'Alfamart', 'p+s+m': 'Alfamart',
+    'afm': 'Alfamart', 'a+f+m': 'Alfamart',
     'indomaret': 'Indomaret', 'idm': 'Indomaret', 'i+d+m': 'Indomaret', 'i+n+d+o': 'Indomaret',
     'chatime': 'Chatime', 'chtm': 'Chatime',
     'c+h+t+m': 'Chatime', 'ctm': 'Chatime', 'c+t+m': 'Chatime',

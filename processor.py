@@ -130,10 +130,18 @@ TOLAK (isi summary="SKIP", brand="SKIP") jika gambar adalah:
 - Gambar blur/tidak jelas
 - Konten OOT apapun
 
+ATURAN BRAND (PENTING — sering salah):
+- `brand` = MERCHANT/TOKO tempat promo ditebus, BUKAN metode pembayaran.
+- Metode pembayaran (ShopeePay/Spay, GoPay, DANA, OVO, AstraPay, kartu kredit, QRIS) masuk ke `conditions`, TIDAK PERNAH jadi `brand` kecuali promo itu murni promo aplikasi dompet tanpa merchant spesifik.
+- Struk/bukti transaksi: brand = nama toko di struk. Contoh: struk "AFM RAYA TUBAN" (AFM = Alfamart) + banner "Cashback Saldo ShopeePay" → brand = **Alfamart**, conditions menyebut ShopeePay.
+- Singkatan struk yang umum: `AFM` = Alfamart, `IDM` = Indomaret, `AFMD` = Alfamidi.
+- Slang caption: `jsm` (Jumat Sabtu Minggu) & `psm` (Promo Spesial Minggu) selalu berarti Alfamart. Caption "aman jsm" pada struk = konfirmasi promo Alfamart JSM berhasil.
+- Cross-promo (toko × dompet): `brand` = toko. Jika bingung mana toko mana dompet, pilih yang muncul di bagian BADGE/HEADER struk atau logo fisik toko, bukan logo banner promosi di atasnya.
+
 ATURAN OUTPUT:
 - Jika SKIP: {"summary": "SKIP", "brand": "SKIP", "conditions": "", "valid_until": "", "status": "unknown", "original_msg_id": 0}
 - Jika promo valid: summary 1 kalimat padat dengan brand + diskon/harga + syarat utama
-- Brand: nama konsisten, "Unknown" jika tidak jelas tapi promo valid"""
+- Brand: nama konsisten (Alfamart, Indomaret, Tokopedia, Shopee, ShopeeFood, GoFood, ShopeePay, GoPay, dll). "Unknown" hanya jika benar-benar tidak jelas."""
 
 
 # ── Pre-filter keyword sets ───────────────────────────────────────────────────
@@ -585,19 +593,94 @@ class GeminiProcessor:
         res.original_msg_id = original_msg_id
         return res
 
-    async def generate_narrative(self, messages: Sequence[dict[str, Any]]) -> list[TrendItem]:
+    async def generate_narrative(self, messages: Sequence[dict[str, Any]],
+                                  db: Any = None) -> list[TrendItem]:
         """Generates structured trend narratives for recent traffic."""
         if not messages:
             return []
-        context = "\n- ".join([f"ID:{m['tg_msg_id']} {m['sender_name']}: {m['text']}" for m in messages[:50]])
+
+        # Enrich with reply-parent text so the model can weight thread context.
+        # Without this the model reads "Bau" as a standalone complaint when in
+        # reality it's a reply to a `ywwa` (yang wangi-wangi aja) thread where
+        # `bau` is slang for an unlucky/stepchild account.
+        parent_map: dict[int, str] = {}
+        if db is not None:
+            try:
+                chat_id = messages[0].get('chat_id')
+                reply_ids = [m.get('reply_to_msg_id') for m in messages
+                             if m.get('reply_to_msg_id')]
+                if chat_id is not None and reply_ids:
+                    parent_map = await db.get_deep_context_bulk(
+                        reply_ids, chat_id, max_depth=2
+                    )
+            except Exception as e:
+                logger.warning(f"generate_narrative: reply enrichment failed: {e}")
+
+        lines: list[str] = []
+        for m in messages[:50]:
+            ctx = ""
+            rid = m.get('reply_to_msg_id')
+            if rid and rid in parent_map:
+                parent_txt = (parent_map[rid] or "")[-120:].replace("\n", " ")
+                if parent_txt:
+                    ctx = f" [reply→ {parent_txt}]"
+            lines.append(f"ID:{m['tg_msg_id']} {m['sender_name']}:{ctx} {m['text']}")
+        context = "\n- ".join(lines)
+
+        system = (
+            "Kamu analis tren grup promo Indonesia (Discountfess). "
+            "Simpulkan MAKSIMAL 3 tren UNIK — jangan ulang tema yang sama "
+            "untuk thread berbeda. Setiap tren harus berbeda topik/brand.\n\n"
+            "KAMUS SLANG (WAJIB diikuti — bukan arti harfiah):\n"
+            "- `ywwa` = 'yang wangi-wangi aja' — akun beruntung yang selalu dapet promo/voucher.\n"
+            "- `bau` = kebalikan `ywwa`. Akun 'yatim'/stepchild yang NGGAK pernah dapet promo. "
+            "BUKAN 'berbau/smelly/kualitas produk'. Jika user reply 'Bau' di thread `ywwa`, "
+            "itu curhat akunnya ga keciprat promo — BUKAN keluhan bau produk.\n"
+            "- `cibu` = cashback / cb / kesbek.\n"
+            "- `aman` = promo work/berhasil ditebus.\n"
+            "- `nt` = gagal / sold out / expired.\n"
+            "- `jp` = jackpot (dapat promo besar).\n"
+            "- `luber`/`pecah` = promo viral/banyak stok.\n"
+            "- `jsm`/`psm` = promo mingguan Alfamart (Jumat-Sabtu-Minggu / Promo Spesial Minggu).\n"
+            "- `sfood`=ShopeeFood, `gfood`=GoFood, `spay`=ShopeePay, `idm`=Indomaret, `afm`=Alfamart.\n\n"
+            "ATURAN:\n"
+            "- Gunakan konteks `[reply→ ...]` untuk memahami maksud pesan pendek.\n"
+            "- Jika dua thread membahas topik sama, GABUNG jadi satu tren — jangan duplikat.\n"
+            "- `topic` harus 1 kalimat padat yang spesifik (brand + apa yang dibahas).\n"
+            "- `msg_id` = ID pesan paling informatif untuk tren itu."
+        )
+
         target  = await self._pick_model()
         config = {
             "response_mime_type": "application/json",
             "response_schema": TrendResponse,
-            "system_instruction": "Kamu analis tren. Simpulkan 1-3 tren utama dengan link ID pesan.",
+            "system_instruction": system,
         }
-        response = await self._call(contents=f"Pesan grup:\n{context}", config=config, model_id=target)
-        return cast(list[TrendItem], response.parsed.trends) if response and response.parsed else []
+        response = await self._call(contents=f"Pesan grup:\n- {context}",
+                                     config=config, model_id=target)
+        if not (response and response.parsed):
+            return []
+        trends = cast(list[TrendItem], response.parsed.trends)
+
+        # Code-side dedup safety net: if the model still emits near-duplicate
+        # topics (same keyword signature), keep only the first one. We compare
+        # on normalized lowercase word-sets to catch "(bau)" twice etc.
+        seen: set[frozenset[str]] = set()
+        unique: list[TrendItem] = []
+        for t in trends:
+            words = {w for w in re.findall(r'[a-z0-9]+', (t.topic or "").lower())
+                     if len(w) >= 4}
+            # Collapse topics sharing >=70% of their content-word set
+            dup = False
+            for prev in seen:
+                if words and prev and len(words & prev) / max(len(words | prev), 1) >= 0.7:
+                    dup = True
+                    break
+            if dup:
+                continue
+            seen.add(frozenset(words))
+            unique.append(t)
+        return unique[:3]
 
     async def interpret_keywords(self, hot_words: Sequence[str], window: int,
                                   context_msgs: Sequence[str]) -> str | None:
