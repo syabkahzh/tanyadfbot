@@ -497,13 +497,13 @@ class TelegramBot:
                 await jobs.halfhour_digest_job(self.db, self.gemini, self, WIB)
                 return True
             elif component == "trend_job":
-                await jobs.trend_job(self.db, self.gemini, self, sys.modules['main'])
+                await jobs.trend_job(self.db, self.gemini, self)
                 return True
             elif component == "spike_detection_job":
-                await jobs.spike_detection_job(self.db, self.gemini, self, sys.modules['main'])
+                await jobs.spike_detection_job(self.db, self.gemini, self)
                 return True
             elif component == "image_processing_job":
-                await jobs.image_processing_job(self.db, self.gemini, shared.listener, sys.modules['main'])
+                await jobs.image_processing_job(self.db, self.gemini, shared.listener)
                 return True
             # Add more as needed
             logger.warning(f"No explicit retry logic for {component}")
