@@ -81,10 +81,10 @@ class TelegramBot:
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handles the /start command."""
         await update.message.reply_text(
-            "🚀 *TanyaDFBot Online*\n\n"
+            "🚀 <b>TanyaDFBot Online</b>\n\n"
             "I'm scanning for promos and hot discussion trends in real-time.\n"
             "Use /status to see system health.",
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.HTML
         )
 
     @_owner_only
@@ -136,16 +136,19 @@ class TelegramBot:
         recent_log = ""
         failures = await self.db.get_recent_failures(limit=3)
         if failures:
-            recent_log = "\n\n❌ *Recent Failures:*\n" + "\n".join(
-                [f"• {f['component']}: {f['error_msg'][:60]}..." for f in failures]
-            )
+            lines = []
+            for f in failures:
+                comp = html.escape(f['component'])
+                err  = html.escape(f['error_msg'][:60])
+                lines.append(f"• {comp}: {err}...")
+            recent_log = "\n\n❌ <b>Recent Failures:</b>\n" + "\n".join(lines)
 
         # 7. Background Task Tracking
         flush_status = "Active 🔄" if shared._buffer_flush_task and not shared._buffer_flush_task.done() else "Idle 😴"
         bg_tasks = (
-            f"🤖 AI Batches: `{shared._active_ai_tasks}`\n"
-            f"⏳ Retrying Sends: `{shared._active_retry_sends}`\n"
-            f"🔔 Alert Flush: `{flush_status}`"
+            f"🤖 AI Batches: <code>{shared._active_ai_tasks}</code>\n"
+            f"⏳ Retrying Sends: <code>{shared._active_retry_sends}</code>\n"
+            f"🔔 Alert Flush: <code>{html.escape(flush_status)}</code>"
         )
 
         WIB = pytz.timezone("Asia/Jakarta")
@@ -153,23 +156,23 @@ class TelegramBot:
         latest_wib = _to_wib(latest_ts) + " WIB" if latest_ts else "N/A"
 
         text = (
-            f"📊 *Full Transparency Status*\n"
-            f"🕒 `{now_wib}`\n\n"
-            f"📩 Total Msgs: `{msg_count}`\n"
-            f"🔥 Total Promos: `{promo_count}`\n"
-            f"🔄 Queue: `{unprocessed}` {triage_icon}\n"
-            f"🛡️ Traffic Cop: `{ft_status}`\n"
-            f"🕒 Latest: `{latest_wib}`\n\n"
-            f"⚙️ *Background Tasks:*\n{bg_tasks}\n\n"
-            f"🤖 *AI Pressure:*\n{rpm_status}\n"
-            f"📈 Total RPM: `{total_active}/{total_limit}`\n"
+            f"📊 <b>Full Transparency Status</b>\n"
+            f"🕒 <code>{now_wib}</code>\n\n"
+            f"📩 Total Msgs: <code>{msg_count}</code>\n"
+            f"🔥 Total Promos: <code>{promo_count}</code>\n"
+            f"🔄 Queue: <code>{unprocessed}</code> {html.escape(triage_icon)}\n"
+            f"🛡️ Traffic Cop: <code>{html.escape(ft_status)}</code>\n"
+            f"🕒 Latest: <code>{latest_wib}</code>\n\n"
+            f"⚙️ <b>Background Tasks:</b>\n{bg_tasks}\n\n"
+            f"🤖 <b>AI Pressure:</b>\n{rpm_status}\n"
+            f"📈 Total RPM: <code>{total_active}/{total_limit}</code>\n"
             f"{recent_log}\n\n"
-            f"💻 *System:*\n"
-            f"📁 DB Size: `{db_size_mb:.1f} MB`\n"
-            f"🧠 RAM: `{ram_mb:.1f} MB`\n"
-            f"⚡ CPU: `{cpu_usage:.1f}%`"
+            f"💻 <b>System:</b>\n"
+            f"📁 DB Size: <code>{db_size_mb:.1f} MB</code>\n"
+            f"🧠 RAM: <code>{ram_mb:.1f} MB</code>\n"
+            f"⚡ CPU: <code>{cpu_usage:.1f}%</code>"
         )
-        await status_msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+        await status_msg.edit_text(text, parse_mode=ParseMode.HTML)
 
     @_owner_only
     async def cmd_diag(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -226,23 +229,23 @@ class TelegramBot:
             verdict = "🔴 CRITICAL"
 
         text = (
-            f"🩺 *Pipeline Diagnostics*\n\n"
-            f"⚙️ *Heartbeats:*\n"
-            f"🔄 Loop: `{loop_status}`\n"
-            f"🛰 Ingest: `{listener_health}`\n"
-            f"🧬 Spawn: `{spawn_status}`\n\n"
-            f"🛡 *Traffic Cop:*\n"
-            f"🧠 FastText: `{ft_active}`\n\n"
-            f"🤖 *AI Pressure:*\n"
-            f"🔥 Concurrent: `{shared._active_ai_tasks}`\n"
-            f"🚦 Headroom: `{headroom_pct:.0%}`\n\n"
-            f"📥 *Queue Backlog:*\n"
-            f"📦 Unprocessed: `{queue}`\n"
-            f"🕒 Max Age: `{oldest_fmt}`\n"
-            f"⚠️ Stuck Claims: `{stuck_claims}`\n\n"
-            f"**Verdict:** {verdict}"
+            f"🩺 <b>Pipeline Diagnostics</b>\n\n"
+            f"⚙️ <b>Heartbeats:</b>\n"
+            f"🔄 Loop: <code>{html.escape(loop_status)}</code>\n"
+            f"🛰 Ingest: <code>{html.escape(listener_health)}</code>\n"
+            f"🧬 Spawn: <code>{html.escape(spawn_status)}</code>\n\n"
+            f"🛡 <b>Traffic Cop:</b>\n"
+            f"🧠 FastText: <code>{html.escape(ft_active)}</code>\n\n"
+            f"🤖 <b>AI Pressure:</b>\n"
+            f"🔥 Concurrent: <code>{shared._active_ai_tasks}</code>\n"
+            f"🚦 Headroom: <code>{headroom_pct:.0%}</code>\n\n"
+            f"📥 <b>Queue Backlog:</b>\n"
+            f"📦 Unprocessed: <code>{queue}</code>\n"
+            f"🕒 Max Age: <code>{oldest_fmt}</code>\n"
+            f"⚠️ Stuck Claims: <code>{stuck_claims}</code>\n\n"
+            f"<b>Verdict:</b> {verdict}"
         )
-        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     @_owner_only
     async def cmd_today(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -261,15 +264,15 @@ class TelegramBot:
     async def cmd_debug(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Dumps raw database rows for debugging."""
         rows = await self.db.get_raw_messages(limit=5)
-        text = "🔍 *Raw Debug (Latest 5):*\n\n"
+        text = "🔍 <b>Raw Debug (Latest 5):</b>\n\n"
         
         lines = []
         for r in rows:
-            clean_text = (r['text'] or '').replace('\n', ' ')[:80]
+            clean_text = html.escape((r['text'] or '').replace('\n', ' ')[:80])
             status = "✅" if r['processed'] else "⏳"
-            lines.append(f"{status} `[{r['id']}]` {clean_text}...")
+            lines.append(f"{status} <code>[{r['id']}]</code> {clean_text}...")
         
-        await update.message.reply_text(text + "\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(text + "\n".join(lines), parse_mode=ParseMode.HTML)
 
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Processes inline button clicks."""
