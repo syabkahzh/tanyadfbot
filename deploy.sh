@@ -1,9 +1,10 @@
 #!/bin/bash
 
-# Configuration (overridable by environment variables)
-REMOTE_USER="${REMOTE_USER:-hfzhkn}"
-REMOTE_HOST="${REMOTE_HOST:-34.101.41.172}"
-REMOTE_DIR="${REMOTE_DIR:-~/tanyadfbot/}"
+# Configuration (should be set via environment variables)
+if [[ -z "${REMOTE_USER}" ]] || [[ -z "${REMOTE_HOST}" ]] || [[ -z "${REMOTE_DIR}" ]]; then
+  echo "❌ Error: REMOTE_USER, REMOTE_HOST, and REMOTE_DIR must be set."
+  exit 1
+fi
 
 echo "🚀 Syncing files to VPS..."
 
