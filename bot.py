@@ -504,11 +504,10 @@ class TelegramBot:
             "SELECT id, text, processed, timestamp FROM messages ORDER BY id DESC LIMIT 5"
         ) as cur:
             rows = await cur.fetchall()
-        text = "🔍 *Latest 5 messages:*\n\n"
-        for r in rows:
-            proc = "✅" if r['processed'] else "⏳"
-            wib_time = _to_wib(r['timestamp'])
-            text += f"{proc} *ID {r['id']}* `[{wib_time}]`\n{r['text'][:80]}\n\n"
+        text = "🔍 *Latest 5 messages:*\n\n" + "".join([
+            f"{'✅' if r['processed'] else '⏳'} *ID {r['id']}* `[{_to_wib(r['timestamp'])}]`\n{r['text'][:80]}\n\n"
+            for r in rows
+        ])
         if update.message:
             await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
