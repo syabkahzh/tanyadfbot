@@ -174,7 +174,7 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
                     f"⏰ **Sinyal Waktu — 2 menit lagi!**\n"
                     f"⏰ Skrg: `{now_str}`\n"
                     f"🏪 **{r['brand']}**\n"
-                    f"🕒 Target: `{target.strftime('%H:%M WIB')}`\n\n"
+                    f"🕒 Target: `{target.strftime('%H:%M:%S WIB')}`\n\n"
                     f"{context_header}"
                     f"📝 {r['summary']}\n"
                 )
@@ -249,8 +249,8 @@ async def hourly_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegram
             link_part   = f" <a href='{r['tg_link']}'>[→]</a>" if r['tg_link'] else ""
             fast_tag    = " ⚡" if r['via_fastpath'] else ""
             lines.append(
-                f"{status_icon} <b>{html.escape(brand)}</b>"
-                f"{fast_tag}: {html.escape(r['summary'])}{link_part}"
+                f"{status_icon} **{brand}**"
+                f"{fast_tag}: {r['summary']}{link_part}"
             )
 
         context    = "\n".join([f"- {r['brand']}: {r['summary']}" for r in rows])
@@ -264,13 +264,13 @@ async def hourly_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegram
             ai_summary = ""
         now_str = datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%H:%M:%S')
         full_text = (
-            f"📊 <b>Digest {hour_label}</b> ({len(rows)} promo)\n"
-            f"⏰ Waktu: <code>{now_str}</code>\n\n"
+            f"📊 **Digest {hour_label}** ({len(rows)} promo)\n"
+            f"⏰ Waktu: `{now_str}`\n\n"
             f"{ai_summary}\n\n"
-            f"<b>Detail:</b>\n" + "\n".join(lines)
+            f"**Detail:**\n" + "\n".join(lines)
         )
         shared._last_hourly_digest = full_text
-        await bot.send_plain(full_text, parse_mode='HTML')
+        await bot.send_plain(full_text)
         logger.info("✅ [Job] Finished hourly_digest_job")
     except Exception as e:
         logger.error(f"hourly_digest_job error: {e}", exc_info=True)
@@ -290,9 +290,8 @@ async def midnight_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
 
         if not rows:
             await bot.send_plain(
-                "📊 <b>Rekap 02:00–05:00 WIB</b>\n\n"
-                "😴 Tidak ada promo yang masuk tadi malam.",
-                parse_mode='HTML'
+                "📊 **Rekap 02:00–05:00 WIB**\n\n"
+                "😴 Tidak ada promo yang masuk tadi malam."
             )
             return
 
@@ -301,10 +300,10 @@ async def midnight_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
             brand     = (r['brand'] if r['brand']
                          and r['brand'].lower() not in ('unknown', 'sunknown', '') else '❓')
             fast_tag  = " ⚡" if r['via_fastpath'] else ""
-            link_part = f" <a href='{r['tg_link']}'>[→]</a>" if r['tg_link'] else ""
+            link_part = f" [→]({r['tg_link']})" if r['tg_link'] else ""
             lines.append(
-                f"• <b>{html.escape(brand)}</b>{fast_tag}: "
-                f"{html.escape(r['summary'])}{link_part}"
+                f"• **{brand}**{fast_tag}: "
+                f"{r['summary']}{link_part}"
             )
 
         context = "\n".join([f"- {r['brand']}: {r['summary']}" for r in rows])
@@ -319,12 +318,12 @@ async def midnight_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
             digest = ""
         now_str = datetime.now(jakarta_tz).strftime('%H:%M:%S')
         full_text = (
-            f"📊 <b>Rekap 02:00–05:00 WIB</b> ({len(rows)} promo)\n"
-            f"⏰ Waktu: <code>{now_str}</code>\n\n"
+            f"📊 **Rekap 02:00–05:00 WIB** ({len(rows)} promo)\n"
+            f"⏰ Waktu: `{now_str}`\n\n"
             f"{digest}\n\n"
-            f"<b>Detail:</b>\n" + "\n".join(lines)
+            f"**Detail:**\n" + "\n".join(lines)
         )
-        await bot.send_plain(full_text, parse_mode='HTML')
+        await bot.send_plain(full_text)
         logger.info("✅ [Job] Finished midnight_digest_job")
     except Exception as e:
         logger.error(f"midnight_digest_job error: {e}", exc_info=True)
@@ -350,10 +349,10 @@ async def halfhour_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
             fast_tag  = " ⚡" if r['via_fastpath'] else ""
             link_part = f" <a href='{r['tg_link']}'>[→]</a>" if r['tg_link'] else ""
             lines.append(
-                f"• <b>{html.escape(brand)}</b>{fast_tag}: "
-                f"{html.escape(r['summary'])}{link_part}"
+                f"• **{brand}**{fast_tag}: "
+                f"{r['summary']}{link_part}"
             )
-        label   = now_wib.strftime('%H:%M WIB')
+        label   = now_wib.strftime('%H:%M:%S WIB')
         context = "\n".join([f"- {r['brand']}: {r['summary']}" for r in rows])
         
         try:
@@ -367,11 +366,11 @@ async def halfhour_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
 
         now_str = datetime.now(WIB).strftime('%H:%M:%S')
         full_text = (
-            f"⚡ <b>Update {label}</b> ({len(rows)} promo)\n"
-            f"⏰ Waktu: <code>{now_str}</code>\n\n"
+            f"⚡ **Update {label}** ({len(rows)} promo)\n"
+            f"⏰ Waktu: `{now_str}`\n\n"
             f"{digest}\n\n" + "\n".join(lines)
         )
-        await bot.send_plain(full_text, parse_mode='HTML')
+        await bot.send_plain(full_text)
         logger.info("✅ [Job] Finished halfhour_digest_job")
     except Exception as e:
         logger.error(f"halfhour_digest_job error: {e}", exc_info=True)
@@ -524,7 +523,7 @@ async def heartbeat_job(db: Database, gemini: GeminiProcessor, bot: TelegramBot,
             logger.error("❌ Heartbeat failed: Could not ensure database connection.")
             return
 
-        now_wib = datetime.now(WIB).strftime('%H:%M WIB')
+        now_wib = datetime.now(WIB).strftime('%H:%M:%S WIB')
         queue   = await db.get_queue_size()
 
         async with db.conn.execute("SELECT MAX(timestamp) FROM messages") as cur:
@@ -589,7 +588,7 @@ async def hot_thread_job(db: Database, gemini: GeminiProcessor, listener: Any, b
                 calls_this_run += 1
 
                 link     = _make_tg_link(t['chat_id'], t['tg_msg_id'])
-                msg_wib  = shared._parse_ts(t['timestamp']).astimezone(WIB).strftime('%H:%M')
+                msg_wib  = shared._parse_ts(t['timestamp']).astimezone(WIB).strftime('%H:%M:%S')
 
                 reply_rows  = await db.get_thread_replies(t['tg_msg_id'], t['chat_id'], limit=20)
                 reply_texts = [r['text'] for r in reply_rows if r['text']]
@@ -625,23 +624,22 @@ async def hot_thread_job(db: Database, gemini: GeminiProcessor, listener: Any, b
                     snip = (r['text'] or '').strip()
                     if snip:
                         snip = (snip[:57] + "...") if len(snip) > 60 else snip
-                        snippets.append(f"• <i>{html.escape(snip)}</i>")
+                        snippets.append(f"• _{snip}_")
 
                 parent_snippet = (t['text'] or '').strip()
                 if len(parent_snippet) > 100:
                     parent_snippet = parent_snippet[:97] + "..."
 
-                from telegram.constants import ParseMode
                 age_min = (now_ts - shared._parse_ts(t['timestamp'])).total_seconds() / 60
                 text = (
-                    f"🔥 <b>Thread Hot! ({t['reply_count']} balasan)</b>\n"
-                    f"⏰ Jam: <code>{msg_wib}</code> (<code>{age_min:.0f}m ago</code>)\n"
-                    f"📌 <b>Pesan Awal:</b>\n<i>{html.escape(parent_snippet)}</i>\n\n"
-                    f"💬 <b>Topik:</b>\n{html.escape(summary)}\n\n"
-                    f"📜 <b>Cuplikan:</b>\n" + "\n".join(snippets) + "\n\n"
-                    f"🔗 <a href='{link}'>Lihat Thread</a>"
+                    f"🔥 **Thread Hot! ({t['reply_count']} balasan)**\n"
+                    f"⏰ Jam: `{msg_wib}` (`{age_min:.0f}m ago`)\n"
+                    f"📌 **Pesan Awal:**\n_{parent_snippet}_\n\n"
+                    f"💬 **Topik:**\n{summary}\n\n"
+                    f"📜 **Cuplikan:**\n" + "\n".join(snippets) + "\n\n"
+                    f"🔗 [Lihat Thread]({link})"
                 )
-                await bot.send_plain(text, parse_mode=ParseMode.HTML)
+                await bot.send_plain(text)
         logger.info("✅ [Job] Finished hot_thread_job")
     except Exception as e:
         logger.error(f"hot_thread_job error: {e}", exc_info=True)
@@ -865,16 +863,17 @@ async def trend_job(db: Database, gemini: GeminiProcessor, bot: TelegramBot) -> 
         for t in trends:
             chat_id = msgs[0]['chat_id']
             link = _make_tg_link(chat_id, t.msg_id)
-            lines.append(f"• {html.escape(t.topic)}\n  🔗 <a href='{link}'>Lihat Pesan</a>")
+            lines.append(f"• {t.topic}\n  🔗 [Lihat Pesan]({link})")
 
         now_wib = datetime.now(pytz.timezone("Asia/Jakarta")).strftime('%H:%M:%S')
         full_text = (
-            f"📈 <b>Narasi Tren (15m):</b>\n"
-            f"⏰ Waktu: <code>{now_wib}</code>\n\n"
+            f"📈 **Narasi Tren (15m):**\n"
+            f"⏰ Waktu: `{now_wib}`\n\n"
             + "\n\n".join(lines)
         )
-        
-        await bot.send_plain(full_text, parse_mode='HTML')
+
+        await bot.send_plain(full_text)
+
         shared._last_trend_alert = current_summary
         logger.info("✅ [Job] Finished trend_job")
     except Exception as e:
@@ -959,26 +958,26 @@ async def spike_detection_job(db: Database, gemini: GeminiProcessor, bot: Telegr
 
             from telegram.constants import ParseMode
             header_lines = [
-                "🚀 <b>Lonjakan Pesan!</b>",
-                f"📊 Kecepatan: <code>{count} msg/min</code>",
-                f"📈 Rata-rata: <code>{avg_per_min:.1f} msg/min</code>",
-                f"⏰ Waktu: <code>{datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%H:%M:%S')}</code>",
+                "🚀 **Lonjakan Pesan!**",
+                f"📊 Kecepatan: `{count} msg/min`",
+                f"📈 Rata-rata: `{avg_per_min:.1f} msg/min`",
+                f"⏰ Waktu: `{datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%H:%M:%S')}`",
             ]
             if dominant_brand:
                 m = brand_latest_msg[dominant_brand]
                 link = _make_tg_link(m['chat_id'], m['tg_msg_id'])
                 header_lines.append(
-                    f"🏪 Dominan: <b>{html.escape(dominant_brand)}</b> "
+                    f"🏪 Dominan: **{dominant_brand}** "
                     f"({dominant_count}/{count}) · "
-                    f"<a href='{link}'>mulai di sini</a>"
+                    f"[mulai di sini]({link})"
                 )
 
             text = (
                 "\n".join(header_lines) + "\n\n"
-                f"🤖 <b>Analisis:</b>\n{html.escape(narrative or 'Aktivitas meningkat tajam.')}\n\n"
-                f"<b>Cuplikan:</b>\n" + "\n".join(sample_lines)
+                f"🤖 **Analisis:**\n{narrative or 'Aktivitas meningkat tajam.'}\n\n"
+                f"**Cuplikan:**\n" + "\n".join(sample_lines)
             )
-            await bot.send_plain(text, parse_mode=ParseMode.HTML)
+            await bot.send_plain(text)
             shared._last_spike_alert = now_utc
         logger.info("✅ [Job] Finished spike_detection_job")
     except Exception as e:

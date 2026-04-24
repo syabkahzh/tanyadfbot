@@ -670,15 +670,15 @@ class TelegramBot:
 
 
 def _to_wib(ts_str: str) -> str:
-    """Helper to convert ISO timestamp string to WIB HH:MM."""
+    """Helper to convert ISO timestamp string to WIB HH:MM:SS."""
     if not ts_str:
-        return "??"
+        return "??:??:??"
     try:
         from shared import _parse_ts
         dt = _parse_ts(ts_str)
         WIB = pytz.timezone("Asia/Jakarta")
-        return dt.astimezone(WIB).strftime('%H:%M')
+        return dt.astimezone(WIB).strftime('%H:%M:%S')
     except Exception:
-        return "??"
+        return "??:??:??"
 
 import pytz
