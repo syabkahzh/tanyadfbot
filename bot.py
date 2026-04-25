@@ -95,6 +95,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("review", self.cmd_review))
         self.app.add_handler(CommandHandler("clear", self.cmd_clear))
         self.app.add_handler(CommandHandler("debug", self.cmd_debug))
+        self.app.add_handler(CommandHandler("fleet", self.cmd_fleet))
         self.app.add_handler(CallbackQueryHandler(self.handle_callback))
         
         # Priority handler for feedback flow
@@ -298,6 +299,55 @@ class TelegramBot:
 
         # AI signals
         total_limit = sum(s.limit for s in self.gemini._slots.values())
+        
+    @_owner_only
+    async def cmd_fleet(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Displays and manages the AI fleet priorities."""
+        msg = update.message if update.message else update.callback_query.message if update.callback_query else None
+        if not msg: return
+        
+        import time as _time
+        army = self.gemini._slots
+        
+        lines = ["🤖 **AI Fleet Management**\n"]
+        buttons = []
+        
+        # Group models by provider for cleaner UI
+        by_provider = {}
+        for name, slot in army.items():
+            by_provider.setdefault(slot.provider, []).append(slot)
+            
+        for provider, slots in sorted(by_provider.items()):
+            lines.append(f"🔹 **{provider.upper()}**")
+            for s in sorted(slots, key=lambda x: x.priority):
+                status = "✅" if s.available(_time.monotonic()) > 0 else "⏳"
+                lines.append(f"  {status} `{s.name}` (P{s.priority})")
+                
+                # Button to toggle priority (1 or 2)
+                next_p = 2 if s.priority == 1 else 1
+                buttons.append([InlineKeyboardButton(
+                    f"Set {s.name} to P{next_p}", 
+                    callback_data=f"fleet_prio:{s.name}:{next_p}"
+                )])
+        
+        reply_markup = InlineKeyboardMarkup(buttons)
+        text = "\n".join(lines)
+        safe_text, entities = convert(text)
+        
+        if update.message:
+            await self._retry_tg(update.message.reply_text,
+                safe_text,
+                entities=[e.to_dict() for e in entities],
+                reply_markup=reply_markup,
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
+        elif update.callback_query:
+            await self._retry_tg(update.callback_query.edit_message_text,
+                safe_text,
+                entities=[e.to_dict() for e in entities],
+                reply_markup=reply_markup,
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
         total_active = sum(s.current_usage() for s in self.gemini._slots.values())
         headroom_pct = 1.0 - (total_active / max(total_limit, 1))
 
@@ -527,7 +577,6 @@ class TelegramBot:
                 )
         except Exception as e:
             logger.error(f"Failed to render today page {page}: {e}")
-
     @_owner_only
     async def cmd_debug(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Dumps raw database rows for debugging."""
@@ -550,6 +599,19 @@ class TelegramBot:
         
         data = query.data or ""
         
+        if data.startswith("fleet_prio:"):
+            parts = data.split(":")
+            name = parts[1]
+            prio = int(parts[2])
+            
+            success = self.gemini.update_model_priority(name, prio)
+            if success:
+                # Re-render the fleet menu
+                await self.cmd_fleet(update, context)
+            else:
+                await query.answer("Failed to update priority.")
+            return
+
         if data.startswith("feed_"):
             orig_msg_id = int(data.split("_")[1])
             
@@ -777,7 +839,8 @@ class TelegramBot:
                          timestamp: str | None = None, 
                          corroborations: int = 0,
                          corroboration_texts: str = "[]",
-                         source: str = 'ai') -> None:
+                         source: str = 'ai',
+                         chat_id: int | None = None) -> None:
         """Broadcasts a single promotion alert to the owner."""
         keyboard = [[
             InlineKeyboardButton("🛒 Buka", url=tg_link),
@@ -792,13 +855,13 @@ class TelegramBot:
         brand_tag = f"**{brand_label}**"
         
         # Source & Latency breakdown
-        source_tag = "🤖 **AI Processed**" if source == 'ai' else "⚡ **Triggered Pythonly**"
-        
-        perf_tag = ""
         if source == 'ai':
+            model_info = f" ({p_data.model_name})" if p_data.model_name else ""
+            source_tag = f"🤖 **AI Processed{model_info}**"
             total_lat = (p_data.queue_time or 0) + (p_data.ai_time or 0)
             perf_tag = f"\n⏱ `Total: {total_lat:.1f}s | Q: {p_data.queue_time or 0:.0f}s | AI: {p_data.ai_time or 0:.1f}s`"
         else:
+            source_tag = "⚡ **Triggered Pythonly**"
             # Fast-path: queue_time was set to total latency in listener.py
             perf_tag = f"\n⏱ `Latency: {p_data.queue_time or 0:.2f}s`"
 
@@ -827,7 +890,7 @@ class TelegramBot:
         try:
             await self._retry_tg(
                 self.app.bot.send_message,
-                chat_id=Config.OWNER_ID,
+                chat_id=chat_id or Config.OWNER_ID,
                 text=safe_text,
                 entities=[e.to_dict() for e in entities],
                 reply_markup=InlineKeyboardMarkup(keyboard),
@@ -836,7 +899,7 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Failed to send alert: {e}")
 
-    async def send_grouped_alert(self, brand: str, items: list) -> None:
+    async def send_grouped_alert(self, brand: str, items: list, chat_id: int | None = None) -> None:
         """Broadcasts a grouped alert for multiple promos of the same brand."""
         if not items: return
         
@@ -851,11 +914,13 @@ class TelegramBot:
         lines = []
         for p, link, ts, corr, ctexts, src in items:
             msg_wib = _to_wib(ts)
-            source_icon = "🤖" if src == 'ai' else "⚡"
             if src == 'ai':
+                model_info = f" ({p.model_name})" if p.model_name else ""
                 total_lat = (p.queue_time or 0) + (p.ai_time or 0)
                 lat_info = f"`{total_lat:.1f}s (Q{p.queue_time or 0:.0f}/A{p.ai_time or 0:.1f})`"
+                source_icon = f"🤖{model_info}"
             else:
+                source_icon = "⚡"
                 lat_info = f"`{p.queue_time or 0:.2f}s`"
             
             lines.append(f"• {source_icon} {p.summary} (`{msg_wib}`) | {lat_info}")
@@ -865,7 +930,7 @@ class TelegramBot:
         try:
             await self._retry_tg(
                 self.app.bot.send_message,
-                chat_id=Config.OWNER_ID,
+                chat_id=chat_id or Config.OWNER_ID,
                 text=safe_text,
                 entities=[e.to_dict() for e in entities],
                 reply_markup=InlineKeyboardMarkup(keyboard),
@@ -874,7 +939,7 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Failed to send grouped alert: {e}")
 
-    async def send_plain(self, text: str, parse_mode: Any = None) -> None:
+    async def send_plain(self, text: str, parse_mode: Any = None, chat_id: int | None = None) -> None:
         """Sends a plain text message to the owner using telegramify for auto-chunking."""
         try:
             results = await telegramify(text)
@@ -882,7 +947,7 @@ class TelegramBot:
                 if item.content_type == ContentType.TEXT:
                     await self._retry_tg(
                         self.app.bot.send_message,
-                        chat_id=Config.OWNER_ID,
+                        chat_id=chat_id or Config.OWNER_ID,
                         text=item.text,
                         entities=[e.to_dict() for e in item.entities],
                         link_preview_options=LinkPreviewOptions(is_disabled=True)
@@ -890,12 +955,12 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Failed to send plain msg: {e}")
 
-    async def send_photo(self, photo: bytes, caption: str | None = None) -> None:
+    async def send_photo(self, photo: bytes, caption: str | None = None, chat_id: int | None = None) -> None:
         """Sends a photo to the owner."""
         try:
             await self._retry_tg(
                 self.app.bot.send_photo,
-                chat_id=Config.OWNER_ID,
+                chat_id=chat_id or Config.OWNER_ID,
                 photo=photo,
                 caption=caption,
                 parse_mode=ParseMode.HTML

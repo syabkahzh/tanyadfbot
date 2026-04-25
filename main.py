@@ -56,7 +56,7 @@ _IN_PROGRESS_MAX_AGE_SEC: float = 130.0
 _alerted_hot_threads: dict[int, tuple[int, datetime]] = {}
 _triage_cycle_counter: int   = 0
 
-_AI_MAX_INFLIGHT: int = 8
+_AI_MAX_INFLIGHT: int = 40
 _AI_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(_AI_MAX_INFLIGHT)
 
 _active_spawn_tasks: set[asyncio.Task] = set()
@@ -342,6 +342,12 @@ async def processing_loop() -> None:
                 queue_size = await db.get_queue_size()
 
             current_tasks = shared._active_ai_tasks
+            in_progress_count = len(_in_progress_ids)
+            
+            # Detailed debug log if queue is stuck
+            if queue_size > 0:
+                logger.info(f"📊 Fleet Status: {current_tasks} tasks active, {in_progress_count} msgs in-progress, {queue_size} in queue.")
+
             if current_tasks >= _AI_MAX_INFLIGHT:
                 await asyncio.sleep(0.2)
                 continue
@@ -600,7 +606,7 @@ async def main() -> None:
     scheduler.add_job(jobs.dead_promo_reaper_job, "interval", minutes=20, id="reaper", args=[db, bot])
     scheduler.add_job(jobs.confirmation_gate_job, "interval", minutes=1, id="confirm_gate", args=[db])
     scheduler.add_job(jobs.db_maintenance_job, "cron", hour="*/4", minute=5, id="db_maint", args=[db, bot])
-    scheduler.add_job(jobs.fasttext_retrain_job, "cron", hour="*/6", minute=15, id="ft_retrain", args=[db, bot], jitter=300)
+    # scheduler.add_job(jobs.fasttext_retrain_job, "cron", hour="*/6", minute=15, id="ft_retrain", args=[db, bot], jitter=300)
     scheduler.add_job(_alert_watchdog, "interval", minutes=1, id="alert_watchdog")
     scheduler.add_job(_in_progress_reaper, "interval", minutes=1, id="in_progress_reaper")
     scheduler.add_job(_active_ai_tasks_reconciler, "interval", minutes=1, id="ai_tasks_reconciler")

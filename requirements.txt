@@ -11,3 +11,6 @@ fasttext-wheel
 numpy
 telegramify-markdown
 matplotlib
+groq
+openai
+ollamafreeapi

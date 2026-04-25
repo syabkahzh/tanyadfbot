@@ -9,6 +9,8 @@ import html
 import re
 import pytz
 import logging
+import time
+import os
 from datetime import datetime, timezone, timedelta
 from typing import Any, cast
 
@@ -458,7 +460,6 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                 if not downloaded:
                     photo_bytes = None
                 elif isinstance(downloaded, str):
-                    import os
                     if os.path.exists(downloaded):
                         with open(downloaded, 'rb') as f:
                             photo_bytes = f.read()
@@ -552,14 +553,26 @@ async def heartbeat_job(db: Database, gemini: GeminiProcessor, bot: TelegramBot,
             elif lag_min > 5:
                 lag_note = f"\n⚠️ *Lag: {int(lag_min)}m*"
 
-        # RPM pressure
-        active_calls = sum(
-            slot.current_usage() for slot in gemini._slots.values()
-        )
-        total_limit  = sum(slot.limit for slot in gemini._slots.values())
-        rpm_note     = f" | rpm: `{active_calls}/{total_limit}`"
-
-        text = f"💓 `{now_wib}` | queue: `{queue}`{rpm_note}{lag_note}"
+        # AI Army Fleet Status
+        fleet_status = []
+        total_active = 0
+        total_limit = 0
+        
+        # Sort by usage to show busiest ones first
+        sorted_slots = sorted(gemini._slots.values(), key=lambda s: s.current_usage(), reverse=True)
+        
+        for slot in sorted_slots:
+            usage = slot.current_usage()
+            total_active += usage
+            total_limit += slot.limit
+            if usage > 0:
+                fleet_status.append(f"{slot.name}: `{usage}/{slot.limit}`")
+        
+        army_note = f" | 🪖 `{total_active}/{total_limit}`"
+        if fleet_status:
+            army_note += "\n" + " · ".join(fleet_status[:3]) # Show top 3 active
+        
+        text = f"💓 `{now_wib}` | queue: `{queue}`{army_note}{lag_note}"
         await bot.send_plain(text)
         logger.info("✅ [Job] Finished heartbeat_job")
     except Exception as e:
@@ -878,8 +891,9 @@ async def trend_job(db: Database, gemini: GeminiProcessor, bot: TelegramBot) -> 
             lines.append(f"• {t.topic}\n  🔗 [Lihat Pesan]({link})")
 
         now_wib = datetime.now(pytz.timezone("Asia/Jakarta")).strftime('%H:%M:%S')
+        model_info = f" (via {trends[0].model_name})" if trends[0].model_name else ""
         full_text = (
-            f"📈 **Narasi Tren (15m):**\n"
+            f"📈 **Narasi Tren (15m){model_info}:**\n"
             f"⏰ Waktu: `{now_wib}`\n\n"
             + "\n\n".join(lines)
         )
@@ -1166,7 +1180,7 @@ async def fasttext_retrain_job(db: Database, bot: TelegramBot) -> None:
         # 3. Train Model
         logger.info("🧠 Training FastText model...")
         process = await asyncio.create_subprocess_exec(
-            venv_python, train_script, "--data", "data/training.txt", "--out", "model.ftz",
+            "nice", "-n", "19", venv_python, train_script, "--data", "data/training.txt", "--out", "model.ftz",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )

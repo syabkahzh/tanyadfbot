@@ -65,3 +65,33 @@ class Config:
             print(f"CRITICAL ERROR: Missing values in .env for: {', '.join(missing)}")
             return False
         return True
+
+    @classmethod
+    def get_ai_army(cls) -> list[dict]:
+        """Loads the multi-provider fleet configuration from models_config.json."""
+        import json
+        import os
+        path = os.path.join(os.path.dirname(__file__), "models_config.json")
+        try:
+            with open(path, "r") as f:
+                army = json.load(f)
+            
+            # Inject API keys from environment
+            for p in army:
+                env_key = p.get("api_key_env")
+                p["api_key"] = os.getenv(env_key) if env_key else ""
+            
+            return army
+        except Exception as e:
+            import logging
+            logging.error(f"Failed to load AI Army: {e}")
+            return []
+
+    @classmethod
+    def get_ai_keys(cls) -> dict[str, str]:
+        """Returns all configured AI keys for monitoring."""
+        return {
+            "google": cls.GEMINI_API_KEY,
+            "groq": os.getenv("GROQ_API_KEY", ""),
+            "glm": os.getenv("GLM_API_KEY", ""),
+        }
