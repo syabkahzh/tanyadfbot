@@ -179,30 +179,31 @@ async def processing_loop() -> None:
         promos: list[Any] | None = None
         ai_failed = False
         try:
-            try:
-                async with _AI_SEMAPHORE:
-                    try:
-                        promos = await gemini.process_batch(msgs, db)
-                    except TimeoutError:
-                        logger.warning(f"⏳ [AI] Rate limits exhausted — requeuing {len(msgs)} messages for later.")
+            async with _AI_SEMAPHORE:
+                try:
+                    promos = await gemini.process_batch(msgs, db)
+                except TimeoutError:
+                    logger.warning(f"⏳ [AI] Rate limits exhausted — requeuing {len(msgs)} messages for later.")
+                    ai_failed = True
+                except Exception as e:
+                    if str(e) == "TEMP_500_INTERNAL":
+                        logger.warning(f"AI internal 500 error — requeuing {len(msgs)} msgs for later.")
                         ai_failed = True
-                    except Exception as e:
-                        if str(e) == "TEMP_500_INTERNAL":
-                            logger.warning(f"AI internal 500 error — requeuing {len(msgs)} msgs for later.")
-                            ai_failed = True
-                        else:
-                            logger.error(f"AI processing error: {e}", exc_info=True)
-                            await db.increment_ai_failure_count(msg_ids)
-                            ai_failed = True
-            finally:
-                shared._active_ai_tasks -= 1
+                    else:
+                        logger.error(f"AI processing error: {e}", exc_info=True)
+                        await db.increment_ai_failure_count(msg_ids)
+                        ai_failed = True
+            shared._active_ai_tasks -= 1
         except BaseException:
-            await _release_claims()
+            shared._active_ai_tasks -= 1
+            # No need to release claims here, finally block will do it.
             raise
+        finally:
+            await _release_claims()
+
 
         if ai_failed:
             shared.record_ai_outcome(success=False)
-            await _release_claims()
             return
 
         ai_duration = time.monotonic() - ai_start
@@ -211,7 +212,6 @@ async def processing_loop() -> None:
             logger.warning(f"AI returned None — incrementing failure count for {len(msgs)} msgs.")
             await db.increment_ai_failure_count(msg_ids)
             shared.record_ai_outcome(success=False)
-            await _release_claims()
             return
 
         shared.record_ai_outcome(success=True)
@@ -335,7 +335,7 @@ async def processing_loop() -> None:
             logger.error(f"Post-AI processing error: {e}", exc_info=True)
             await db.mark_batch_processed(msg_ids)
         finally:
-            await _release_claims()
+            pass # Claims are now released in the outer finally block
 
     logger.info("Processing Loop started.")
     while True:
@@ -496,7 +496,14 @@ async def processing_loop() -> None:
             shared.mark_batch_spawned()
             _spawned_task = asyncio.create_task(process_one_batch(to_ai))
             _active_spawn_tasks.add(_spawned_task)
-            _spawned_task.add_done_callback(_active_spawn_tasks.discard)
+            def _cleanup_spawn_task(t: asyncio.Task) -> None:
+                _active_spawn_tasks.discard(t)
+                if t.cancelled():
+                    return
+                exc = t.exception()
+                if exc:
+                    logger.error(f"Spawned batch task failed: {exc}", exc_info=exc)
+            _spawned_task.add_done_callback(_cleanup_spawn_task)
             await asyncio.sleep(0.05)
         except Exception as e:
             logger.error(f"processing_loop error: {e}", exc_info=True)

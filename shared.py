@@ -15,8 +15,8 @@ try:
     import numpy as np
     _orig_array = np.array
     def _fixed_array(obj, *args, **kwargs):
-        if kwargs.get('copy') is False:
-            kwargs.pop('copy')
+        if kwargs.get("copy") is False:
+            kwargs.pop("copy")
             return np.asarray(obj, *args, **kwargs)
         return _orig_array(obj, *args, **kwargs)
     np.array = _fixed_array
@@ -71,6 +71,7 @@ async def classify_batch(texts: list[str]) -> list[tuple[str, float]]:
         List of (label, confidence) tuples.
     """
     if _ft_model is None:
+        logger.warning("FastText model not loaded — traffic cop disabled, all messages will pass through")
         return [("__label__UNKNOWN", 0.0)] * len(texts)
     if not texts:
         return []
@@ -228,9 +229,10 @@ async def is_fuzzy_duplicate(brand: str, summary: str,
 
         for alert in _fuzzy_dedup_queue:
             if alert['brand'] == norm_brand:
-                similarity = difflib.SequenceMatcher(
-                    None, alert['summary'], norm_summary
-                ).ratio()
+                # Offload CPU-bound SequenceMatcher to thread to avoid blocking event loop
+                similarity = await asyncio.to_thread(
+                    difflib.SequenceMatcher(None, alert['summary'], norm_summary).ratio
+                )
                 if similarity > threshold:
                     return True
 
@@ -348,7 +350,8 @@ def _score_confidence(p: PromoExtraction, msg: dict, recently_alerted_brands: se
         score += 30
         
     # BUG S1 FIX: Slang active signals count as implicit confirmation
-    if _ACTIVE_SLANG.search(p.summary or ''):
+    if _ACTIVE_SLANG.search(p.summary or 
+''):
         score += 15
         
     if p.status == 'active': score += 15
@@ -509,25 +512,53 @@ async def _flush_alert_buffer(delay: float = 0.5) -> None:
 
     try:
         tasks = []
+        task_to_item = []
         from telegram.constants import ParseMode
         for brand_key, items in snapshot.items():
             if len(items) == 1:
                 p, link, ts, corr, ctexts, src = items[0]
                 tasks.append(bot.send_alert(p, link, timestamp=ts, corroborations=corr, corroboration_texts=ctexts, source=src))
+                task_to_item.append((brand_key, 0))
             else:
                 tasks.append(bot.send_grouped_alert(brand_key, items))
+                task_to_item.append((brand_key, None))
         
         if tasks:
-            await asyncio.gather(*tasks)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Identify which alerts succeeded vs failed
+            failed_brands: set[str] = set()
+            for idx, res in enumerate(results):
+                if isinstance(res, Exception):
+                    brand_key, _ = task_to_item[idx]
+                    failed_brands.add(brand_key)
+            
+            if failed_brands:
+                # Only delete alerts for brands that succeeded
+                brands_to_delete = [b for b, _ in task_to_item if b not in failed_brands]
+                if brands_to_delete:
+                    ph = ",".join("?" * len(brands_to_delete))
+                    await db.conn.execute(
+                        f"DELETE FROM pending_alerts WHERE flush_id=? AND brand IN ({ph})",
+                        (flush_id, *brands_to_delete)
+                    )
+                    await db.conn.commit()
+                # Reset flush_id for failed brands so they retry
+                if failed_brands:
+                    ph = ",".join("?" * len(failed_brands))
+                    await db.conn.execute(
+                        f"UPDATE pending_alerts SET flush_id=NULL WHERE flush_id=? AND brand IN ({ph})",
+                        (flush_id, *failed_brands)
+                    )
+                    await db.conn.commit()
+            else:
+                await db.conn.execute(
+                    "DELETE FROM pending_alerts WHERE flush_id=?", (flush_id,)
+                )
+                await db.conn.commit()
         set_buffer_flush_task(None)
-
-        await db.conn.execute(
-            "DELETE FROM pending_alerts WHERE flush_id=?", (flush_id,)
-        )
-        await db.conn.commit()
     except Exception as e:
         set_buffer_flush_task(None)
-        print(f"⚠️ Alert flush failed: {e}")
+        logger.error(f"⚠️ Alert flush failed: {e}")
         if bot:
             await bot.alert_error("_flush_alert_buffer", e)
         await db.conn.execute(
@@ -594,3 +625,5 @@ _BRAND_KEYWORDS: dict[str, str] = {
     'svip': 'ShopeeFood',
     'spud': 'SPUD',
 }
+
+(File has 626 lines total.)

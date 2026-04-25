@@ -66,9 +66,14 @@ class Config:
             return False
         return True
 
+    _ai_army_cache: list[dict] | None = None
+
     @classmethod
     def get_ai_army(cls) -> list[dict]:
         """Loads the multi-provider fleet configuration from models_config.json."""
+        if cls._ai_army_cache is not None:
+            return cls._ai_army_cache
+
         import json
         import os
         path = os.path.join(os.path.dirname(__file__), "models_config.json")
@@ -81,6 +86,7 @@ class Config:
                 env_key = p.get("api_key_env")
                 p["api_key"] = os.getenv(env_key) if env_key else ""
             
+            cls._ai_army_cache = army
             return army
         except Exception as e:
             import logging

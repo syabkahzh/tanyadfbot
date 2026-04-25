@@ -126,7 +126,7 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
             classifications = await shared.classify_batch(summaries)
             ft_results = {summaries[i]: classifications[i] for i in range(len(summaries))}
 
-        fired = 0
+        fired_ids = []
         from telegram.constants import ParseMode
 
         for r in rows:
@@ -134,7 +134,7 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
             ft_label, ft_conf = ft_results.get(r['summary'], ("__label__PROMO", 0.0))
             if ft_label == "__label__JUNK" and ft_conf > 0.90:
                 # Mark as fired so we don't re-scan noise.
-                await db.conn.execute("UPDATE promos SET reminder_fired=1 WHERE id=?", (r['id'],))
+                fired_ids.append(r['id'])
                 continue
 
             # Prefer valid_until if it contains a time; otherwise scan the
@@ -145,9 +145,7 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
             tod = _extract_time_of_day(haystack)
             if tod is None:
                 # Mark as checked-no-time so we don't re-scan next minute.
-                await db.conn.execute(
-                    "UPDATE promos SET reminder_fired=1 WHERE id=?", (r['id'],)
-                )
+                fired_ids.append(r['id'])
                 continue
 
             hh, mm = tod
@@ -161,9 +159,7 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
                     target = target + timedelta(days=1)
                 else:
                     # Time has very recently passed, skip to prevent late alerts
-                    await db.conn.execute(
-                        "UPDATE promos SET reminder_fired=1 WHERE id=?", (r['id'],)
-                    )
+                    fired_ids.append(r['id'])
                     continue
 
             minutes_to = (target - now_wib).total_seconds() / 60.0
@@ -198,18 +194,16 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
 
                 try:
                     await bot.send_plain(text)
-                    fired += 1
+                    fired_ids.append(r['id'])
                 except Exception as e:
                     logger.error(f"time_reminder send failed for promo {r['id']}: {e}")
                     continue
 
-                await db.conn.execute(
-                    "UPDATE promos SET reminder_fired=1 WHERE id=?", (r['id'],)
-                )
-
-        if fired:
+        if fired_ids:
+            ph = ','.join(['?'] * len(fired_ids))
+            await db.conn.execute(f"UPDATE promos SET reminder_fired=1 WHERE id IN ({ph})", fired_ids)
             await db.conn.commit()
-            logger.info(f"✅ [Job] time_reminder_job fired {fired} reminders")
+            logger.info(f"✅ [Job] time_reminder_job fired/marked {len(fired_ids)} promos")
         else:
             logger.info("✅ [Job] time_reminder_job: no promos within 2-3 min window")
     except Exception as e:
@@ -608,7 +602,7 @@ async def hot_thread_job(db: Database, gemini: GeminiProcessor, listener: Any, b
             if calls_this_run >= 3:
                 break
             now_ts    = datetime.now(timezone.utc)
-            last_data = alerted_hot_threads.get(t['tg_msg_id'], (0, cast(datetime, datetime.min.replace(tzinfo=timezone.utc))))
+            last_data = alerted_hot_threads.get(t['tg_msg_id'], (0, cast(datetime, datetime(1, 1, 1, tzinfo=timezone.utc))))
             last_count, last_alerted_at = last_data
             
             cooldown_ok = (now_ts - last_alerted_at).total_seconds() > 900
@@ -652,7 +646,7 @@ async def hot_thread_job(db: Database, gemini: GeminiProcessor, listener: Any, b
                     snip = (r['text'] or '').strip()
                     if snip:
                         snip = (snip[:57] + "...") if len(snip) > 60 else snip
-                        snippets.append(f"• _{snip}_")
+                        snippets.append(f"• _{snip}_ ")
 
                 parent_snippet = (t['text'] or '').strip()
                 if len(parent_snippet) > 100:

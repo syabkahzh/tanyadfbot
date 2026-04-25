@@ -245,6 +245,10 @@ class GoogleClient(BaseAIClient):
         self.client = genai.Client(api_key=api_key)
 
     async def generate_content(self, model: str, contents: Any, config: dict[str, Any]) -> Any:
+        # Defensive copy: never mutate the caller's dict (fixes retry/fallback bugs)
+        config = config.copy()
+        # Defensive copy: never mutate the caller's dict (fixes retry/fallback bugs)
+        config = config.copy()
         # Some models (like gemma-3/4) might not support system_instruction or JSON mode as separate fields
         is_gemma = "gemma-" in model
         if is_gemma:
@@ -703,7 +707,7 @@ class GeminiProcessor:
                 # If the server timed out, threw a 50x error, or a 400 bad request (like a dead model), ban the ENTIRE provider
                 exclude_list = list(tried)
                 err_str = str(e).lower()
-                is_server_death = isinstance(e, (asyncio.TimeoutError, TimeoutError)) or "timeout" in err_str or "50" in err_str or "400" in err_str
+                is_server_death = isinstance(e, (asyncio.TimeoutError, TimeoutError)) or "timeout" in err_str or any(s in err_str for s in ["500", "502", "503", "504", "408", "429"])
                 
                 if is_server_death and not (is_vision and slot.provider == "google"):
                     for n, s in self._slots.items():
@@ -782,7 +786,7 @@ class GeminiProcessor:
         if not messages:
             return []
 
-        filtered = [m for m in messages if self._is_worth_checking(m.get('text'), bool(m['has_photo']))]
+        filtered = [m for m in messages if self._is_worth_checking(m.get('text'), bool(m.get('has_photo', False)))]
         if not filtered:
             return []
 

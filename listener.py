@@ -1,4 +1,3 @@
-"""
 listener.py — Telethon Message Listener
 Bulletproof rewrite:
 - BUG 4 FIX: asyncio.timeout(0.5) on DB lookup in fast-path — never stalls
@@ -11,10 +10,13 @@ Bulletproof rewrite:
 import re
 import time
 import asyncio
+import logging
 from telethon import TelegramClient, events
 from config import Config
 from datetime import datetime, timedelta, timezone
 import shared
+
+logger = logging.getLogger(__name__)
 
 # ── Pre-compiled Patterns (Performance Optimization) ─────────────────────────
 TIME_PATTERN = re.compile(
@@ -109,8 +111,8 @@ class TelethonListener:
             if not event.text:
                 return
             shared.mark_message_ingested()
-            asyncio.create_task(self._handle_fast_path_standalone(event))
-            asyncio.create_task(self._save_to_db(event))
+            # Use a single task to handle both fast-path and DB save to avoid race conditions
+            asyncio.create_task(self._handle_message(event))
 
     # ── Fast-path ─────────────────────────────────────────────────────────────
 
@@ -347,16 +349,18 @@ class TelethonListener:
 
     # ── Message ingestion ─────────────────────────────────────────────────────
 
-    async def _handle_fast_path_standalone(self, event):
-        """Pure fast-path: pattern match → alert. Zero DB reads except parent lookup.
+    async def _handle_message(self, event):
+        """Handles both fast-path and DB saving for a new message."""
+        try:
+            await self._save_to_db(event)
+            await self._handle_fast_path_standalone(event)
+        except Exception as e:
+            logger.error(f"Error in _handle_message: {e}", exc_info=True)
+            if shared.bot:
+                await shared.bot.alert_error("handle_message", e)
 
-        When the fast-path fires (returns True), we also mark the source message
-        as processed=1 so the AI processing loop does not re-waste a batch slot
-        on it. The mark is tolerant of the race with `_save_to_db`: if the row
-        isn't present yet the UPDATE affects 0 rows and the row will be caught
-        by the AI path later (where `filter_duplicates` catches it via the
-        already-appended history entry).
-        """
+    async def _handle_fast_path_standalone(self, event):
+        """Pure fast-path: pattern match → alert. Zero DB reads except parent lookup."""
         message_data = {
             'tg_msg_id':       event.id,
             'chat_id':         event.chat_id,
@@ -372,13 +376,13 @@ class TelethonListener:
                     self.db.mark_processed_by_tg_id(event.id, event.chat_id)
                 )
         except Exception as e:
+            logger.error(f"fast_path error: {e}", exc_info=True)
             if shared.bot:
                 await shared.bot.alert_error("fast_path", e)
-            print(f"❌ fast_path error: {e}")
 
     async def _save_to_db(self, event):
         """Pure DB persistence. No fast-path, no locks beyond aiosqlite's own queue."""
-        text_preview = (event.text or '')[:50].replace('\n', ' ')
+        text_preview = (event.text or "")[:50].replace("\n", " ")
         print(f"📩 [{event.id}] {text_preview}")
         try:
             has_time = bool(TIME_PATTERN.search(event.text or ""))
@@ -393,14 +397,14 @@ class TelethonListener:
                 processed=0,
                 has_photo=1 if event.photo else 0,
                 has_time_mention=1 if has_time else 0,
-                commit=False
+                commit=True
             )
             if internal_id:
                 print(f"   📥 Queued (ID={internal_id})")
         except Exception as e:
             if shared.bot:
                 await shared.bot.alert_error("listener_save_db", e)
-            print(f"❌ _save_to_db error: {e}")
+            logger.error(f"❌ _save_to_db error: {e}")
 
     # ── Start / history sync ──────────────────────────────────────────────────
 

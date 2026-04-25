@@ -9,6 +9,8 @@ import html
 import json
 import logging
 import pytz
+import psutil
+import os
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable, TypeVar, cast
 
@@ -36,7 +38,7 @@ from utils import _esc
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar('T', bound=Callable[..., Any])
+T = TypeVar("T", bound=Callable[..., Any])
 
 
 class TelegramBot:
@@ -56,7 +58,9 @@ class TelegramBot:
         # Track users in feedback flow: {user_id: original_msg_id}
         self._awaiting_feedback: dict[int, int] = {}
         self._feedback_weights: dict[int, float] = {} # {msg_id: weight}
-        
+        self._error_alert_cooldown: dict[str, float] = {}
+        self._ERROR_ALERT_COOLDOWN_SEC = 120.0
+
         self._setup_handlers()
 
     async def _retry_tg(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -137,7 +141,7 @@ class TelegramBot:
 
     async def cmd_ping(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Simple health check to confirm the bot is responsive."""
-        now = datetime.now(pytz.timezone("Asia/Jakarta")).strftime('%H:%M:%S')
+        now = datetime.now(pytz.timezone("Asia/Jakarta")).strftime("%H:%M:%S")
         await self._send_markdown(update, f"🏓 **Pong!**\n🕒 Time: `{now} WIB`")
 
     async def _send_markdown(self, update: Update | object, text: str, reply_markup: Any = None) -> None:
@@ -184,8 +188,6 @@ class TelegramBot:
         latest_ts = await self.db.get_latest_message_ts()
         
         # 3. System Load
-        import psutil
-        import os
         process = psutil.Process(os.getpid())
         ram_mb  = process.memory_info().rss / (1024 * 1024) # Bot RAM
         sys_mem = psutil.virtual_memory()
@@ -220,8 +222,8 @@ class TelegramBot:
         if failures:
             lines = []
             for f in failures:
-                comp = f['component']
-                err  = f['error_msg'][:60]
+                comp = f["component"]
+                err  = f["error_msg"][:60]
                 lines.append(f"• {comp}: {err}...")
             recent_log = "\n\n❌ **Recent Failures:**\n" + "\n".join(lines)
 
@@ -234,7 +236,7 @@ class TelegramBot:
         )
 
         WIB = pytz.timezone("Asia/Jakarta")
-        now_wib = datetime.now(WIB).strftime('%H:%M:%S WIB')
+        now_wib = datetime.now(WIB).strftime("%H:%M:%S WIB")
         latest_wib = _to_wib(latest_ts) + " WIB" if latest_ts else "N/A"
 
         text = (
@@ -428,13 +430,13 @@ class TelegramBot:
         row_buttons = []
         
         for i, r in enumerate(rows):
-            clean_text = (r['text'] or "").replace('\n', ' ')[:50]
+            clean_text = (r["text"] or "").replace("\n", " ")[:50]
             # Use standard number emojis
             idx_icon = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"][i]
             
             # Use raw text without markdown for the snippet
             lines.append(f"{idx_icon} {clean_text}...")
-            row_buttons.append(InlineKeyboardButton(idx_icon, callback_data=f"inspect_{r['id']}"))
+            row_buttons.append(InlineKeyboardButton(idx_icon, callback_data=f"inspect_{r["id"]}"))
             if len(row_buttons) == 5:
                 buttons.append(row_buttons)
                 row_buttons = []
@@ -478,7 +480,7 @@ class TelegramBot:
             r = await cur.fetchone()
             if not r: return
             
-        tg_link = _make_tg_link(r['chat_id'], r['tg_msg_id'])
+        tg_link = _make_tg_link(r["chat_id"], r["tg_msg_id"])
         
         keyboard = [
             [
@@ -533,16 +535,16 @@ class TelegramBot:
         end_idx = start_idx + page_size
         page_rows = rows[start_idx:end_idx]
         
-        today_str = now_wib.strftime('%d %b')
+        today_str = now_wib.strftime("%d %b")
         header = f"📅 **Promo Hari Ini — {today_str}**\n"
         header += f"🔥 Total: **{total_promos} promos** (Hal {page}/{total_pages})\n\n"
         
         lines = []
         for r in page_rows:
-            brand = r['brand'] if r['brand'] and r['brand'].lower() not in ('unknown', 'sunknown', '') else '❓'
-            time_str = _to_wib(r['msg_time'])
-            link = r['tg_link'] or "#"
-            lines.append(f"• `[{time_str}]` **{brand}**: {r['summary']} [➤]({link})")
+            brand = r["brand"] if r["brand"] and r["brand"].lower() not in ("unknown", "sunknown", "") else "❓"
+            time_str = _to_wib(r["msg_time"])
+            link = r["tg_link"] or "#"
+            lines.append(f"• `[{time_str}]` **{brand}**: {r["summary"]} [➤]({link})")
             
         text = header + "\n".join(lines)
         
@@ -587,8 +589,8 @@ class TelegramBot:
         
         lines = []
         for r in rows:
-            clean_text = (r['text'] or '').replace('\n', ' ')[:80]
-            status = "✅" if r['processed'] else "⏳"
+            clean_text = (r["text"] or "").replace("\n", " ")[:80]
+            status = "✅" if r["processed"] else "⏳"
             lines.append(f"{status} `[{r['id']}]` {clean_text}...")
         
         await self._send_markdown(update, text + "\n".join(lines))
@@ -649,7 +651,7 @@ class TelegramBot:
                 user_id = update.effective_user.id
                 self._awaiting_feedback[user_id] = orig_msg_id
                 # Store weight in the user session too
-                context.user_data['pending_weight'] = weight
+                context.user_data["pending_weight"] = weight
                 await self._retry_tg(query.message.reply_text,
                     "⌨️ **Please type your correction now:**",
                     parse_mode=ParseMode.MARKDOWN
@@ -680,7 +682,7 @@ class TelegramBot:
             if vote == "custom":
                 user_id = update.effective_user.id
                 self._awaiting_feedback[user_id] = orig_msg_id
-                context.user_data['pending_weight'] = weight
+                context.user_data["pending_weight"] = weight
                 await self._retry_tg(query.message.reply_text,
                     "⌨️ **Please type your correction for this poll now:**",
                     parse_mode=ParseMode.MARKDOWN
@@ -815,7 +817,7 @@ class TelegramBot:
         
         if user_id in self._awaiting_feedback:
             orig_msg_id = self._awaiting_feedback.pop(user_id)
-            weight = context.user_data.pop('pending_weight', 0.5)
+            weight = context.user_data.pop("pending_weight", 0.5)
             correction = update.message.text
             try:
                 await self.db.conn.execute(
@@ -856,7 +858,8 @@ class TelegramBot:
             InlineKeyboardButton("🛒 Buka", url=tg_link),
             InlineKeyboardButton("🔧 Feedback", callback_data=f"feed_{p_data.original_msg_id}")
         ]]
-        brand_label = p_data.brand if p_data.brand.lower() not in ('unknown', 'sunknown', '') else "❓ Unknown"
+        brand_label = p_data.brand if p_data.brand.lower() not in (
+'unknown', 'sunknown', '') else "❓ Unknown"
 
         msg_wib = _to_wib(timestamp) if timestamp else "??"
         
@@ -998,25 +1001,24 @@ class TelegramBot:
         text = (
             f"🗳 **Deal or No Deal?**\n"
             f"AI is unsure about this extraction (Conf: `{p_data.confidence:.2f}`)\n\n"
-            f"🏪 **{p_data.brand}**\n"
-            f"📝 {p_data.summary}\n"
-            f"ℹ️ _{p_data.conditions or 'No conditions'}_"
+            f"📝 _{p_data.summary}_"
         )
         
         safe_text, entities = convert(text)
-        try:
-            await self._retry_tg(
-                self.app.bot.send_message,
-                chat_id=Config.OWNER_ID,
-                text=safe_text,
-                entities=[e.to_dict() for e in entities],
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        except Exception as e:
-            logger.error(f"Failed to send verification poll: {e}")
+        await self._retry_tg(
+            self.app.bot.send_message,
+            chat_id=Config.OWNER_ID,
+            text=safe_text,
+            entities=[e.to_dict() for e in entities],
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Global error handler for the bot."""
+        logger.error("Exception while handling an update:", exc_info=context.error)
 
     async def alert_error(self, component: str, error: Exception, source_msg_id: int | None = None) -> None:
-        """Alerts the owner about a system error (rate-limited)."""
+        """Sends a formatted error alert to the owner and logs it to the DB."""
         err_msg = str(error)
         
         # Save to DB first
@@ -1026,10 +1028,6 @@ class TelegramBot:
 
         # Rate-limit notifications: 120s per component
         import time; now = time.monotonic()
-        if not hasattr(self, '_error_alert_cooldown'):
-            self._error_alert_cooldown = {}
-            self._ERROR_ALERT_COOLDOWN_SEC = 120.0
-
         if component in self._error_alert_cooldown and (now - self._error_alert_cooldown[component]) < self._ERROR_ALERT_COOLDOWN_SEC:
             return
         
@@ -1039,64 +1037,21 @@ class TelegramBot:
             InlineKeyboardButton("🛠 Mark Fixed", callback_data=f"fix_{fid}"),
             InlineKeyboardButton("🔄 Retry Msg", callback_data=f"retry_{fid}")
         ]]
-        now_wib = datetime.now(pytz.timezone("Asia/Jakarta")).strftime('%H:%M:%S')
+        
         text = (
-            f"🚨 **Error in {component}**\n"
-            f"⏰ Time: `{now_wib}`\n\n"
-            f"`{err_msg[:300]}`"
+            f"🚨 **ERROR: `{component}`**\n\n"
+            f"`{html.escape(err_msg)}`\n\n"
+            f"Traceback available in logs. Failure ID: `{fid}`"
         )
-        safe_text, entities = convert(text)
-        try:
-            await self._retry_tg(
-                self.app.bot.send_message,
-                chat_id=Config.OWNER_ID,
-                text=safe_text,
-                entities=[e.to_dict() for e in entities],
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        except Exception as e:
-            logger.error(f"Failed to send error alert: {e}")
-
-    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Global error handler for the Telegram application."""
-        err = context.error
-        if isinstance(err, (NetworkError, TimedOut)):
-            logger.warning(f"Telegram Network Error (Bad Gateway/Timeout): {err}")
-            return
-        logger.error(f"Update {update} caused error: {err}", exc_info=context.error)
-
-    def _fmt_raw_list(self, rows: list, title: str) -> str:
-        """Formatting helper for lists of promotions."""
-        lines = [f"📅 **{title}**\n"]
-        for r in rows:
-            brand = r['brand'] if r['brand'] and r['brand'].lower() != 'unknown' else '❓'
-            lines.append(f"• **{brand}**: {r['summary']}")
-        return "\n".join(lines)
-
-    async def _send_long(self, update: Update, text: str) -> None:
-        """Sends potentially long messages by splitting into chunks safely using telegramify."""
-        try:
-            results = await telegramify(text)
-            for item in results:
-                if item.content_type == ContentType.TEXT:
-                    await self._retry_tg(
-                        update.message.reply_text,
-                        item.text,
-                        entities=[e.to_dict() for e in item.entities],
-                        link_preview_options=LinkPreviewOptions(is_disabled=True)
-                    )
-        except Exception as e:
-            logger.error(f"Failed to send long markdown msg: {e}")
+        await self.send_plain(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
-def _to_wib(ts_str: str) -> str:
-    """Helper to convert ISO timestamp string to WIB HH:MM:SS."""
+def _to_wib(ts_str: str | None) -> str:
+    """Converts a UTC timestamp string to a WIB time string (HH:MM)."""
     if not ts_str:
-        return "??:??:??"
+        return "??"
     try:
-        from shared import _parse_ts
         dt = _parse_ts(ts_str)
-        WIB = pytz.timezone("Asia/Jakarta")
-        return dt.astimezone(WIB).strftime('%H:%M:%S')
-    except Exception:
-        return "??:??:??"
+        return dt.astimezone(pytz.timezone("Asia/Jakarta")).strftime("%H:%M")
+    except (ValueError, TypeError):
+        return "??"
