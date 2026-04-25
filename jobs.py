@@ -484,7 +484,7 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                         await db.save_pending_alert(
                             promo.brand.lower().strip(),
                             promo.model_dump_json(), tg_link, ts,
-                            source='ai', commit=False
+                            source='ai', commit=True
                         )
                         t = shared.get_buffer_flush_task()
                         if t is None or t.done():
@@ -492,17 +492,14 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                                 asyncio.create_task(_flush_alert_buffer(delay=0.5))
                             )
 
+                # Commit image_processed status immediately per item to avoid holding write locks
+                await db.conn.execute(
+                    "UPDATE messages SET image_processed=1 WHERE id=?", (msg_id,)
+                )
+                await db.conn.commit()
                 processed_ids.append(msg_id)
             except Exception as e:
                 logger.error(f"image_processing_job item (msg {tg_msg_id}) error: {e}")
-
-        if processed_ids:
-            ph = ','.join('?' * len(processed_ids))
-            await db.conn.execute(
-                f"UPDATE messages SET image_processed=1 WHERE id IN ({ph})",
-                processed_ids
-            )
-            await db.conn.commit()
 
         logger.info("✅ [Job] Finished image_processing_job")
     except Exception as e:
