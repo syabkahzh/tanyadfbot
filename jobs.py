@@ -246,7 +246,7 @@ async def hourly_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegram
                            and r['brand'].lower() not in ('unknown', 'sunknown', '') else '❓')
             status_icon = ("🟢" if r['status'] == 'active'
                            else ("🔴" if r['status'] == 'expired' else "⚪"))
-            link_part   = f" <a href='{r['tg_link']}'>[→]</a>" if r['tg_link'] else ""
+            link_part   = f" [→]({r['tg_link']})" if r['tg_link'] else ""
             fast_tag    = " ⚡" if r['via_fastpath'] else ""
             lines.append(
                 f"{status_icon} **{brand}**"
@@ -1174,4 +1174,69 @@ async def fasttext_retrain_job(db: Database, bot: TelegramBot) -> None:
     except Exception as e:
         logger.error(f"fasttext_retrain_job error: {e}", exc_info=True)
         await bot.alert_error("fasttext_retrain_job", e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Visual Trends
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def visual_trend_job(db: Database, bot: TelegramBot) -> None:
+    """Generates and sends a visual chart of top brands."""
+    logger.info("⏰ [Job] Starting visual_trend_job...")
+    try:
+        rows = await db.get_brand_stats(hours=24)
+        if not rows:
+            logger.info("✅ [Job] No brand stats to visualize.")
+            return
+
+        # Attempt to generate chart using matplotlib
+        import io
+        try:
+            import matplotlib.pyplot as plt
+            import matplotlib
+            plt.switch_backend('Agg') # Headless mode
+            
+            brands = [r['brand'] for r in rows]
+            counts = [r['count'] for r in rows]
+            
+            plt.figure(figsize=(10, 6))
+            colors = plt.cm.Paired(range(len(brands)))
+            bars = plt.bar(brands, counts, color=colors)
+            
+            plt.title('Top 10 Brands (Last 24h)', fontsize=15, pad=20)
+            plt.xlabel('Brand', fontsize=12)
+            plt.ylabel('Promo Count', fontsize=12)
+            plt.xticks(rotation=45, ha='right')
+            
+            # Add value labels on top of bars
+            for bar in bars:
+                yval = bar.get_height()
+                plt.text(bar.get_x() + bar.get_width()/2, yval + 0.1, yval, ha='center', va='bottom')
+            
+            plt.tight_layout()
+            
+            # Save to buffer
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=150)
+            buf.seek(0)
+            plt.close()
+            
+            # Send to bot
+            WIB = pytz.timezone("Asia/Jakarta")
+            now_str = datetime.now(WIB).strftime('%d %b %H:%M:%S')
+            caption = f"📊 **Brand activity summary**\n🕒 `{now_str} WIB`"
+            await bot.send_photo(buf.read(), caption=caption)
+            logger.info("✅ [Job] Visual trend chart sent.")
+            
+        except ImportError:
+            logger.warning("⚠️ matplotlib not installed. Skipping visual chart.")
+            # Fallback to text summary
+            text = "📊 **Top 10 Brands (Last 24h)**\n\n"
+            for r in rows:
+                text += f"• **{r['brand']}**: {r['count']}\n"
+            await bot.send_plain(text)
+            
+    except Exception as e:
+        logger.error(f"visual_trend_job error: {e}", exc_info=True)
+        await bot.alert_error("visual_trend_job", e)
 

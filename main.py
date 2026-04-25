@@ -380,6 +380,7 @@ async def processing_loop() -> None:
                 r'berhasil|lancar|masuk|murce|murmer|big|badut|syarat|snk|serbu|'
                 r'alhamdulillah|alhamdullilah|alhamd|almd|tembus|dapet|'
                 r'unlimited|kuota|prioritas|paket|pembelian|erafone|ibox|samsung|'
+                r'yang butuh aja|ymma|'
                 r'iklan|klaim|goco|ultravoucher|uv|fitbar|watsons|cinepolis|bogo)\b', 
                 re.IGNORECASE
             )

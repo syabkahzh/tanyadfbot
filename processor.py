@@ -36,6 +36,7 @@ _PROMO = re.compile(
     r'cb|kesbek|c\+s\+h\+b\+c\+k|cash back|kuota|slot|redeem|qr|scan|edc|'
     r'membership|member|mamber|cek|info|luber|pecah|'
     r'makasih|thx|thanks|makasi|mks|terima.?kasih|'
+    r'yang butuh aja|ymma|'
     r'tukpo|murce|murmer|sopi|tsel|cgv|xxi|svip|badut|war|begal|kreator|'
     r'kopken|chatime|gindaco|solaria|rotio|spx|gopay|spay|ovo|'
     r'neo|tmrw|saqu|seabank|hero)\b', re.IGNORECASE
@@ -171,6 +172,8 @@ _SLANG_KAMUS = {
     'ywwa': 'yang wangi-wangi aja (pamer hoki/promo)',
     'bau': 'tidak hoki / tidak dapat promo / amsyong',
     'cibu': 'cashback / c+s+h+b+a+c+k / kesbek',
+    'yang butuh aja': 'terkait promo bagi-bagi kuota/voucher',
+    'ymma': 'yang mau mau aja (promo terbatas)',
     'on': 'promo masih aktif / work / bisa ditebus',
     'jp': 'jackpot / berhasil tembus promo / hoki',
     'nt': 'nice try / gagal / habis / kuota limit',
@@ -191,6 +194,7 @@ _STRONG_KEYWORDS: set[str] = {
     'membership','member','mamber',
     'cek','info',
     'makasih','thx','thanks','makasi','mks','terimakasih',
+    'yang butuh aja','ymma',
     'tukpo','murce','murmer','sopi','tsel','cgv','xxi','svip','badut','war','begal','kreator','live kreator',
     'kopken','chatime','gindaco','solaria','rotio','spx','gopay','spay','shopeepay','ovo','neo','tmrw','saqu','seabank','hero',
 }
