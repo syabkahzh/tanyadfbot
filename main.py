@@ -51,7 +51,8 @@ _queue_emergency_mode: bool  = False
 
 _in_progress_ids: dict[int, float] = {}
 _in_progress_lock: asyncio.Lock = asyncio.Lock()
-_IN_PROGRESS_MAX_AGE_SEC: float = 130.0
+# CRITICAL FIX: Must exceed (max_attempts * timeout) + overhead = (3 * 60) + 20
+_IN_PROGRESS_MAX_AGE_SEC: float = 200.0
 
 _alerted_hot_threads: dict[int, tuple[int, datetime]] = {}
 _triage_cycle_counter: int   = 0
@@ -379,31 +380,38 @@ async def processing_loop() -> None:
             ancient_raw = await db.get_unprocessed_ancient(min_age_minutes=10, batch_size=ancient_reserve + 100)
             priority_raw = await db.get_unprocessed_recent(minutes=10, batch_size=priority_cap + 50)
 
-            combined: list[Any] = []
             async with _in_progress_lock:
                 ancient = [r for r in ancient_raw if r['id'] not in _in_progress_ids][:ancient_reserve]
                 seen_ids = {r['id'] for r in ancient}
                 priority = [r for r in priority_raw if r['id'] not in _in_progress_ids and r['id'] not in seen_ids][:priority_cap]
-
-                filled = len(ancient) + len(priority)
-                backlog_needed = batch_size - filled
-                if backlog_needed > 0:
-                    old_raw = await db.get_unprocessed_batch(batch_size=backlog_needed + 200)
-                    seen_ids.update(r['id'] for r in priority)
-                    old_batch = [r for r in old_raw if r['id'] not in seen_ids and r['id'] not in _in_progress_ids][:backlog_needed]
-                else: old_batch = []
-
-                combined = ancient + priority + old_batch
-
-                if combined:
-                    claim_ts = time.monotonic()
-                    for r in combined: _in_progress_ids[r['id']] = claim_ts
 
                 if ancient:
                     try:
                         oldest_age = max((datetime.now(timezone.utc) - _parse_ts(r['timestamp'])).total_seconds() for r in ancient)
                         shared._last_observed_ancient_age = oldest_age
                     except Exception: pass
+
+            filled = len(ancient) + len(priority)
+            backlog_needed = batch_size - filled
+
+            # CRITICAL FIX: DB query performed OUTSIDE the lock
+            if backlog_needed > 0:
+                old_raw = await db.get_unprocessed_batch(batch_size=backlog_needed + 200)
+            else:
+                old_raw = []
+
+            # Re-acquire lock only for fast memory operations
+            combined: list[Any] = []
+            async with _in_progress_lock:
+                seen_ids.update(r['id'] for r in priority)
+                old_batch = [r for r in old_raw if r['id'] not in seen_ids and r['id'] not in _in_progress_ids][:backlog_needed]
+
+                combined = ancient + priority + old_batch
+
+                if combined:
+                    claim_ts = time.monotonic()
+                    for r in combined:
+                        _in_progress_ids[r['id']] = claim_ts
 
             if not combined:
                 await asyncio.sleep(2)

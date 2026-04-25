@@ -622,7 +622,11 @@ class GeminiProcessor:
             await asyncio.sleep(1.0)
             
         # 4. Fallback if timeout expires
-        best_name = valid_candidates[0]
+        if not valid_candidates:
+            # Fallback to the absolute highest priority model if everything is exhausted
+            best_name = self._priority_list[0]
+        else:
+            best_name = valid_candidates[0]
         await self._slots[best_name].acquire(estimated_tokens, timeout=0.1)
         return best_name
 
@@ -631,22 +635,21 @@ class GeminiProcessor:
         
         Uses simple heuristic: ~4 chars ≈ 1 token (standard GPT approximation).
         """
+        # CRITICAL FIX: Account for the ~600 token overhead of the massive system prompt
+        base_overhead = 600
+
         if isinstance(content, str):
-            # Simple character-to-token approximation
-            return max(1, len(content) // 4)
+            return max(1, (len(content) // 4) + base_overhead)
         elif isinstance(content, list):
-            # Sum tokens from all content items
-            total = 0
+            total = base_overhead
             for item in content:
                 if isinstance(item, str):
                     total += len(item) // 4
                 elif hasattr(item, '__str__'):
-                    # For genai.types.Part or similar objects
                     total += len(str(item)) // 4
             return max(1, total)
         else:
-            # Fallback for unknown types
-            return max(1, len(str(content)) // 4)
+            return max(1, (len(str(content)) // 4) + base_overhead)
 
 
     async def _call(self, contents: Any, config: dict, slot_name: str, 
