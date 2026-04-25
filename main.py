@@ -77,7 +77,8 @@ _PROTECTED_SIGNALS = re.compile(
     r'yang butuh aja|ymma|neo|'
     r'iklan|klaim|goco|ultravoucher|uv|fitbar|watsons|cinepolis|bogo|'
     r'nyantol|cibu|cibal|burek|gratong|kompen|klem|getok|gosok|spin|'
-    r'1,2jt|1\.2jt|120jt|120k|600k|popup|pop up|upgrade|md|mnt|selfre|selfree)\b', 
+    r'1,2jt|1\.2jt|120jt|120k|600k|popup|pop up|upgrade|md|mnt|selfre|selfree|'
+    r'garap|serbabu|goib|blibli|famima|supin|flip|emados|tts|ndog|superbank|sei|azko|pc|gacoan|voc genz|genz|dom\s+\w+|periode|last day|reset)\b', 
     re.IGNORECASE
 )
 

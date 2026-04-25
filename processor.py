@@ -22,7 +22,8 @@ _WORD_BOUNDARY_KEYWORDS = re.compile(
     r'\b(off|on|aman|work|bs|jp|mm)\b', re.IGNORECASE
 )
 _SOCIAL_FILLER = re.compile(
-    r'^((wkwk|haha|hehe|iya|noted|oke|ok|makasih|thanks|thx|mantap|gas|bos|guys|gais|bang|kak|siap|sip|lol|anjir|anjay|btw|oot|gws|semangat|ya allah|nangis|sedih|beneran|kah)[!.\s]*)+$',
+    r'^((wkwk|haha|hehe|iya|noted|oke|ok|makasih|thanks|thx|mantap|gas|bos|guys|gais|bang|kak|siap|sip|lol|anjir|anjay|btw|oot|gws|semangat|ya allah|nangis|sedih|beneran|kah|'
+    r'ywwa|bau|goib|zonk|cuan|nt|jp|aman)[!.\s]*)+$',
     re.IGNORECASE
 )
 _NON_PROMO = re.compile(
@@ -44,7 +45,9 @@ _PROMO = re.compile(
     r'yang butuh aja|ymma|'
     r'tukpo|murce|murmer|sopi|tsel|cgv|xxi|svip|badut|war|begal|kreator|'
     r'kopken|chatime|gindaco|solaria|rotio|spx|gopay|spay|ovo|'
-    r'neo|tmrw|saqu|seabank|hero)\b', re.IGNORECASE
+    r'neo|tmrw|saqu|seabank|hero|'
+    r'garap|serbabu|goib|emados|tts|blibli|famima|supin|flip|superbank|gacoan|sei|azko|pc|ndog|'
+    r'periode|last day|reset|dom)\b', re.IGNORECASE
 )
 _JUNK_SUMMARY_PATTERN = re.compile(
     r'\b(tidak ada|none|n/a|tidak ditemukan|no promo)\b', re.IGNORECASE
@@ -220,6 +223,11 @@ _STRONG_KEYWORDS: set[str] = {
     'yang butuh aja','ymma',
     'tukpo','murce','murmer','sopi','tsel','cgv','xxi','svip','badut','war','begal','kreator','live kreator',
     'kopken','chatime','gindaco','solaria','rotio','spx','gopay','spay','shopeepay','ovo','neo','tmrw','saqu','seabank','hero',
+    'blibli', 'serbabu', 'famima', 'familymart',
+    'supin', 'superindo', 'gacoan', 'mie gacoan',
+    'wingstop', 'yoshinoya', 'azko', 'sei',
+    'flip', 'superbank', 'dana',
+    'tts', 'emados', 'ndog', 'pc', 'garap',
 }
 
 _WEAK_KEYWORDS: set[str] = {
