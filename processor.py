@@ -69,9 +69,9 @@ _META_SUMMARY_PATTERN = re.compile(
 class PromoExtraction(BaseModel):
     """Structured promotion data extracted from chat text or images."""
     original_msg_id: int
-    summary: str = Field(description="1 sentence summary. MUST BE 'SKIP' if not a promo.")
-    brand: str = Field(description="The exact brand name, or 'SKIP'.")
-    conditions: str = Field(default="", description="Terms and conditions, or empty string.")
+    summary: str = Field(description="1 kalimat ringkasan WAJIB DALAM BAHASA INDONESIA. Isi 'SKIP' jika bukan promo.")
+    brand: str = Field(description="Nama brand yang tepat, atau 'SKIP'.")
+    conditions: str = Field(default="", description="Syarat dan ketentuan DALAM BAHASA INDONESIA, atau string kosong.")
     valid_until: Optional[str] = ""
     # CRITICAL FIX: Forcing strict enums mathematically prevents hallucinated statuses
     status: Literal['active', 'expired', 'unknown'] = Field(description="Strictly select one.")
@@ -335,17 +335,23 @@ class OpenAICompatibleClient(BaseAIClient):
                             elif isinstance(raw, list):
                                 raw = {"promos": raw}
                         
-                        # Case 2: Deeply clean nulls into empty strings for required fields
+                        # Case 2: Deeply clean nulls into proper default types
                         def clean_nulls(obj):
                             if isinstance(obj, list): return [clean_nulls(x) for x in obj]
                             if isinstance(obj, dict):
-                                for k, v in obj.items():
+                                # Use list() to avoid dictionary changed size during iteration errors
+                                for k, v in list(obj.items()):
                                     if v is None:
-                                        if k in ('queue_time', 'ai_time', 'confidence', 'original_msg_id'):
-                                            pass
+                                        if k in ('queue_time', 'ai_time'):
+                                            pass # These are Optional[float] in the schema
+                                        elif k == 'confidence':
+                                            obj[k] = 1.0
+                                        elif k == 'original_msg_id':
+                                            obj[k] = 0
                                         else:
                                             obj[k] = ""
-                                    else: obj[k] = clean_nulls(v)
+                                    else:
+                                        obj[k] = clean_nulls(v)
                             return obj
                         
                         raw = clean_nulls(raw)
