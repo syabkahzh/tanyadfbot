@@ -690,10 +690,10 @@ class GeminiProcessor:
                 provider_filter = "google" if is_vision else None
                 
                 # CRITICAL FIX: Provider-Level Banning
-                # If the server timed out or threw a 50x error, ban the ENTIRE provider for the retry chain
+                # If the server timed out, threw a 50x error, or a 400 bad request (like a dead model), ban the ENTIRE provider
                 exclude_list = list(tried)
                 err_str = str(e).lower()
-                is_server_death = isinstance(e, (asyncio.TimeoutError, TimeoutError)) or "timeout" in err_str or "50" in err_str
+                is_server_death = isinstance(e, (asyncio.TimeoutError, TimeoutError)) or "timeout" in err_str or "50" in err_str or "400" in err_str
                 
                 if is_server_death and not (is_vision and slot.provider == "google"):
                     for n, s in self._slots.items():

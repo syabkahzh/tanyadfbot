@@ -26,7 +26,7 @@
     {
         "name": "groq-qwen-32b",
         "provider": "groq",
-        "model_id": "qwen-2.5-32b",
+        "model_id": "qwen/qwen3-32b",
         "api_key_env": "GROQ_API_KEY",
         "rpm": 60,
         "rpd": 1000,
