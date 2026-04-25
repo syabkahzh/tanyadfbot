@@ -300,55 +300,6 @@ class TelegramBot:
 
         # AI signals
         total_limit = sum(s.limit for s in self.gemini._slots.values())
-        
-    @_owner_only
-    async def cmd_fleet(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Displays and manages the AI fleet priorities."""
-        msg = update.message if update.message else update.callback_query.message if update.callback_query else None
-        if not msg: return
-        
-        import time as _time
-        army = self.gemini._slots
-        
-        lines = ["🤖 **AI Fleet Management**\n"]
-        buttons = []
-        
-        # Group models by provider for cleaner UI
-        by_provider = {}
-        for name, slot in army.items():
-            by_provider.setdefault(slot.provider, []).append(slot)
-            
-        for provider, slots in sorted(by_provider.items()):
-            lines.append(f"🔹 **{provider.upper()}**")
-            for s in sorted(slots, key=lambda x: x.priority):
-                status = "✅" if s.available(_time.monotonic()) > 0 else "⏳"
-                lines.append(f"  {status} `{s.name}` (P{s.priority})")
-                
-                # Button to toggle priority (1 or 2)
-                next_p = 2 if s.priority == 1 else 1
-                buttons.append([InlineKeyboardButton(
-                    f"Set {s.name} to P{next_p}", 
-                    callback_data=f"fleet_prio:{s.name}:{next_p}"
-                )])
-        
-        reply_markup = InlineKeyboardMarkup(buttons)
-        text = "\n".join(lines)
-        safe_text, entities = convert(text)
-        
-        if update.message:
-            await self._retry_tg(update.message.reply_text,
-                safe_text,
-                entities=[e.to_dict() for e in entities],
-                reply_markup=reply_markup,
-                link_preview_options=LinkPreviewOptions(is_disabled=True)
-            )
-        elif update.callback_query:
-            await self._retry_tg(update.callback_query.edit_message_text,
-                safe_text,
-                entities=[e.to_dict() for e in entities],
-                reply_markup=reply_markup,
-                link_preview_options=LinkPreviewOptions(is_disabled=True)
-            )
         total_active = sum(s.current_usage() for s in self.gemini._slots.values())
         headroom_pct = 1.0 - (total_active / max(total_limit, 1))
 
@@ -383,6 +334,56 @@ class TelegramBot:
             f"**Verdict:** {verdict}"
         )
         await self._send_markdown(update, text)
+
+    @_owner_only
+    async def cmd_fleet(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Displays and manages the AI fleet priorities."""
+        msg = update.message if update.message else update.callback_query.message if update.callback_query else None
+        if not msg:
+            return
+
+        import time as _time
+        army = self.gemini._slots
+
+        lines = ["🤖 **AI Fleet Management**\n"]
+        buttons = []
+
+        # Group models by provider for cleaner UI
+        by_provider: dict[str, list[Any]] = {}
+        for name, slot in army.items():
+            by_provider.setdefault(slot.provider, []).append(slot)
+
+        for provider, slots in sorted(by_provider.items()):
+            lines.append(f"🔹 **{provider.upper()}**")
+            for s in sorted(slots, key=lambda x: x.priority):
+                status = "✅" if s.available(_time.monotonic()) > 0 else "⏳"
+                lines.append(f"  {status} `{s.name}` (P{s.priority})")
+
+                # Cycle priority 1 -> 2 -> 3 -> 1
+                next_p = (s.priority % 3) + 1
+                buttons.append([InlineKeyboardButton(
+                    f"Set {s.name} to P{next_p}",
+                    callback_data=f"fleet_prio:{s.name}:{next_p}"
+                )])
+
+        reply_markup = InlineKeyboardMarkup(buttons)
+        text = "\n".join(lines)
+        safe_text, entities = convert(text)
+
+        if update.message:
+            await self._retry_tg(update.message.reply_text,
+                safe_text,
+                entities=[e.to_dict() for e in entities],
+                reply_markup=reply_markup,
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
+        elif update.callback_query:
+            await self._retry_tg(update.callback_query.edit_message_text,
+                safe_text,
+                entities=[e.to_dict() for e in entities],
+                reply_markup=reply_markup,
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
 
     @_owner_only
     async def cmd_today(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -604,7 +605,7 @@ class TelegramBot:
             parts = data.split(":")
             name = parts[1]
             prio = int(parts[2])
-            
+
             success = self.gemini.update_model_priority(name, prio)
             if success:
                 # Re-render the fleet menu
@@ -1091,4 +1092,3 @@ def _to_wib(ts_str: str) -> str:
         return dt.astimezone(WIB).strftime('%H:%M:%S')
     except Exception:
         return "??:??:??"
-

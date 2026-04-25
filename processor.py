@@ -98,55 +98,35 @@ class TrendResponse(BaseModel):
 
 # ── Prompt constants ──────────────────────────────────────────────────────────
 
-_EXTRACT_SYSTEM = """Kamu ekstrak promo dari percakapan grup deal hunter Indonesia (Discountfess).
+_EXTRACT_SYSTEM = """Kamu sistem ekstraksi data promo dari grup deal-hunter Indonesia (Discountfess).
+Fokus utama: deteksi apakah pesan menginformasikan keberhasilan/kegagalan promo, atau membagikan promo baru.
 
-ISTILAH KUNCI: mm=Mall Monday, bs=BerburuSales, nt=gagal/expired, jp=jackpot, sfood=ShopeeFood, gfood=GoFood,
-tukpo=Tokopedia, murce=murah meriah, sopi=Shopee, tsel=Telkomsel, badut=beli-ada-duit (cashback trick)
+INPUT FORMAT:
+ID:<id> C:<konteks pesan yang dibalas jika ada> MSG:<pesan utama user>
 
-STATUS: active jika ada "aman/on/jp/work/restock/berhasil/nyala/cair/lancar/masuk/cek/info/makasih" | expired jika "abis/nt/sold out/ga bisa/koid/hangus/zonk" | unknown jika ambigu
+ATURAN KONTEKS (C: vs MSG:):
+- `MSG:` adalah pesan dari user saat ini. Ini adalah penentu utama.
+- `C:` adalah pesan sebelumnya yang dibalas oleh user.
+- Gunakan `C:` HANYA untuk mencari tahu brand apa yang sedang dibahas jika `MSG:` berupa konfirmasi pendek, misalnya `MSG: aman kak` dan `C: sfood 50%`.
+- JANGAN mengekstrak promo dari `C:` jika `MSG:` hanyalah pertanyaan murni, misalnya `MSG: ini gimana caranya?` dengan `C: promo gopay`. Output wajib = SKIP.
+- Jika `MSG:` berisi validasi seperti `jp`, `nyala`, atau `udah habis`, maka ekstrak promo dengan memakai brand/info dari `C:`.
 
-ATURAN UTAMA:
-1. Pahami konteks obrolan (slang). Jika pengguna bilang "nyala", "on", "cair", "masuk", "cek", "info", "makasih", atau "udah pake" terkait suatu brand, itu ADALAH event promo yang valid. Ekstrak sebagai active.
-2. JANGAN MEMAKSAKAN ANGKA KONKRET. Jika diskon/harga tidak disebutkan tapi status promo jelas aktif, biarkan field harga null/kosong, tetapi TETAP ekstrak sebagai data valid.
-3. Abaikan obrolan OOT (Out of Topic) seperti review barang fisik (parfum, makanan tanpa konteks promo), keluhan rute/kurir, atau curhatan non-promo.
+ISTILAH KUNCI SLANG:
+- ACTIVE: aman, on, jp, work, nyala, cair, masuk, luber, pecah, nyantol, dapet.
+- EXPIRED: abis, habis, nt, sold out, zonk, gabisa, limit, koid.
+- BRAND: sfood/spud=ShopeeFood, gfood=GoFood, tukpo/toped=Tokopedia, sopi=Shopee, tsel=Telkomsel, idm=Indomaret, afm/jsm/psm=Alfamart.
 
-EKSTRAK jika: ada sinyal aktif/expired + info brand/platform (bahkan tanpa angka harga/diskon). SKIP jika: pertanyaan murni, OOT, curhat tanpa info promo.
-JANGAN EKSTRAK: form isi data pribadi (NIK/KTP/alamat), kuis berhadiah yang butuh upload foto/data, konten OOT.
+ATURAN EKSTRAKSI (WAJIB DIIKUTI):
+1. Brand harus konsisten. Metode bayar (ShopeePay, OVO, DANA) = `conditions`, bukan brand, kecuali promo aplikasi murni tanpa merchant spesifik.
+2. Status: `active` (berhasil/ada), `expired` (habis/gagal), `unknown` (ambigu).
+3. Summary: 1 kalimat padat, misalnya `ShopeeFood diskon 50k aktif.` Jangan berisi meta-deskripsi seperti `User menanyakan promo`.
+4. Jika bukan promo, wajib isi `brand="SKIP"` dan `summary="SKIP"`.
 
-Context ditulis sebagai C: sebelum MSG: — gunakan untuk resolve brand jika pesan utama cuma "aman" atau "on".
-Summary: 1 kalimat informatif, sertakan harga/diskon jika ada. Jika tidak ada angka, cukup sebutkan status + brand.
-Brand: Gunakan nama yang konsisten — "HopHop" bukan "Hophop". Jika ragu → "Unknown" (bukan "sunknown" atau variasi lain).
-
-PENTING: Jika kamu tidak yakin ada promo nyata, JANGAN isi summary with deskripsi tentang pesan itu sendiri seperti "User bertanya tentang..." atau "Pesan ini membahas...". Lebih baik SKIP sama sekali.
-
-ATURAN BRAND (PENTING — sering salah):
-- `brand` = MERCHANT/TOKO tempat promo ditebus, BUKAN metode pembayaran.
-- Metode pembayaran (ShopeePay/Spay, GoPay, DANA, OVO, AstraPay, kartu kredit, QRIS) masuk ke `conditions`, TIDAK PERNAH jadi `brand` kecuali promo itu murni promo aplikasi dompet tanpa merchant spesifik.
-- Struk/bukti transaksi: brand = nama toko di struk. Contoh: struk "AFM RAYA TUBAN" (AFM = Alfamart) + banner "Cashback Saldo ShopeePay" → brand = **Alfamart**, conditions menyebut ShopeePay.
-- Singkatan struk yang umum: `AFM` = Alfamart, `IDM` = Indomaret, `AFMD` = Alfamidi.
-- Slang caption: `jsm` (Jumat Sabtu Minggu) & `psm` (Promo Spesial Minggu) selalu berarti Alfamart. Caption "aman jsm" pada struk = konfirmasi promo Alfamart JSM berhasil.
-- Cross-promo (toko × dompet): `brand` = toko. Jika bingung mana toko mana dompet, pilih yang muncul di bagian BADGE/HEADER struk atau logo fisik toko, bukan logo banner promosi di atasnya.
-
-ATURAN OUTPUT:
-- Jika SKIP: {"summary": "SKIP", "brand": "SKIP", "conditions": "", "valid_until": "", "status": "unknown", "original_msg_id": 0}
-- Jika promo valid: summary 1 kalimat padat dengan brand + status. Sertakan harga/diskon jika disebutkan, tapi boleh kosong jika status jelas.
-- Confidence: Berikan skor 0.0 - 1.0. Skor tinggi (>0.85) jika ada bukti kuat (struk/screenshot/keyword jelas). Skor rendah (<0.7) jika ambigu atau cuma diskusi singkat tanpa bukti konkrit.
-- Brand: nama konsisten (Alfamart, Indomaret, Tokopedia, Shopee, ShopeeFood, GoFood, ShopeePay, GoPay, Solaria, CGV, Telkomsel, dll). "Unknown" hanya jika benar-benar tidak jelas.
-
-CONTOH YANG HARUS DI-SKIP:
-- 'wkwkwk iya bener' → OOT
-- 'hasilnya masih sama kak' → konteks tidak cukup, skip
-- 'mau tanya dong, masih on gak?' → pertanyaan murni
-- 'noted makasih' → bukan promo
-- 'aman kak rutenya' → OOT (transportasi, bukan promo)
-
-CONTOH YANG HARUS DIEKSTRAK:
-- 'sfood masih on 40k dapet 2' → active, ShopeeFood
-- 'gobiz 30% off s/d jam 12 aman dicoba' → active, GoBiz
-- 'NT gaes, udah abis' → expired, status flip
-- 'tsel nyala' → active, Telkomsel (tanpa angka pun tetap valid)
-- 'sopi cair' → active, Shopee (status jelas aktif meski tanpa angka)
-- 'cgv on ges' → active, CGV"""
+WAJIB SKIP JIKA `MSG:` ADALAH:
+- Pertanyaan murni, misalnya `masih bisa?` atau `caranya gimana?`
+- OOT / curhat, misalnya `lagi di jalan`, `wkwk`, `iya makasih`
+- Tidak jelas membahas promo apa sama sekali.
+"""
 
 _DEDUP_SYSTEM = "Kamu agen deteksi duplikasi. Output HANYA angka indeks dipisah koma."
 
@@ -154,30 +134,28 @@ _DIGEST_SYSTEM = "Kamu asisten ringkasan promo Indonesia. Jawab singkat dan info
 
 _VISION_SYSTEM = """Kamu analis visual grup promo Indonesia (Discountfess).
 
-TUGASMU: Tentukan apakah gambar ini berisi informasi promo yang bisa dimanfaatkan, lalu ekstrak detailnya.
+TUGASMU: Ekstrak detail promo hanya dari gambar yang diberikan.
 
-PROMO VALID — ekstrak jika gambar berisi:
+ATURAN CAPTION & GAMBAR:
+- Jika caption berupa pertanyaan, misalnya `ini promo bukan?` atau `cara makenya gimana?`, abaikan caption tersebut. Jangan langsung di-skip, lihat isi gambarnya.
+- Jika gambar berisi poster diskon, voucher aktif, atau struk keberhasilan, ekstrak data tersebut meskipun captionnya bertanya.
+- Jika gambar berupa meme, foto pribadi, atau screenshot OOT, barulah output SKIP.
+
+PROMO VALID - ekstrak jika gambar berisi:
 - Poster/banner promo brand (diskon, cashback, voucher, harga spesial)
 - Screenshot aplikasi yang menampilkan harga/voucher/deal aktif
-- Bukti transaksi with promo (struk, order confirmation with diskon)
-- Screenshot chat/grup yang membahas promo konkret with angka/brand jelas
+- Bukti transaksi (struk, order confirmation)
 
 TOLAK (isi summary="SKIP", brand="SKIP") jika gambar adalah:
 - Screenshot settings/UI aplikasi tanpa info promo
-- Foto makanan/produk biasa tanpa harga promo
-- Meme, stiker, foto personal
-- Screenshot chat yang tidak membahas promo konkret
-- Gambar blur/tidak jelas
-- Konten OOT apapun
-
-PENTING (KASUS PERTANYAAN):
-Jika caption berbentuk pertanyaan (misal: "lazlive jadwalnya ini kah??" atau "ini promo bukan?"), JANGAN LANGSUNG DI-SKIP. Periksa gambarnya! Jika gambar tersebut valid (poster jadwal, screenshot diskon/voucher), maka EKSTRAK informasinya. Anggap caption pertanyaan tersebut sebagai cara user membagikan info.
+- Foto produk fisik tanpa harga promo, misalnya foto kopi biasa
+- Screenshot chat/grup tanpa bukti promo konkret
 
 ATURAN OUTPUT:
 - Jika SKIP: {"summary": "SKIP", "brand": "SKIP", "conditions": "", "valid_until": "", "status": "unknown", "original_msg_id": 0, "confidence": 0.0}
-- Jika promo valid: summary 1 kalimat padat dengan brand + diskon/harga + syarat utama
-- Brand: nama konsisten, "Unknown" jika tidak jelas tapi promo valid
-- Confidence: Berikan skor 0.0 - 1.0 berdasarkan tingkat kepastian bahwa gambar tersebut adalah promo nyata. (0.9+ untuk poster resmi/struk jelas, <0.7 untuk gambar samar/tidak meyakinkan)"""
+- Jika valid: summary 1 kalimat padat, berisi brand + diskon/harga + syarat.
+- Confidence: 0.9+ untuk poster resmi/struk jelas, <0.7 untuk gambar samar.
+"""
 
 
 
