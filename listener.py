@@ -188,7 +188,10 @@ class TelethonListener:
 
         # If brand found explicitly, update temporal context for future messages
         if brand != "Unknown":
-            await context_tracker.update_brand(chat_id, brand)
+            try:
+                async with asyncio.timeout(0.5):
+                    await context_tracker.update_brand(chat_id, brand)
+            except Exception: pass
 
         if brand == "Unknown" and message_data.get('reply_to_msg_id'):
             try:
@@ -202,13 +205,19 @@ class TelethonListener:
                             parent_text = row['text']
                 brand = normalize_brand(_guess_brand(parent_text or text))
                 if brand != "Unknown":
-                    await context_tracker.update_brand(chat_id, brand)
+                    try:
+                        async with asyncio.timeout(0.5):
+                            await context_tracker.update_brand(chat_id, brand)
+                    except Exception: pass
             except (asyncio.TimeoutError, Exception):
                 pass   # stay Unknown — fast-path may skip, that's fine
 
         # Temporal context fallback: inherit brand from recent conversation
         if brand == "Unknown":
-            brand = await context_tracker.get_context(chat_id)
+            try:
+                async with asyncio.timeout(0.5):
+                    brand = await context_tracker.get_context(chat_id)
+            except Exception: pass
 
         # Strict: ambiguous signals require a known brand (unless ALL-CAPS shout or promo code)
         AMBIGUOUS = {
@@ -258,9 +267,10 @@ class TelethonListener:
 
         # Velocity tag — flag viral promos without an extra AI call
         try:
-            velocity = await self.db.get_brand_velocity(brand, minutes=5)
-            if velocity >= 100: # NEW: raised to 100/5m (20/min)
-                summary = f"🔥 RAMAI ({velocity} msg/5m) — {summary}"
+            async with asyncio.timeout(0.5):
+                velocity = await self.db.get_brand_velocity(brand, minutes=5)
+                if velocity >= 100: # NEW: raised to 100/5m (20/min)
+                    summary = f"🔥 RAMAI ({velocity} msg/5m) — {summary}"
         except Exception:
             pass
 

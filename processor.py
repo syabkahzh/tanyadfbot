@@ -318,6 +318,8 @@ class OpenAICompatibleClient(BaseAIClient):
         parsed = None
         if response_schema and text:
             try:
+                # CRITICAL FIX: Strip Qwen/DeepSeek reasoning tags before parsing
+                text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
                 clean_text = re.sub(r'^```json\s*|\s*```$', '', text.strip(), flags=re.MULTILINE)
                 import json
                 try:
@@ -674,12 +676,20 @@ class GeminiProcessor:
 
             # Dynamic 429 Rate Limit Handling
             if "429" in err_str or "rate limit" in err_str:
-                if "per day" in err_str or "tpd" in err_str or "rpd" in err_str:
-                    logger.error(f"🚨 {slot.name} hit DAILY limit. Sleeping for 6 hours.")
-                    slot.exhausted_until = time.monotonic() + (3600 * 6)
-                else:
-                    logger.warning(f"⏳ {slot.name} hit MINUTE limit. Sleeping for 60s.")
-                    slot.exhausted_until = time.monotonic() + 60.0
+                sleep_sec = 60.0 # Fallback default
+                
+                # CRITICAL FIX: Parse Groq's exact reset timer (e.g., "try again in 17m16.8s")
+                wait_match = re.search(r'try again in (?(\d+)h)?(?(\d+)m)?(?:([\d.]+)s)', err_str)
+                if wait_match:
+                    h = int(wait_match.group(1) or 0)
+                    m = int(wait_match.group(2) or 0)
+                    s = float(wait_match.group(3) or 0)
+                    sleep_sec = (h * 3600) + (m * 60) + s + 2.0 # Add 2s buffer
+                elif "per day" in err_str or "tpd" in err_str or "rpd" in err_str:
+                    sleep_sec = 3600 * 6
+                    
+                logger.warning(f"⏳ [{slot.name}] Rate Limited by provider. Sleeping exactly {sleep_sec:.1f}s.")
+                slot.exhausted_until = time.monotonic() + sleep_sec
 
             if attempt < max_attempts:
                 # Determine if vision is needed
