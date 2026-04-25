@@ -167,8 +167,14 @@ class TelegramBot:
         import psutil
         import os
         process = psutil.Process(os.getpid())
-        ram_mb  = process.memory_info().rss / (1024 * 1024)
-        cpu_usage = psutil.cpu_percent()
+        ram_mb  = process.memory_info().rss / (1024 * 1024) # Bot RAM
+        sys_mem = psutil.virtual_memory()
+        sys_ram_used_mb = sys_mem.used / (1024 * 1024)
+        sys_ram_total_mb = sys_mem.total / (1024 * 1024)
+        sys_ram_pct = sys_mem.percent
+        
+        # Get accurate CPU (interval=0.1 blocks for 100ms, which is fine for /status)
+        cpu_usage = psutil.cpu_percent(interval=0.1)
 
         # 4. Triage Status
         from main import _queue_emergency_mode
@@ -225,7 +231,8 @@ class TelegramBot:
             f"{recent_log}\n\n"
             f"💻 **System:**\n"
             f"📁 DB Size: `{db_size_mb:.1f} MB`\n"
-            f"🧠 RAM: `{ram_mb:.1f} MB`\n"
+            f"🧠 Bot RAM: `{ram_mb:.1f} MB`\n"
+            f"🖥️ Sys RAM: `{sys_ram_used_mb:.1f}/{sys_ram_total_mb:.1f} MB` ({sys_ram_pct}%)\n"
             f"⚡ CPU: `{cpu_usage:.1f}%`"
         )
         safe_text, entities = convert(text)
