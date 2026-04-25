@@ -165,10 +165,15 @@ TOLAK (isi summary="SKIP", brand="SKIP") jika gambar adalah:
 - Gambar blur/tidak jelas
 - Konten OOT apapun
 
+PENTING (KASUS PERTANYAAN):
+Jika caption berbentuk pertanyaan (misal: "lazlive jadwalnya ini kah??" atau "ini promo bukan?"), JANGAN LANGSUNG DI-SKIP. Periksa gambarnya! Jika gambar tersebut valid (poster jadwal, screenshot diskon/voucher), maka EKSTRAK informasinya. Anggap caption pertanyaan tersebut sebagai cara user membagikan info.
+
 ATURAN OUTPUT:
-- Jika SKIP: {"summary": "SKIP", "brand": "SKIP", "conditions": "", "valid_until": "", "status": "unknown", "original_msg_id": 0}
+- Jika SKIP: {"summary": "SKIP", "brand": "SKIP", "conditions": "", "valid_until": "", "status": "unknown", "original_msg_id": 0, "confidence": 0.0}
 - Jika promo valid: summary 1 kalimat padat dengan brand + diskon/harga + syarat utama
-- Brand: nama konsisten, "Unknown" jika tidak jelas tapi promo valid"""
+- Brand: nama konsisten, "Unknown" jika tidak jelas tapi promo valid
+- Confidence: Berikan skor 0.0 - 1.0 berdasarkan tingkat kepastian bahwa gambar tersebut adalah promo nyata. (0.9+ untuk poster resmi/struk jelas, <0.7 untuk gambar samar/tidak meyakinkan)"""
+
 
 
 # ── Pre-filter keyword sets ───────────────────────────────────────────────────
