@@ -68,13 +68,13 @@ _META_SUMMARY_PATTERN = re.compile(
 
 class PromoExtraction(BaseModel):
     """Structured promotion data extracted from chat text or images."""
-    original_msg_id: int
-    summary: str = Field(description="1 kalimat ringkasan WAJIB DALAM BAHASA INDONESIA. Isi 'SKIP' jika bukan promo.")
-    brand: str = Field(description="Nama brand yang tepat, atau 'SKIP'.")
+    original_msg_id: int = 0
+    summary: str = Field(default="", description="1 kalimat ringkasan WAJIB DALAM BAHASA INDONESIA. Isi 'SKIP' jika bukan promo.")
+    brand: str = Field(default="", description="Nama brand yang tepat, atau 'SKIP'.")
     conditions: str = Field(default="", description="Syarat dan ketentuan DALAM BAHASA INDONESIA, atau string kosong.")
     valid_until: Optional[str] = ""
     # CRITICAL FIX: Forcing strict enums mathematically prevents hallucinated statuses
-    status: Literal['active', 'expired', 'unknown'] = Field(description="Strictly select one.")
+    status: Literal['active', 'expired', 'unknown'] = Field(default='unknown', description="Strictly select one.")
     confidence: float = Field(default=1.0, description="Confidence score from 0.0 to 1.0.")
     links: List[str] = []
     detected_at: Optional[str] = None
@@ -679,7 +679,7 @@ class GeminiProcessor:
                 sleep_sec = 60.0 # Fallback default
                 
                 # CRITICAL FIX: Parse Groq's exact reset timer (e.g., "try again in 17m16.8s")
-                wait_match = re.search(r'try again in (?(\d+)h)?(?(\d+)m)?(?:([\d.]+)s)', err_str)
+                wait_match = re.search(r'try again in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)', err_str)
                 if wait_match:
                     h = int(wait_match.group(1) or 0)
                     m = int(wait_match.group(2) or 0)
