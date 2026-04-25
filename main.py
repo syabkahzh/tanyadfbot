@@ -68,6 +68,19 @@ _META_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# Level 2 Safeguard: Protect strong signals from model error
+_PROTECTED_SIGNALS = re.compile(
+    r'\b(jsm|psm|luber|pecah|cair|'
+    r'murce|murmer|big|badut|syarat|snk|serbu|'
+    r'alhamdulillah|alhamdullilah|alhamd|almd|tembus|dapet|'
+    r'unlimited|kuota|prioritas|paket|pembelian|erafone|ibox|samsung|'
+    r'yang butuh aja|ymma|neo|'
+    r'iklan|klaim|goco|ultravoucher|uv|fitbar|watsons|cinepolis|bogo)\b', 
+    re.IGNORECASE
+)
+
+_MARKETPLACE_URLS = re.compile(r'https?://(?!t\.me)[^\s]+', re.IGNORECASE)
+
 
 # ── Queue triage ───────────────────────────────────────────────────────────────
 
@@ -100,14 +113,31 @@ async def _auto_triage_queue() -> None:
         rows = await cur.fetchall()
 
     discard_ids: list[int] = []
+    candidates = []
     for r in rows:
         if r['id'] in current_in_progress:
             continue
         text = r['text'] or ''
         if not gemini._is_worth_checking(text):
             discard_ids.append(r['id'])
+        else:
+            candidates.append(r)
         if len(discard_ids) >= triage_limit:
             break
+
+    # Deep semantic triage during high pressure
+    if queue > 200 and candidates and len(discard_ids) < triage_limit:
+        texts = [c['text'] or "" for c in candidates]
+        results = await shared.classify_batch(texts)
+        for c, (label, conf) in zip(candidates, results):
+            # FastText is very accurate, we can afford to be aggressive during triage
+            if label == "__label__JUNK" and conf >= 0.85:
+                # Unless it has a protected signal
+                text = c['text'] or ""
+                if not (_PROTECTED_SIGNALS.search(text) or _MARKETPLACE_URLS.search(text)):
+                    discard_ids.append(c['id'])
+                    if len(discard_ids) >= triage_limit:
+                        break
 
     if discard_ids:
         await db.mark_batch_processed(discard_ids, skip_reason="triage")
@@ -324,9 +354,9 @@ async def processing_loop() -> None:
             headroom_pct = max(0.0, 1.0 - (total_used / max(total_cap, 1)))
 
             if _queue_emergency_mode:
-                batch_size = int(15 + 10 * headroom_pct)
+                batch_size = int(40 + 20 * headroom_pct)
             else:
-                batch_size = int(10 + 10 * headroom_pct)
+                batch_size = int(25 + 15 * headroom_pct)
 
             # Optimization: Fetch candidates OUTSIDE of the lock to minimize contention
             ancient_reserve = int(batch_size * 0.3)
@@ -369,26 +399,14 @@ async def processing_loop() -> None:
                 await asyncio.sleep(2)
                 continue
 
-            # PRE-FILTER OPTIMIZATION: 
+            # PRE-FILTER OPTIMIZATION:
             to_ai = []
             regex_noise_ids = []
             fasttext_noise_ids = []
-            
-            # Level 2 Safeguard: Protect strong signals from model error
-            _PROTECTED_SIGNALS = re.compile(
-                r'\b(jsm|psm|aman|on|jp|work|luber|pecah|cair|nyala|'
-                r'berhasil|lancar|masuk|murce|murmer|big|badut|syarat|snk|serbu|'
-                r'alhamdulillah|alhamdullilah|alhamd|almd|tembus|dapet|'
-                r'unlimited|kuota|prioritas|paket|pembelian|erafone|ibox|samsung|'
-                r'yang butuh aja|ymma|cek|'
-                r'iklan|klaim|goco|ultravoucher|uv|fitbar|watsons|cinepolis|bogo)\b', 
-                re.IGNORECASE
-            )
-            
-            _MARKETPLACE_URLS = re.compile(r'https?://(?!t\.me)[^\s]+', re.IGNORECASE)
-            
+
             candidates = []
             for r in combined:
+
                 text = r['text'] or ""
                 has_photo = bool(r['has_photo'])
                 # Tier 1: Dumb Regex (Zero cost)
@@ -529,6 +547,7 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("telegram.ext").setLevel(logging.WARNING)
+    logging.getLogger("telegram.request").setLevel(logging.ERROR)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     if not Config.validate(): sys.exit(1)
 

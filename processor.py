@@ -202,11 +202,13 @@ _STRONG_KEYWORDS: set[str] = {
     'luber','pecah','flash','sale','deal','murah','hemat','bonus',
     'ongkir','gratis ongkir',
     'membership','member','mamber',
-    'cek','info',
-    'makasih','thx','thanks','makasi','mks','terimakasih',
     'yang butuh aja','ymma',
     'tukpo','murce','murmer','sopi','tsel','cgv','xxi','svip','badut','war','begal','kreator','live kreator',
     'kopken','chatime','gindaco','solaria','rotio','spx','gopay','spay','shopeepay','ovo','neo','tmrw','saqu','seabank','hero',
+}
+
+_WEAK_KEYWORDS: set[str] = {
+    'cek', 'info', 'makasih', 'thx', 'thanks', 'makasi', 'mks', 'terimakasih', 'terima kasih'
 }
 
 _JUNK_SUMMARIES: set[str] = {'summary','none','n/a','-','tidak ada','tidak ditemukan'}
@@ -470,6 +472,8 @@ class GeminiProcessor:
         # Strong indicators (+)
         if any(kw in t for kw in _STRONG_KEYWORDS):
             score += 10
+        if any(kw in t for kw in _WEAK_KEYWORDS):
+            score += 3
         if _WORD_BOUNDARY_KEYWORDS.search(t):
             score += 5
         if bool(_PROMO.search(t)):
