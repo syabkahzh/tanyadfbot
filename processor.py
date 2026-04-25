@@ -74,7 +74,7 @@ class PromoExtraction(BaseModel):
     conditions: str
     valid_until: str
     status: Literal["active", "expired", "unknown"]
-    confidence: float # 0.0 to 1.0 based on AI certainty
+    confidence: float = 1.0 # 0.0 to 1.0 based on AI certainty
     links: List[str] = []
     detected_at: Optional[str] = None
     queue_time: Optional[float] = None

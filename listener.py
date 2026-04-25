@@ -14,6 +14,7 @@ import asyncio
 from telethon import TelegramClient, events
 from config import Config
 from datetime import datetime, timedelta, timezone
+import shared
 
 # ── Pre-compiled Patterns (Performance Optimization) ─────────────────────────
 TIME_PATTERN = re.compile(
@@ -119,7 +120,6 @@ class TelethonListener:
         )
         from db import normalize_brand
         from processor import PromoExtraction
-        import shared
 
         text       = (message_data.get('text') or '').strip()
         text_lower = text.lower()
@@ -366,8 +366,7 @@ class TelethonListener:
                 return
             # Record ingest timestamp BEFORE dispatch so /diag has an accurate
             # "time since last message" signal even if downstream tasks error.
-            import shared as _shared
-            _shared.mark_message_ingested()
+            shared.mark_message_ingested()
             # Fast-path as its OWN task - never waits for DB save
             asyncio.create_task(self._handle_fast_path_standalone(event))
             # DB save as separate task - never blocks fast-path
