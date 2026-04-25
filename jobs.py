@@ -234,9 +234,8 @@ async def hourly_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegram
 
         if not rows:
             await bot.send_plain(
-                f"📊 <b>Digest {hour_label}</b>\n\n"
-                "😴 Tidak ada promo yang terdeteksi 1 jam terakhir.",
-                parse_mode='HTML'
+                f"📊 **Digest {hour_label}**\n\n"
+                "😴 Tidak ada promo yang terdeteksi 1 jam terakhir."
             )
             return
 
@@ -347,7 +346,7 @@ async def halfhour_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
             brand     = (r['brand'] if r['brand']
                          and r['brand'].lower() not in ('unknown', 'sunknown', '') else '❓')
             fast_tag  = " ⚡" if r['via_fastpath'] else ""
-            link_part = f" <a href='{r['tg_link']}'>[→]</a>" if r['tg_link'] else ""
+            link_part = f" [→]({r['tg_link']})" if r['tg_link'] else ""
             lines.append(
                 f"• **{brand}**{fast_tag}: "
                 f"{r['summary']}{link_part}"
@@ -1236,4 +1235,6 @@ async def visual_trend_job(db: Database, bot: TelegramBot) -> None:
     except Exception as e:
         logger.error(f"visual_trend_job error: {e}", exc_info=True)
         await bot.alert_error("visual_trend_job", e)
+
+", e)
 

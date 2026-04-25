@@ -577,8 +577,8 @@ async def main() -> None:
     fixed_pending = [f for f in pending if f['fixed'] and not f['retried']]
     if fixed_pending:
         count = len(fixed_pending)
-        msg = (f"🔄 <b>Startup Recovery</b>\n\nFound {count} errors marked as fixed.")
-        await bot.send_plain(msg, parse_mode='HTML')
+        msg = (f"🔄 **Startup Recovery**\n\nFound {count} errors marked as fixed.")
+        await bot.send_plain(msg)
 
     await bot.app.updater.start_polling()
     asyncio.create_task(processing_loop())
