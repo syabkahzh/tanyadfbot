@@ -29,6 +29,11 @@ _NON_PROMO = re.compile(
     r'\b(setting|pengaturan|config|tutorial|cara|gimana|help|tolong|ini kak|'
     r'oot|random|foto|selfie|meme|lucu|haha|wkwk)\b', re.IGNORECASE
 )
+_PURE_QUESTION_PATTERN = re.compile(
+    r'^(kak|ka|guys?|gais|ges|gaes|bun|mba|mas|bang)\s+'
+    r'(ada|mau|bisa|boleh|tanya|gimana|berapa|kapan|dimana|apa|gmn|brp)\b',
+    re.IGNORECASE
+)
 _PROMO = re.compile(
     r'\b(promo|diskon|cashback|voucher|gratis|murah|hemat|sale|off|deal|potongan|'
     r'sfood|gfood|grab|shopee|gojek|aman|on|jp|work|flash|limit|idm|alfa|indomaret|'
@@ -491,7 +496,7 @@ class GeminiProcessor:
         if len(words) <= 4 and score < 5:
             return False
 
-        return score > 0
+        return score > 2
 
     async def process_batch(self, messages: Sequence[dict[str, Any]], db: Any = None) -> list[PromoExtraction] | None:
         """Extracts promos from a batch of messages using AI."""

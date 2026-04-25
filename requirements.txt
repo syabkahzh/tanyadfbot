@@ -10,3 +10,4 @@ psutil
 fasttext-wheel
 numpy
 telegramify-markdown
+matplotlib

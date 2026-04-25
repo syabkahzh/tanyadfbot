@@ -845,7 +845,7 @@ async def trend_job(db: Database, gemini: GeminiProcessor, bot: TelegramBot) -> 
         
         try:
             async with asyncio.timeout(60):
-                trends = await gemini.generate_narrative(msgs, db=db)
+                trends = await gemini.generate_narrative([dict(m) for m in msgs], db=db)
         except TimeoutError:
             logger.warning("AI timeout in trend_job. Skipping.")
             return

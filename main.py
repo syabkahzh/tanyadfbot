@@ -56,7 +56,7 @@ _IN_PROGRESS_MAX_AGE_SEC: float = 130.0
 _alerted_hot_threads: dict[int, tuple[int, datetime]] = {}
 _triage_cycle_counter: int   = 0
 
-_AI_MAX_INFLIGHT: int = 16
+_AI_MAX_INFLIGHT: int = 8
 _AI_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(_AI_MAX_INFLIGHT)
 
 _active_spawn_tasks: set[asyncio.Task] = set()
@@ -427,7 +427,7 @@ async def processing_loop() -> None:
                             "tg_msg_id":        r['tg_msg_id'],
                             "chat_id":          r['chat_id'],
                             "reply_to_msg_id":  r['reply_to_msg_id'],
-                            "has_photo":        r['has_photo'],
+                            "has_photo":        bool(r['has_photo']) if 'has_photo' in r.keys() else False,
                         })
 
             if regex_noise_ids:
