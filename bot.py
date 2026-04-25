@@ -351,9 +351,11 @@ class TelegramBot:
         
         for i, r in enumerate(rows):
             clean_text = (r['text'] or "").replace('\n', ' ')[:50]
-            # Use icons for the list items
-            idx_icon = ["①","②","③","④","⑤","⑥","⑦","⑧","⑨","⑩"][i]
-            lines.append(f"{idx_icon} `{clean_text}...`")
+            # Use standard number emojis
+            idx_icon = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"][i]
+            
+            # Use raw text without markdown for the snippet
+            lines.append(f"{idx_icon} {clean_text}...")
             row_buttons.append(InlineKeyboardButton(idx_icon, callback_data=f"inspect_{r['id']}"))
             if len(row_buttons) == 5:
                 buttons.append(row_buttons)
