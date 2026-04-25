@@ -663,21 +663,25 @@ class GeminiProcessor:
             slot.release_last() # Don't count failed calls against RPM
 
             if attempt < max_attempts:
-                # Fix: Provider-Level Cascading Failure Prevention
-                err_str = str(e).lower()
-                if any(x in err_str for x in ["500", "502", "503", "504", "timeout"]):
-                    for s_name, s_obj in self._slots.items():
-                        if s_obj.provider == slot.provider and s_name not in tried:
-                            tried.append(s_name)
-
-                # Determine if vision is needed
                 # Determine if vision is needed
                 is_vision = False
                 if isinstance(contents, list):
                     is_vision = any(hasattr(item, 'data') or (isinstance(item, dict) and 'image' in str(item).lower()) for item in contents)
                 
                 provider_filter = "google" if is_vision else None
-                next_slot = await self._pick_model(exclude=tried, provider=provider_filter)
+                
+                # CRITICAL FIX: Provider-Level Banning
+                # If the server timed out or threw a 50x error, ban the ENTIRE provider for the retry chain
+                exclude_list = list(tried)
+                err_str = str(e).lower()
+                is_server_death = isinstance(e, (asyncio.TimeoutError, TimeoutError)) or "timeout" in err_str or "50" in err_str
+                
+                if is_server_death and not (is_vision and slot.provider == "google"):
+                    for n, s in self._slots.items():
+                        if s.provider == slot.provider and n not in exclude_list:
+                            exclude_list.append(n)
+                            
+                next_slot = await self._pick_model(exclude=exclude_list, provider=provider_filter)
                 return await self._call(contents, config, next_slot, attempt + 1, max_attempts, tried)
             
             logger.error(f"AI call failed after {attempt} attempts.")

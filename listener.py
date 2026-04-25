@@ -50,6 +50,10 @@ NEG_PATTERN = re.compile(
 # All-caps: has at least one uppercase, zero lowercase letters
 FAST_ALLCAPS = re.compile(r'^[^a-z]*[A-Z][^a-z]*$')
 
+# Matches strings 6-25 chars long containing ONLY uppercase letters and numbers.
+# The `(?=.*[A-Z])` ensures it doesn't accidentally trigger on pure numbers (like "100000").
+_PROMO_CODE_PATTERN = re.compile(r'\b(?=.*[A-Z])[A-Z0-9]{6,25}\b')
+
 def check_fast_path(text: str) -> bool:
     """Synchronous logic check for fast-path eligibility."""
     if not text:
@@ -133,12 +137,15 @@ class TelethonListener:
         # brand-level dedup below.
         is_aman_standalone = text_lower == 'aman' and '?' not in text
 
+        # Explicit uppercase promo codes (e.g. PLNDEALAPR5KPY825YYS, GRABFOODJSM)
+        has_promo_code = bool(_PROMO_CODE_PATTERN.search(text))
+
         # 1.5 Gate: Social Filler
         from processor import _SOCIAL_FILLER
         if _SOCIAL_FILLER.match(text):
             return False
 
-        if not (is_instant or is_aman_standalone or is_allcaps):
+        if not (is_instant or is_aman_standalone or is_allcaps or has_promo_code):
             return False
         if NEG_PATTERN.search(text_lower):
             return False
@@ -194,17 +201,17 @@ class TelethonListener:
         if brand == "Unknown":
             brand = await context_tracker.get_context(chat_id)
 
-        # Strict: ambiguous signals require a known brand (unless ALL-CAPS shout)
+        # Strict: ambiguous signals require a known brand (unless ALL-CAPS shout or promo code)
         AMBIGUOUS = {
             'on', 'ready', 'aktif', 'restock', 'ristok', 'cek', 'info',
             'makasih', 'thx', 'thanks', 'makasi', 'mks', 'terimakasih',
             'luber', 'pecah'
         }
         found_sigs = set(INSTANT_PATTERN.findall(text_lower))
-        if (not is_allcaps and brand == "Unknown"
+        if (not is_allcaps and not has_promo_code and brand == "Unknown"
                 and (found_sigs & AMBIGUOUS) and len(text) > 15):
             return False
-        if not is_allcaps and brand == "Unknown" and (is_aman_standalone or is_instant):
+        if not is_allcaps and not has_promo_code and brand == "Unknown" and (is_aman_standalone or is_instant):
             return False
 
         # Brand-level dedup for burst traffic: suppress repeat fast-path alerts
@@ -225,6 +232,8 @@ class TelethonListener:
             summary = f"aman ✅ — {parent_text[:120]}"
         elif is_aman_standalone:
             return False   # aman with no parent context = useless
+        elif has_promo_code:
+            summary = f"Kode Promo: {_PROMO_CODE_PATTERN.search(text).group(0)}"
         else:
             summary = text[:120]
 
