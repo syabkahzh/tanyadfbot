@@ -510,6 +510,8 @@ class _ModelSlot:
 class GeminiProcessor:
     """Orchestrates AI analysis using the AI Army (multiple free providers)."""
 
+    
+
     def __init__(self) -> None:
         """Initializes the AI Army fleet from configuration."""
         self.reinitialize()
@@ -623,6 +625,29 @@ class GeminiProcessor:
         best_name = valid_candidates[0]
         await self._slots[best_name].acquire(estimated_tokens, timeout=0.1)
         return best_name
+
+    def _estimate_tokens(self, content: Any) -> int:
+        """Rough token estimation for rate limiting purposes.
+        
+        Uses simple heuristic: ~4 chars ≈ 1 token (standard GPT approximation).
+        """
+        if isinstance(content, str):
+            # Simple character-to-token approximation
+            return max(1, len(content) // 4)
+        elif isinstance(content, list):
+            # Sum tokens from all content items
+            total = 0
+            for item in content:
+                if isinstance(item, str):
+                    total += len(item) // 4
+                elif hasattr(item, '__str__'):
+                    # For genai.types.Part or similar objects
+                    total += len(str(item)) // 4
+            return max(1, total)
+        else:
+            # Fallback for unknown types
+            return max(1, len(str(content)) // 4)
+
 
     async def _call(self, contents: Any, config: dict, slot_name: str, 
                     attempt: int = 1, max_attempts: int = 3, tried: list[str] = None) -> Optional[WrappedResponse]:
@@ -760,6 +785,8 @@ class GeminiProcessor:
             "response_schema": BatchResponse,
             "system_instruction": _EXTRACT_SYSTEM,
         }
+
+        
 
         tokens = self._estimate_tokens(batch_text)
         target_model = await self._pick_model(estimated_tokens=tokens)
