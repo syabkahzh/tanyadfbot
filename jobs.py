@@ -234,23 +234,26 @@ async def hourly_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegram
 
         if not rows:
             await bot.send_plain(
-                f"📊 **Digest {hour_label}**\n\n"
-                "😴 Tidak ada promo yang terdeteksi 1 jam terakhir."
+                f"📊 **Rekap Promo {hour_label}**\n\n"
+                "😴 _Tidak ada promo yang terdeteksi 1 jam terakhir._"
             )
             return
 
-        lines = []
+        # Group by brand
+        by_brand = {}
         for r in rows:
-            brand       = (r['brand'] if r['brand']
-                           and r['brand'].lower() not in ('unknown', 'sunknown', '') else '❓')
-            status_icon = ("🟢" if r['status'] == 'active'
-                           else ("🔴" if r['status'] == 'expired' else "⚪"))
-            link_part   = f" [→]({r['tg_link']})" if r['tg_link'] else ""
-            fast_tag    = " ⚡" if r['via_fastpath'] else ""
-            lines.append(
-                f"{status_icon} **{brand}**"
-                f"{fast_tag}: {r['summary']}{link_part}"
-            )
+            brand = (r['brand'] if r['brand'] and r['brand'].lower() not in ('unknown', 'sunknown', '') else '❓')
+            by_brand.setdefault(brand, []).append(r)
+
+        # Build output structure
+        body_lines = []
+        for brand, promos in sorted(by_brand.items()):
+            body_lines.append(f"**{brand}**")
+            for r in promos:
+                status_icon = ("🟢" if r['status'] == 'active' else ("🔴" if r['status'] == 'expired' else "⚪"))
+                fast_tag    = " ⚡" if r['via_fastpath'] else ""
+                link_part   = f" [🔗 Lihat Pesan]({r['tg_link']})" if r['tg_link'] else ""
+                body_lines.append(f"  {status_icon} {r['summary']}{fast_tag}{link_part}")
 
         context    = "\n".join([f"- {r['brand']}: {r['summary']}" for r in rows])
         try:
@@ -260,13 +263,14 @@ async def hourly_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegram
                 )
         except TimeoutError:
             logger.warning("AI timeout in hourly_digest_job. Skipping summary.")
-            ai_summary = ""
-        now_str = datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%H:%M:%S')
+            ai_summary = "_Summary unavailable._"
+
+        now_str = datetime.now(WIB).strftime('%H:%M:%S')
         full_text = (
-            f"📊 **Digest {hour_label}** ({len(rows)} promo)\n"
-            f"⏰ Waktu: `{now_str}`\n\n"
+            f"📊 **Rekap Promo {hour_label}**\n"
+            f"🕒 _({len(rows)} promo)_ · ⏱ `{now_str}`\n\n"
             f"{ai_summary}\n\n"
-            f"**Detail:**\n" + "\n".join(lines)
+            f"**Detail:**\n" + "\n".join(body_lines)
         )
         shared._last_hourly_digest = full_text
         await bot.send_plain(full_text)
@@ -289,21 +293,25 @@ async def midnight_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
 
         if not rows:
             await bot.send_plain(
-                "📊 **Rekap 02:00–05:00 WIB**\n\n"
-                "😴 Tidak ada promo yang masuk tadi malam."
+                "📊 **Rekap Promo 02:00–05:00 WIB**\n\n"
+                "😴 _Tidak ada promo yang masuk tadi malam._"
             )
             return
 
-        lines = []
+        # Group by brand
+        by_brand = {}
         for r in rows:
-            brand     = (r['brand'] if r['brand']
-                         and r['brand'].lower() not in ('unknown', 'sunknown', '') else '❓')
-            fast_tag  = " ⚡" if r['via_fastpath'] else ""
-            link_part = f" [→]({r['tg_link']})" if r['tg_link'] else ""
-            lines.append(
-                f"• **{brand}**{fast_tag}: "
-                f"{r['summary']}{link_part}"
-            )
+            brand = (r['brand'] if r['brand'] and r['brand'].lower() not in ('unknown', 'sunknown', '') else '❓')
+            by_brand.setdefault(brand, []).append(r)
+
+        # Build output structure
+        body_lines = []
+        for brand, promos in sorted(by_brand.items()):
+            body_lines.append(f"**{brand}**")
+            for r in promos:
+                fast_tag    = " ⚡" if r['via_fastpath'] else ""
+                link_part   = f" [🔗 Lihat Pesan]({r['tg_link']})" if r['tg_link'] else ""
+                body_lines.append(f"  • {r['summary']}{fast_tag}{link_part}")
 
         context = "\n".join([f"- {r['brand']}: {r['summary']}" for r in rows])
         try:
@@ -314,13 +322,14 @@ async def midnight_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
                 )
         except TimeoutError:
             logger.warning("AI timeout in midnight_digest_job. Skipping summary.")
-            digest = ""
-        now_str = datetime.now(jakarta_tz).strftime('%H:%M:%S')
+            digest = "_Summary unavailable._"
+
+        now_str = now_wib.strftime('%H:%M:%S')
         full_text = (
-            f"📊 **Rekap 02:00–05:00 WIB** ({len(rows)} promo)\n"
-            f"⏰ Waktu: `{now_str}`\n\n"
+            f"📊 **Rekap Promo 02:00–05:00 WIB**\n"
+            f"🕒 _({len(rows)} promo)_ · ⏱ `{now_str}`\n\n"
             f"{digest}\n\n"
-            f"**Detail:**\n" + "\n".join(lines)
+            f"**Detail:**\n" + "\n".join(body_lines)
         )
         await bot.send_plain(full_text)
         logger.info("✅ [Job] Finished midnight_digest_job")
@@ -341,16 +350,22 @@ async def halfhour_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
         rows = await db.get_promos(hours=0.5)
         if not rows:
             return
-        lines = []
+
+        # Group by brand
+        by_brand = {}
         for r in rows:
-            brand     = (r['brand'] if r['brand']
-                         and r['brand'].lower() not in ('unknown', 'sunknown', '') else '❓')
-            fast_tag  = " ⚡" if r['via_fastpath'] else ""
-            link_part = f" [→]({r['tg_link']})" if r['tg_link'] else ""
-            lines.append(
-                f"• **{brand}**{fast_tag}: "
-                f"{r['summary']}{link_part}"
-            )
+            brand = (r['brand'] if r['brand'] and r['brand'].lower() not in ('unknown', 'sunknown', '') else '❓')
+            by_brand.setdefault(brand, []).append(r)
+
+        # Build output structure
+        body_lines = []
+        for brand, promos in sorted(by_brand.items()):
+            body_lines.append(f"**{brand}**")
+            for r in promos:
+                fast_tag    = " ⚡" if r['via_fastpath'] else ""
+                link_part   = f" [🔗 Lihat Pesan]({r['tg_link']})" if r['tg_link'] else ""
+                body_lines.append(f"  • {r['summary']}{fast_tag}{link_part}")
+
         label   = now_wib.strftime('%H:%M:%S WIB')
         context = "\n".join([f"- {r['brand']}: {r['summary']}" for r in rows])
         
@@ -363,11 +378,12 @@ async def halfhour_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
             logger.warning("AI timeout in halfhour_digest_job. Skipping.")
             return
 
-        now_str = datetime.now(WIB).strftime('%H:%M:%S')
+        now_str = now_wib.strftime('%H:%M:%S')
         full_text = (
             f"⚡ **Update {label}** ({len(rows)} promo)\n"
             f"⏰ Waktu: `{now_str}`\n\n"
-            f"{digest}\n\n" + "\n".join(lines)
+            f"{digest}\n\n"
+            f"**Detail:**\n" + "\n".join(body_lines)
         )
         await bot.send_plain(full_text)
         logger.info("✅ [Job] Finished halfhour_digest_job")
@@ -1235,6 +1251,4 @@ async def visual_trend_job(db: Database, bot: TelegramBot) -> None:
     except Exception as e:
         logger.error(f"visual_trend_job error: {e}", exc_info=True)
         await bot.alert_error("visual_trend_job", e)
-
-", e)
 
