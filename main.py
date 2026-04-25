@@ -93,13 +93,14 @@ async def _auto_triage_queue() -> None:
     global _queue_emergency_mode
 
     queue = await db.get_queue_size()
-    if queue < 20:
+    # CRITICAL FIX: Do not block the fleet loop unless the queue is legitimately backed up.
+    if queue < 150:
         if _queue_emergency_mode:
             _queue_emergency_mode = False
             logger.info("Queue Surgeon: pressure normalized.")
         return
 
-    _queue_emergency_mode = queue > 100
+    _queue_emergency_mode = queue > 250
     triage_limit = min(queue, 2000)
     logger.warning(f"Queue Surgeon: {queue} unprocessed — triaging up to {triage_limit}...")
 
@@ -338,7 +339,8 @@ async def processing_loop() -> None:
             await db.ensure_connection()
 
             queue_size = await db.get_queue_size()
-            if queue_size > 20:
+            # CRITICAL FIX: Match the threshold to prevent unnecessary DB polling.
+            if queue_size > 150:
                 await _auto_triage_queue()
                 queue_size = await db.get_queue_size()
 

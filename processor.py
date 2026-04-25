@@ -226,10 +226,11 @@ class BaseAIClient:
 
 class WrappedResponse:
     """Compatibility wrapper for AI responses."""
-    def __init__(self, res=None, text=None, parsed=None):
+    def __init__(self, res=None, text=None, parsed=None, model_name=None):
         self.res = res
         self._text = text
         self._parsed = parsed
+        self.model_name = model_name
     @property
     def text(self):
         return self._text if self._text is not None else getattr(self.res, 'text', "")
@@ -640,18 +641,21 @@ class GeminiProcessor:
         try:
             logger.info(f"🤖 [AI] Requesting {slot.model_id} on {slot.provider} (attempt {attempt})...")
             
-            # Use the provider-specific client with a hard timeout
+            # CRITICAL FIX: Cut timeout to 18s to prevent internal SDK retries from hanging the fleet.
             response = await asyncio.wait_for(
                 slot.client.generate_content(
                     model=slot.model_id,
                     contents=contents,
                     config=config.copy()
                 ),
-                timeout=60.0
+                timeout=18.0
             )
             
             if response is None:
                 raise Exception("Provider returned empty response")
+                
+            # CRITICAL FIX: Attach the name of the slot that actually succeeded
+            response.model_name = slot_name 
             return response
 
         except Exception as e:
@@ -802,7 +806,8 @@ class GeminiProcessor:
             if _META_SUMMARY_PATTERN.search(summary):
                 logger.debug(f"Rejected meta-summary: {summary[:60]}")
                 continue
-            p.model_name = target_model
+            # CRITICAL FIX: Use the actual model that succeeded, not the initial target
+            p.model_name = response.model_name
             valid.append(p)
 
         logger.info(f"Extracted {len(valid)} promos from batch of {len(filtered)} msgs. (Model: {target_model})")
