@@ -26,6 +26,7 @@ from telegramify_markdown import convert, telegramify
 from telegramify_markdown.content import ContentType
 
 import shared
+from shared import _make_tg_link
 from db import Database, normalize_brand
 from config import Config
 from processor import GeminiProcessor, PromoExtraction
