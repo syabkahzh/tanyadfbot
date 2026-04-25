@@ -830,8 +830,16 @@ class TelegramBot:
             return
 
         wait_msg = await self._retry_tg(update.message.reply_text,"🤔 **Thinking...**")
-        rows = await self.db.get_promos(hours=4)
-        context_text = "\n".join([f"- {r['brand']}: {r['summary']}" for r in rows])
+        
+        # CRITICAL FIX: Targeted RAG Search. 
+        # Only pull DB rows that match the user's specific keywords.
+        rows = await self.db.search_active_promos(update.message.text)
+        
+        if not rows:
+            context_text = "SYSTEM NOTE: TIDAK ADA PROMO YANG RELEVAN DI DATABASE SAAT INI."
+        else:
+            context_text = "\n".join([f"[{r['status'].upper()}] {r['brand']}: {r['summary']}" for r in rows])
+            
         answer = await self.gemini.answer_question(update.message.text, context_text)
         
         safe_text, entities = convert(answer)
