@@ -678,7 +678,14 @@ class GeminiProcessor:
             slot.release_last() # Don't count failed calls against RPM
 
             if attempt < max_attempts:
-                # Pick a DIFFERENT slot for the retry if possible
+                # Fix: Provider-Level Cascading Failure Prevention
+                err_str = str(e).lower()
+                if any(x in err_str for x in ["500", "502", "503", "504", "timeout"]):
+                    for s_name, s_obj in self._slots.items():
+                        if s_obj.provider == slot.provider and s_name not in tried:
+                            tried.append(s_name)
+
+                # Determine if vision is needed
                 # Determine if vision is needed
                 is_vision = False
                 if isinstance(contents, list):
