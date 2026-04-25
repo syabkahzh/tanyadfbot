@@ -314,7 +314,9 @@ class TelegramBot:
 
     @_owner_only
     async def cmd_chart(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-...
+        """Manually triggers a visual trend chart."""
+        import jobs
+        await update.message.reply_text("📊 *Generating chart...*", parse_mode=ParseMode.MARKDOWN)
         await jobs.visual_trend_job(self.db, self)
 
     @_owner_only
