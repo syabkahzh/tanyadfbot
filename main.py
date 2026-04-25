@@ -102,7 +102,7 @@ async def _auto_triage_queue() -> None:
 
     _queue_emergency_mode = queue > 250
     triage_limit = min(queue, 2000)
-    logger.warning(f"Queue Surgeon: {queue} unprocessed — triaging up to {triage_limit}...")
+    logger.warning(f"🧹 [Triage] {queue} unprocessed — clearing up to {triage_limit} noise messages...")
 
     if not db.conn:
         return
@@ -184,7 +184,7 @@ async def processing_loop() -> None:
                     try:
                         promos = await gemini.process_batch(msgs, db)
                     except TimeoutError:
-                        logger.warning(f"AI rate limits exhausted — requeuing {len(msgs)} msgs for later.")
+                        logger.warning(f"⏳ [AI] Rate limits exhausted — requeuing {len(msgs)} messages for later.")
                         ai_failed = True
                     except Exception as e:
                         if str(e) == "TEMP_500_INTERNAL":
@@ -352,9 +352,9 @@ async def processing_loop() -> None:
             current_tasks = shared._active_ai_tasks
             in_progress_count = len(_in_progress_ids)
             
-            # Detailed debug log if queue is stuck
+            # Detailed status log for monitoring
             if queue_size > 0:
-                logger.info(f"📊 Fleet Status: {current_tasks} tasks active, {in_progress_count} msgs in-progress, {queue_size} in queue.")
+                logger.info(f"📊 [Fleet] Active Tasks: {current_tasks} | In-Progress: {in_progress_count} | Queue: {queue_size}")
 
             if current_tasks >= _AI_MAX_INFLIGHT:
                 await asyncio.sleep(0.2)
@@ -492,7 +492,7 @@ async def processing_loop() -> None:
                 await asyncio.sleep(0.5)
                 continue
 
-            logger.info(f"🧬 Spawning batch: {len(to_ai)} msgs (tasks={shared._active_ai_tasks}, headroom={headroom_pct:.0%}, queue={queue_size})")
+            logger.info(f"🧬 [Spawn] Processing {len(to_ai)} messages | Tasks: {shared._active_ai_tasks} | Headroom: {headroom_pct:.0%} | Q: {queue_size}")
             shared.mark_batch_spawned()
             _spawned_task = asyncio.create_task(process_one_batch(to_ai))
             _active_spawn_tasks.add(_spawned_task)

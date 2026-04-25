@@ -648,7 +648,7 @@ class GeminiProcessor:
         
         slot = self._slots[slot_name]
         try:
-            logger.info(f"🤖 [AI] Requesting {slot.model_id} on {slot.provider} (attempt {attempt})...")
+            logger.info(f"🛰️ [AI] Requesting {slot.model_id} ({slot.provider}) | Attempt {attempt}...")
             
             # CRITICAL FIX: Cut timeout to 18s to prevent internal SDK retries from hanging the fleet.
             response = await asyncio.wait_for(
@@ -669,7 +669,7 @@ class GeminiProcessor:
 
         except Exception as e:
             err_str = str(e).lower()
-            logger.warning(f"AI ({slot.model_id}) failed on attempt {attempt}: {type(e).__name__}: {repr(e)}")
+            logger.warning(f"🔄 AI ({slot.model_id}) Failure | Attempt {attempt} | {type(e).__name__}: {repr(e)}")
             slot.release_last() # Don't count failed calls against RPM
 
             # Dynamic 429 Rate Limit Handling
@@ -842,7 +842,8 @@ class GeminiProcessor:
             p.model_name = response.model_name
             valid.append(p)
 
-        logger.info(f"Extracted {len(valid)} promos from batch of {len(filtered)} msgs. (Model: {target_model})")
+        actual_model = response.model_name if response and hasattr(response, 'model_name') else target_model
+        logger.info(f"✅ Extracted {len(valid)} promos from batch of {len(filtered)} msgs. [Model: {actual_model}]")
         return valid
 
     async def filter_duplicates(self, new_promos: Sequence[PromoExtraction],
