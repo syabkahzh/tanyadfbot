@@ -24,6 +24,12 @@ from shared import _make_tg_link, _flush_alert_buffer, _reconnect_listener
 logger = logging.getLogger(__name__)
 
 
+def _read_file_bytes(path: str) -> bytes:
+    """Synchronous helper to read a file — intended for asyncio.to_thread."""
+    with open(path, 'rb') as f:
+        return f.read()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Time reminder job — "sinyal waktu"
 # Scans active promos for an HH:MM time of day in valid_until/summary/conditions
@@ -460,10 +466,9 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                 if not downloaded:
                     photo_bytes = None
                 elif isinstance(downloaded, str):
-                    if os.path.exists(downloaded):
-                        with open(downloaded, 'rb') as f:
-                            photo_bytes = f.read()
-                        os.remove(downloaded)
+                    if await asyncio.to_thread(os.path.exists, downloaded):
+                        photo_bytes = await asyncio.to_thread(_read_file_bytes, downloaded)
+                        await asyncio.to_thread(os.remove, downloaded)
                     else:
                         photo_bytes = None
                 else:
@@ -628,10 +633,8 @@ async def hot_thread_job(db: Database, gemini: GeminiProcessor, listener: Any, b
                         if isinstance(downloaded, bytes):
                             parent_photo = downloaded
                         elif isinstance(downloaded, str):
-                            with open(downloaded, 'rb') as f:
-                                parent_photo = f.read()
-                            import os
-                            os.remove(downloaded)
+                            parent_photo = await asyncio.to_thread(_read_file_bytes, downloaded)
+                            await asyncio.to_thread(os.remove, downloaded)
                     except Exception as e:
                         logger.error(f"Hot thread photo download failed: {e}")
 

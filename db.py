@@ -338,6 +338,13 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_pending_conf_brand "
             "ON pending_confirmations(brand)"
         )
+        # CRITICAL FIX: idx_promos_source speeds up prune_old_messages which does
+        # a subquery: id NOT IN (SELECT source_msg_id FROM promos ...).
+        # Without this index the subquery scans the entire promos table.
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_promos_source "
+            "ON promos(source_msg_id) WHERE source_msg_id IS NOT NULL"
+        )
         await self.conn.commit()
 
         # ── BUG D FIX: Recover stuck pending_alerts on every boot ─────────────

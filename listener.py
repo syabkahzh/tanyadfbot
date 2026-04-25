@@ -122,6 +122,17 @@ class TelethonListener:
         BUG 4 FIX: DB lookup wrapped in asyncio.timeout(0.5) — never stalls the 
         event loop at high message volume.
         """
+        import time as _time
+        _fp_start = _time.monotonic()
+        _fp_step = _fp_start
+        _fp_log: list[str] = []
+
+        def _fp_mark(step: str) -> None:
+            nonlocal _fp_step
+            now = _time.monotonic()
+            _fp_log.append(f"{step}={now - _fp_step:.3f}s")
+            _fp_step = now
+
         from shared import (
             _make_tg_link, _guess_brand, _flush_alert_buffer,
             db, _alerted_aman_parents, _alerted_aman_parents_deque, _aman_lock,
@@ -136,6 +147,7 @@ class TelethonListener:
 
         text       = (message_data.get('text') or '').strip()
         text_lower = text.lower()
+        _fp_mark("imports")
 
         is_instant  = bool(INSTANT_PATTERN.search(text)) and '?' not in text
         is_allcaps  = (bool(FAST_ALLCAPS.match(text))
@@ -325,7 +337,12 @@ class TelethonListener:
                 asyncio.create_task(_flush_alert_buffer(delay=0.3))
             )
 
-        print(f"⚡ FAST-PATH: {brand} — {summary[:50]}  ({fast_promo.queue_time:.3f}s)")
+        _fp_mark("flush")
+        _fp_total = _time.monotonic() - _fp_start
+        if _fp_total > 1.0:
+            print(f"⚡ FAST-PATH: {brand} — {summary[:50]}  (TOTAL={_fp_total:.2f}s | {' | '.join(_fp_log)})")
+        else:
+            print(f"⚡ FAST-PATH: {brand} — {summary[:50]}  ({fast_promo.queue_time:.3f}s)")
         return True
 
     # ── Message ingestion ─────────────────────────────────────────────────────

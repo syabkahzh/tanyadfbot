@@ -193,8 +193,8 @@ class TelegramBot:
         sys_ram_total_mb = sys_mem.total / (1024 * 1024)
         sys_ram_pct = sys_mem.percent
         
-        # Get accurate CPU (interval=0.1 blocks for 100ms, which is fine for /status)
-        cpu_usage = psutil.cpu_percent(interval=0.1)
+        # Offload to thread so the 100ms sample interval doesn't stall the event loop
+        cpu_usage = await asyncio.to_thread(psutil.cpu_percent, interval=0.1)
 
         # 4. Triage Status
         from main import _queue_emergency_mode
