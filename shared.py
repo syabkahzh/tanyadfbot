@@ -322,8 +322,8 @@ def ai_circuit_open_remaining() -> float:
     return remaining if remaining > 0 else 0.0
 
 # Threshold + cooldown. Kept here (not main.py) so /diag can read them.
-_AI_CIRCUIT_FAILURE_THRESHOLD: int = 5
-_AI_CIRCUIT_COOLDOWN_SEC: float = 30.0
+_AI_CIRCUIT_FAILURE_THRESHOLD: int = 50
+_AI_CIRCUIT_COOLDOWN_SEC: float = 5.0
 _last_trend_alert: str = ""
 _last_trend_alert_ts: float = 0.0
 _last_spike_alert: datetime = datetime.min.replace(tzinfo=timezone.utc)
