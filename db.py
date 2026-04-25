@@ -957,6 +957,31 @@ class Database:
             rows = await cur.fetchall()
             return list(rows)
 
+    async def search_active_promos(self, query: str, hours: int = 12) -> list[aiosqlite.Row]:
+        """RAG Tool: Keyword search to prevent context overflow in AI Q&A."""
+        if not self.conn: return []
+        
+        # Simple split for keyword matching (ignoring short words)
+        keywords = [k for k in query.lower().split() if len(k) > 3]
+        
+        if not keywords:
+            # Fallback to general recent promos if query is too generic
+            return await self.get_promos(hours=4, limit=15)
+            
+        conditions = " OR ".join(["(LOWER(brand) LIKE ? OR LOWER(summary) LIKE ?)"] * len(keywords))
+        params = []
+        for k in keywords:
+            params.extend([f"%{k}%", f"%{k}%"])
+            
+        sql = f"""
+            SELECT brand, summary, status FROM promos 
+            WHERE created_at >= strftime('%Y-%m-%d %H:%M:%S+00:00','now','-{hours} hours')
+            AND ({conditions})
+            LIMIT 20
+        """
+        async with self.conn.execute(sql, params) as cur:
+            return await cur.fetchall()
+
     # ── Pending alerts ────────────────────────────────────────────────────────
 
     async def save_pending_alert(self, brand: str, p_data_json: str,

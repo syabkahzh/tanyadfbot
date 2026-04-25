@@ -9,7 +9,7 @@ import asyncio
 import time
 import logging
 from typing import List, Literal, Optional, Any, Sequence, cast
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from google import genai
 from config import Config
@@ -69,12 +69,13 @@ _META_SUMMARY_PATTERN = re.compile(
 class PromoExtraction(BaseModel):
     """Structured promotion data extracted from chat text or images."""
     original_msg_id: int
-    summary: str
-    brand: Optional[str] = "Unknown"
-    conditions: Optional[str] = ""
+    summary: str = Field(description="1 sentence summary. MUST BE 'SKIP' if not a promo.")
+    brand: str = Field(description="The exact brand name, or 'SKIP'.")
+    conditions: str = Field(default="", description="Terms and conditions, or empty string.")
     valid_until: Optional[str] = ""
-    status: Literal["active", "expired", "unknown"] = "unknown"
-    confidence: float = 1.0 # 0.0 to 1.0 based on AI certainty
+    # CRITICAL FIX: Forcing strict enums mathematically prevents hallucinated statuses
+    status: Literal['active', 'expired', 'unknown'] = Field(description="Strictly select one.")
+    confidence: float = Field(default=1.0, description="Confidence score from 0.0 to 1.0.")
     links: List[str] = []
     detected_at: Optional[str] = None
     queue_time: Optional[float] = None
@@ -810,7 +811,14 @@ class GeminiProcessor:
             if _META_SUMMARY_PATTERN.search(summary):
                 logger.debug(f"Rejected meta-summary: {summary[:60]}")
                 continue
-            # CRITICAL FIX: Use the actual model that succeeded, not the initial target
+            
+            # CRITICAL FIX: Brand Normalization Interceptor
+            # Forces the AI's guess through the deterministic Python dictionary
+            verified_brand = normalize_brand(p.brand)
+            if verified_brand == "Unknown" and "SKIP" not in p.brand.upper():
+                logger.warning(f"AI hallucinated unknown brand: '{p.brand}'. Forcing to Unknown.")
+            p.brand = verified_brand
+
             p.model_name = response.model_name
             valid.append(p)
 
