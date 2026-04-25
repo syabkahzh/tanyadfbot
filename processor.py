@@ -407,6 +407,7 @@ class _ModelSlot:
         self._daily_tokens: list[tuple[float, int]] = []
         
         self._lock = asyncio.Lock()
+        self.exhausted_until: float = 0.0
 
     def _cleanup(self, now: float) -> None:
         """Remove expired timestamps. Must be called under self._lock."""
@@ -427,6 +428,9 @@ class _ModelSlot:
     async def try_acquire_nowait(self, estimated_tokens: int = 0) -> bool:
         """Non-blocking attempt. Returns True and records the call if a slot is free."""
         now = time.monotonic()
+        if now < self.exhausted_until:
+            return False
+            
         async with self._lock:
             self._cleanup(now)
             
@@ -475,6 +479,17 @@ class _ModelSlot:
     def daily_usage(self) -> int:
         now = time.monotonic()
         return sum(1 for t in self._daily_calls if now - t < 86400)
+
+    def release_last(self) -> None:
+        """Remove the most recent call from all counters. Used when a call fails."""
+        if self._calls:
+            self._calls.pop()
+        if self._tokens:
+            self._tokens.pop()
+        if self._daily_calls:
+            self._daily_calls.pop()
+        if self._daily_tokens:
+            self._daily_tokens.pop()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -607,8 +622,9 @@ class GeminiProcessor:
         
         Uses simple heuristic: ~4 chars ≈ 1 token (standard GPT approximation).
         """
-        # CRITICAL FIX: Account for the ~600 token overhead of the massive system prompt
-        base_overhead = 600
+        # Account for ~600 token system prompt AND ~300 tokens for output generation.
+        # Groq limits based on Total Tokens (Input + Output).
+        base_overhead = 900
 
         if isinstance(content, str):
             return max(1, (len(content) // 4) + base_overhead)
@@ -652,9 +668,18 @@ class GeminiProcessor:
             return response
 
         except Exception as e:
+            err_str = str(e).lower()
             logger.warning(f"AI ({slot.model_id}) failed on attempt {attempt}: {type(e).__name__}: {repr(e)}")
-            # CRITICAL FIX: Removed release_last(). Failed API attempts still consume provider
-            # rate limits. Do not refund them, otherwise the local bucket desyncs from the server.
+            slot.release_last() # Don't count failed calls against RPM
+
+            # Dynamic 429 Rate Limit Handling
+            if "429" in err_str or "rate limit" in err_str:
+                if "per day" in err_str or "tpd" in err_str or "rpd" in err_str:
+                    logger.error(f"🚨 {slot.name} hit DAILY limit. Sleeping for 6 hours.")
+                    slot.exhausted_until = time.monotonic() + (3600 * 6)
+                else:
+                    logger.warning(f"⏳ {slot.name} hit MINUTE limit. Sleeping for 60s.")
+                    slot.exhausted_until = time.monotonic() + 60.0
 
             if attempt < max_attempts:
                 # Determine if vision is needed
