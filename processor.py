@@ -583,44 +583,46 @@ class GeminiProcessor:
             return False
 
     async def _pick_model(self, exclude: Optional[str | list[str]] = None, provider: Optional[str] = None, estimated_tokens: int = 0) -> str:
-        """Picks the best available model slot based on priority, with optional exclusion and provider filter."""
+        """Picks a model using Least-Utilized Load Balancing to utilize the whole AI Army simultaneously."""
         excludes = [exclude] if isinstance(exclude, str) else (exclude or [])
         
-        # 1. Try to find a free slot in priority order
-        for name in self._priority_list:
-            if name in excludes:
-                continue
-            if provider and self._slots[name].provider != provider:
-                continue
-            if await self._slots[name].try_acquire_nowait(estimated_tokens):
-                return name
-        
-        # 2. If all busy, wait for the highest priority one (respecting provider filter if any)
         valid_candidates = [n for n in self._priority_list if n not in excludes]
         if provider:
             valid_candidates = [n for n in valid_candidates if self._slots[n].provider == provider]
-        
+            
         if not valid_candidates:
             # If everything was excluded, reset to all valid provider models
             valid_candidates = [n for n in self._priority_list if not provider or self._slots[n].provider == provider]
-            
-        best_name = valid_candidates[0]
-        await self._slots[best_name].acquire(estimated_tokens)
-        return best_name
 
-    def _estimate_tokens(self, contents: Any) -> int:
-        """Roughly estimates token count for rate limiting."""
-        if isinstance(contents, str):
-            return len(contents) // 4
-        if isinstance(contents, list):
-            total = 0
-            for item in contents:
-                if isinstance(item, str):
-                    total += len(item) // 4
-                elif hasattr(item, 'data'): # genai.types.Part
-                    total += len(item.data) // 100 # very rough for images
-            return total
-        return 100 # default
+        def get_utilization(name: str) -> float:
+            slot = self._slots[name]
+            # Calculate load percentage (e.g., 5/15 RPM = 0.33)
+            return slot.current_usage() / max(1, slot.limit)
+
+        # 1. Sort by lowest utilization %, then highest priority
+        candidates_by_load = sorted(valid_candidates, key=lambda n: (get_utilization(n), self._slots[n].priority))
+
+        # 2. Distribute load: try to acquire from the least loaded API first
+        for name in candidates_by_load:
+            if await self._slots[name].try_acquire_nowait(estimated_tokens):
+                return name
+        
+        # 3. If ALL models are fully saturated, poll until ANY model frees up.
+        # (The previous code hard-blocked on valid_candidates[0] and ignored the rest)
+        timeout = 90.0
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            # Re-sort to grab whoever freed up first and has the lowest relative load
+            candidates_by_load = sorted(valid_candidates, key=lambda n: (get_utilization(n), self._slots[n].priority))
+            for name in candidates_by_load:
+                if await self._slots[name].try_acquire_nowait(estimated_tokens):
+                    return name
+            await asyncio.sleep(1.0)
+            
+        # 4. Fallback if timeout expires
+        best_name = valid_candidates[0]
+        await self._slots[best_name].acquire(estimated_tokens, timeout=0.1)
+        return best_name
 
     async def _call(self, contents: Any, config: dict, slot_name: str, 
                     attempt: int = 1, max_attempts: int = 3, tried: list[str] = None) -> Optional[WrappedResponse]:
