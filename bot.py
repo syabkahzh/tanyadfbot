@@ -52,6 +52,7 @@ class TelegramBot:
         
         # Track users in feedback flow: {user_id: original_msg_id}
         self._awaiting_feedback: dict[int, int] = {}
+        self._feedback_weights: dict[int, float] = {} # {msg_id: weight}
         
         self._setup_handlers()
 
@@ -422,6 +423,9 @@ class TelegramBot:
                 ],
                 [
                     InlineKeyboardButton("👯 Duplicate", callback_data=f"fopt_{orig_msg_id}_dup"),
+                    InlineKeyboardButton("⚖️ Weight", callback_data=f"weight_{orig_msg_id}")
+                ],
+                [
                     InlineKeyboardButton("⌨️ Custom Text", callback_data=f"fopt_{orig_msg_id}_custom")
                 ]
             ]
@@ -438,10 +442,13 @@ class TelegramBot:
             parts = data.split("_")
             orig_msg_id = int(parts[1])
             option = parts[2]
+            weight = self._feedback_weights.pop(orig_msg_id, 0.5)
             
             if option == "custom":
                 user_id = update.effective_user.id
                 self._awaiting_feedback[user_id] = orig_msg_id
+                # Store weight in the user session too
+                context.user_data['pending_weight'] = weight
                 await query.message.reply_text(
                     "⌨️ **Please type your correction now:**",
                     parse_mode=ParseMode.MARKDOWN
@@ -451,12 +458,12 @@ class TelegramBot:
                 correction = mapping.get(option, "Feedback")
                 try:
                     await self.db.conn.execute(
-                        "INSERT INTO ai_corrections (original_msg_id, correction) VALUES (?, ?)",
-                        (orig_msg_id, correction)
+                        "INSERT INTO ai_corrections (original_msg_id, correction, weight) VALUES (?, ?, ?)",
+                        (orig_msg_id, correction, weight)
                     )
                     await self.db.conn.commit()
                     await query.edit_message_text(
-                        text=f"✅ **Feedback Saved: {correction}**\n\nThank you, mawmaw!",
+                        text=f"✅ **Feedback Saved: {correction} (Weight: {weight})**\n\nThank you, mawmaw!",
                         parse_mode=ParseMode.MARKDOWN
                     )
                 except Exception as e:
@@ -467,10 +474,12 @@ class TelegramBot:
             parts = data.split("_")
             orig_msg_id = int(parts[1])
             vote = parts[2]
+            weight = self._feedback_weights.pop(orig_msg_id, 0.5)
             
             if vote == "custom":
                 user_id = update.effective_user.id
                 self._awaiting_feedback[user_id] = orig_msg_id
+                context.user_data['pending_weight'] = weight
                 await query.message.reply_text(
                     "⌨️ **Please type your correction for this poll now:**",
                     parse_mode=ParseMode.MARKDOWN
@@ -482,14 +491,14 @@ class TelegramBot:
                 try:
                     if vote in ("no", "spam"):
                         await self.db.conn.execute(
-                            "INSERT INTO ai_corrections (original_msg_id, correction) VALUES (?, ?)",
-                            (orig_msg_id, correction)
+                            "INSERT INTO ai_corrections (original_msg_id, correction, weight) VALUES (?, ?, ?)",
+                            (orig_msg_id, correction, weight)
                         )
                         await self.db.conn.commit()
                     
                     status_emoji = "✅" if vote == "yes" else ("❌" if vote == "no" else "🚫")
                     await query.edit_message_text(
-                        text=f"{query.message.text}\n\n{status_emoji} **Verdict: {vote.upper()}**",
+                        text=f"{query.message.text}\n\n{status_emoji} **Verdict: {vote.upper()} (Weight: {weight})**",
                         parse_mode=ParseMode.MARKDOWN
                     )
                 except Exception as e:
@@ -537,6 +546,56 @@ class TelegramBot:
             await self._render_today_page(query, page=page)
             return
 
+        elif data.startswith("weight_"):
+            orig_msg_id = int(data.split("_")[1])
+            keyboard = [
+                [
+                    InlineKeyboardButton("0.1 (Low)", callback_data=f"sw_{orig_msg_id}_0.1"),
+                    InlineKeyboardButton("0.5 (Mid)", callback_data=f"sw_{orig_msg_id}_0.5"),
+                    InlineKeyboardButton("1.0 (High)", callback_data=f"sw_{orig_msg_id}_1.0")
+                ],
+                [InlineKeyboardButton("🔙 Back", callback_data=f"feed_{orig_msg_id}")]
+            ]
+            await query.edit_message_text(
+                "⚖️ **Select Training Weight**\n\nHow important is this pattern for the model to learn?\n\n"
+                "• **0.1**: Minor mistake\n"
+                "• **0.5**: Standard correction\n"
+                "• **1.0**: Critical pattern / Must learn",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
+        elif data.startswith("sw_"):
+            parts = data.split("_")
+            orig_msg_id = int(parts[1])
+            weight = float(parts[2])
+            self._feedback_weights[orig_msg_id] = weight
+            
+            # Show a temporary notification
+            await query.answer(f"Weight set to {weight}")
+            
+            # Go back to the feedback menu
+            keyboard = [
+                [
+                    InlineKeyboardButton("🏷 Wrong Brand", callback_data=f"fopt_{orig_msg_id}_brand"),
+                    InlineKeyboardButton("⏰ Expired", callback_data=f"fopt_{orig_msg_id}_expired")
+                ],
+                [
+                    InlineKeyboardButton("👯 Duplicate", callback_data=f"fopt_{orig_msg_id}_dup"),
+                    InlineKeyboardButton(f"⚖️ Weight: {weight}", callback_data=f"weight_{orig_msg_id}")
+                ],
+                [
+                    InlineKeyboardButton("⌨️ Custom Text", callback_data=f"fopt_{orig_msg_id}_custom")
+                ]
+            ]
+            await query.edit_message_text(
+                f"⚖️ **Weight locked at {weight}**\n\nNow choose the correction type:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
     @_owner_only
     async def handle_qa(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handles natural language questions or feedback corrections."""
@@ -545,14 +604,15 @@ class TelegramBot:
         
         if user_id in self._awaiting_feedback:
             orig_msg_id = self._awaiting_feedback.pop(user_id)
+            weight = context.user_data.pop('pending_weight', 0.5)
             correction = update.message.text
             try:
                 await self.db.conn.execute(
-                    "INSERT INTO ai_corrections (original_msg_id, correction) VALUES (?, ?)",
-                    (orig_msg_id, correction)
+                    "INSERT INTO ai_corrections (original_msg_id, correction, weight) VALUES (?, ?, ?)",
+                    (orig_msg_id, correction, weight)
                 )
                 await self.db.conn.commit()
-                await self._send_markdown(update, "✅ **Feedback Saved!**\n\nI will analyze this to improve my detection. Thank you, mawmaw!")
+                await self._send_markdown(update, f"✅ **Feedback Saved!**\n\nI will analyze this to improve my detection (Weight: {weight}). Thank you, mawmaw!")
             except Exception as e:
                 logger.error(f"Failed to save ai_correction: {e}")
                 await self._send_markdown(update, f"❌ Failed to save feedback: {e}")
@@ -701,9 +761,12 @@ class TelegramBot:
             ],
             [
                 InlineKeyboardButton("🚫 Spam", callback_data=f"poll_{p_data.original_msg_id}_spam"),
-                InlineKeyboardButton("⌨️ Custom", callback_data=f"poll_{p_data.original_msg_id}_custom")
+                InlineKeyboardButton("⚖️ Weight", callback_data=f"weight_{p_data.original_msg_id}")
             ],
-            [InlineKeyboardButton("🛒 Buka Pesan", url=tg_link)]
+            [
+                InlineKeyboardButton("⌨️ Custom", callback_data=f"poll_{p_data.original_msg_id}_custom"),
+                InlineKeyboardButton("🛒 Buka Pesan", url=tg_link)
+            ]
         ]
         
         text = (

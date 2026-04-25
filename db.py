@@ -279,6 +279,7 @@ class Database:
             "ALTER TABLE promos ADD COLUMN reminder_fired INTEGER DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN skip_reason TEXT",
             "ALTER TABLE failures ADD COLUMN source_msg_id INTEGER",
+            "ALTER TABLE ai_corrections ADD COLUMN weight REAL DEFAULT 0.5",
         ]
         for sql in migrations:
             try:
@@ -426,6 +427,26 @@ class Database:
         except Exception as e:
             logger.error(f"Failed to requeue message {msg_id}: {e}")
             return False
+
+    async def get_brand_stats(self, hours: int = 24) -> list[aiosqlite.Row]:
+        """Aggregates promo counts per brand for a given time window.
+        
+        Args:
+            hours: Lookback window in hours.
+            
+        Returns:
+            List of rows with 'brand' and 'count', sorted by count DESC.
+        """
+        if not self.conn: return []
+        async with self.conn.execute("""
+            SELECT brand, COUNT(*) as count 
+            FROM promos 
+            WHERE created_at >= strftime('%Y-%m-%d %H:%M:%S+00:00','now',?)
+            GROUP BY brand 
+            ORDER BY count DESC
+            LIMIT 10
+        """, (f'-{hours} hours',)) as cur:
+            return await cur.fetchall()
 
     # ── Messages ──────────────────────────────────────────────────────────────
 
