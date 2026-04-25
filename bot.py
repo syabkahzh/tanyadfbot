@@ -19,6 +19,7 @@ from telegram.ext import (
     Application, ApplicationBuilder, CommandHandler, 
     MessageHandler, CallbackQueryHandler, ContextTypes, filters
 )
+from telegram.error import NetworkError, TimedOut, Forbidden
 from telegram.request import HTTPXRequest
 from telegram.constants import ParseMode
 
@@ -48,7 +49,7 @@ class TelegramBot:
             uid for uid in (Config.OWNER_ID, Config.EXTRA_AUTH_ID) if uid
         }
 
-        request = HTTPXRequest(connect_timeout=30.0, read_timeout=60.0)
+        request = HTTPXRequest(connect_timeout=45.0, read_timeout=90.0, write_timeout=45.0)
         self.app = ApplicationBuilder().token(Config.BOT_TOKEN).request(request).build()
         
         # Track users in feedback flow: {user_id: original_msg_id}
@@ -56,6 +57,21 @@ class TelegramBot:
         self._feedback_weights: dict[int, float] = {} # {msg_id: weight}
         
         self._setup_handlers()
+
+    async def _retry_tg(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Helper to retry Telegram requests on transient network errors."""
+        for attempt in range(3):
+            try:
+                return await func(*args, **kwargs)
+            except (NetworkError, TimedOut) as e:
+                if attempt == 2:
+                    raise
+                wait = (attempt + 1) * 3
+                logger.warning(f"Telegram network error (attempt {attempt+1}/3): {e}. Retrying in {wait}s...")
+                await asyncio.sleep(wait)
+            except Forbidden:
+                # Bot was blocked by user, nothing to retry
+                raise
 
     def _owner_only(func: T) -> T:
         """Decorator to restrict command access to authorized users only."""
@@ -127,14 +143,16 @@ class TelegramBot:
         safe_text, entities = convert(text)
         try:
             if isinstance(update, Update) and update.message:
-                await update.message.reply_text(
+                await self._retry_tg(
+                    update.message.reply_text,
                     safe_text,
                     entities=[e.to_dict() for e in entities],
                     reply_markup=reply_markup,
                     link_preview_options=LinkPreviewOptions(is_disabled=True)
                 )
             elif hasattr(update, 'message'): # For callback queries or other objects
-                 await update.message.reply_text(
+                 await self._retry_tg(
+                    update.message.reply_text,
                     safe_text,
                     entities=[e.to_dict() for e in entities],
                     reply_markup=reply_markup,
@@ -147,12 +165,12 @@ class TelegramBot:
     async def cmd_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Clears the message queue."""
         count = await self.db.clear_queue()
-        await update.message.reply_text(f"🧹 Cleared `{count}` unprocessed messages.")
+        await self._retry_tg(update.message.reply_text,f"🧹 Cleared `{count}` unprocessed messages.")
 
     @_owner_only
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Surfaces core system metrics."""
-        status_msg = await update.message.reply_text("📊 *Calculating metrics...*", parse_mode=ParseMode.MARKDOWN)
+        status_msg = await self._retry_tg(update.message.reply_text,"📊 *Calculating metrics...*", parse_mode=ParseMode.MARKDOWN)
         
         # 1. Database Stats
         msg_count   = await self.db.get_total_messages()
@@ -324,7 +342,7 @@ class TelegramBot:
     async def cmd_chart(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Manually triggers a visual trend chart."""
         import jobs
-        await update.message.reply_text("📊 *Generating chart...*", parse_mode=ParseMode.MARKDOWN)
+        await self._retry_tg(update.message.reply_text,"📊 *Generating chart...*", parse_mode=ParseMode.MARKDOWN)
         await jobs.visual_trend_job(self.db, self)
 
     @_owner_only
@@ -347,7 +365,7 @@ class TelegramBot:
                 await self._send_markdown(update, msg_text)
             elif hasattr(update, 'edit_message_text'):
                 safe_text, entities = convert(msg_text)
-                await update.edit_message_text(safe_text, entities=[e.to_dict() for e in entities])
+                await self._retry_tg(update.edit_message_text,safe_text, entities=[e.to_dict() for e in entities])
             return
 
         header = f"🧐 **Review Dashboard**\n"
@@ -386,14 +404,14 @@ class TelegramBot:
         
         try:
             if isinstance(update, Update) and update.message:
-                await update.message.reply_text(
+                await self._retry_tg(update.message.reply_text,
                     safe_text,
                     entities=[e.to_dict() for e in entities],
                     reply_markup=reply_markup,
                     link_preview_options=LinkPreviewOptions(is_disabled=True)
                 )
             elif hasattr(update, 'edit_message_text'):
-                await update.edit_message_text(
+                await self._retry_tg(update.edit_message_text,
                     safe_text,
                     entities=[e.to_dict() for e in entities],
                     reply_markup=reply_markup,
@@ -431,7 +449,7 @@ class TelegramBot:
         )
         
         safe_text, entities = convert(text)
-        await query.edit_message_text(
+        await self._retry_tg(query.edit_message_text,
             safe_text,
             entities=[e.to_dict() for e in entities],
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -451,7 +469,7 @@ class TelegramBot:
                 await self._send_markdown(update, msg_text)
             elif hasattr(update, 'edit_message_text'):
                 safe_text, entities = convert(msg_text)
-                await update.edit_message_text(safe_text, entities=[e.to_dict() for e in entities])
+                await self._retry_tg(update.edit_message_text,safe_text, entities=[e.to_dict() for e in entities])
             return
 
         page_size = 15
@@ -494,14 +512,14 @@ class TelegramBot:
         safe_text, entities = convert(text)
         try:
             if isinstance(update, Update) and update.message:
-                await update.message.reply_text(
+                await self._retry_tg(update.message.reply_text,
                     safe_text,
                     entities=[e.to_dict() for e in entities],
                     reply_markup=reply_markup,
                     link_preview_options=LinkPreviewOptions(is_disabled=True)
                 )
             elif hasattr(update, 'edit_message_text'): # CallbackQuery
-                await update.edit_message_text(
+                await self._retry_tg(update.edit_message_text,
                     safe_text,
                     entities=[e.to_dict() for e in entities],
                     reply_markup=reply_markup,
@@ -568,7 +586,7 @@ class TelegramBot:
                 self._awaiting_feedback[user_id] = orig_msg_id
                 # Store weight in the user session too
                 context.user_data['pending_weight'] = weight
-                await query.message.reply_text(
+                await self._retry_tg(query.message.reply_text,
                     "⌨️ **Please type your correction now:**",
                     parse_mode=ParseMode.MARKDOWN
                 )
@@ -581,7 +599,7 @@ class TelegramBot:
                         (orig_msg_id, correction, weight)
                     )
                     await self.db.conn.commit()
-                    await query.edit_message_text(
+                    await self._retry_tg(query.edit_message_text,
                         text=f"✅ **Feedback Saved: {correction} (Weight: {weight})**\n\nThank you, mawmaw!",
                         parse_mode=ParseMode.MARKDOWN
                     )
@@ -599,7 +617,7 @@ class TelegramBot:
                 user_id = update.effective_user.id
                 self._awaiting_feedback[user_id] = orig_msg_id
                 context.user_data['pending_weight'] = weight
-                await query.message.reply_text(
+                await self._retry_tg(query.message.reply_text,
                     "⌨️ **Please type your correction for this poll now:**",
                     parse_mode=ParseMode.MARKDOWN
                 )
@@ -616,7 +634,7 @@ class TelegramBot:
                         await self.db.conn.commit()
                     
                     status_emoji = "✅" if vote == "yes" else ("❌" if vote == "no" else "🚫")
-                    await query.edit_message_text(
+                    await self._retry_tg(query.edit_message_text,
                         text=f"{query.message.text}\n\n{status_emoji} **Verdict: {vote.upper()} (Weight: {weight})**",
                         parse_mode=ParseMode.MARKDOWN
                     )
@@ -631,7 +649,7 @@ class TelegramBot:
                 reply_markup = query.message.reply_markup
                 new_text = f"{query.message.text}\n\n🛠 **Fix Marked!** Ready to retry."
                 safe_text, entities = convert(new_text)
-                await query.edit_message_text(
+                await self._retry_tg(query.edit_message_text,
                     text=safe_text,
                     entities=[e.to_dict() for e in entities],
                     reply_markup=reply_markup
@@ -653,7 +671,7 @@ class TelegramBot:
                 status_text = "🔄 **Retry Marked!** Re-queueing..." if requeued else "🔄 **Retry Marked!**"
                 new_text = f"{query.message.text}\n\n{status_text}"
                 safe_text, entities = convert(new_text)
-                await query.edit_message_text(
+                await self._retry_tg(query.edit_message_text,
                     text=safe_text,
                     entities=[e.to_dict() for e in entities],
                     reply_markup=reply_markup
@@ -685,7 +703,7 @@ class TelegramBot:
                 ],
                 [InlineKeyboardButton("🔙 Back", callback_data=f"feed_{orig_msg_id}")]
             ]
-            await query.edit_message_text(
+            await self._retry_tg(query.edit_message_text,
                 "⚖️ **Select Training Weight**\n\nHow important is this pattern for the model to learn?\n\n"
                 "• **0.1**: Minor mistake\n"
                 "• **0.5**: Standard correction\n"
@@ -718,7 +736,7 @@ class TelegramBot:
                     InlineKeyboardButton("⌨️ Custom Text", callback_data=f"fopt_{orig_msg_id}_custom")
                 ]
             ]
-            await query.edit_message_text(
+            await self._retry_tg(query.edit_message_text,
                 f"⚖️ **Weight locked at {weight}**\n\nNow choose the correction type:",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode=ParseMode.MARKDOWN
@@ -747,7 +765,7 @@ class TelegramBot:
                 await self._send_markdown(update, f"❌ Failed to save feedback: {e}")
             return
 
-        wait_msg = await update.message.reply_text("🤔 **Thinking...**")
+        wait_msg = await self._retry_tg(update.message.reply_text,"🤔 **Thinking...**")
         rows = await self.db.get_promos(hours=4)
         context_text = "\n".join([f"- {r['brand']}: {r['summary']}" for r in rows])
         answer = await self.gemini.answer_question(update.message.text, context_text)
@@ -807,7 +825,8 @@ class TelegramBot:
 
         safe_text, entities = convert(text)
         try:
-            await self.app.bot.send_message(
+            await self._retry_tg(
+                self.app.bot.send_message,
                 chat_id=Config.OWNER_ID,
                 text=safe_text,
                 entities=[e.to_dict() for e in entities],
@@ -844,7 +863,8 @@ class TelegramBot:
         text = header + "\n" + "\n".join(lines)
         safe_text, entities = convert(text)
         try:
-            await self.app.bot.send_message(
+            await self._retry_tg(
+                self.app.bot.send_message,
                 chat_id=Config.OWNER_ID,
                 text=safe_text,
                 entities=[e.to_dict() for e in entities],
@@ -860,7 +880,8 @@ class TelegramBot:
             results = await telegramify(text)
             for item in results:
                 if item.content_type == ContentType.TEXT:
-                    await self.app.bot.send_message(
+                    await self._retry_tg(
+                        self.app.bot.send_message,
                         chat_id=Config.OWNER_ID,
                         text=item.text,
                         entities=[e.to_dict() for e in item.entities],
@@ -872,7 +893,8 @@ class TelegramBot:
     async def send_photo(self, photo: bytes, caption: str | None = None) -> None:
         """Sends a photo to the owner."""
         try:
-            await self.app.bot.send_photo(
+            await self._retry_tg(
+                self.app.bot.send_photo,
                 chat_id=Config.OWNER_ID,
                 photo=photo,
                 caption=caption,
@@ -908,7 +930,8 @@ class TelegramBot:
         
         safe_text, entities = convert(text)
         try:
-            await self.app.bot.send_message(
+            await self._retry_tg(
+                self.app.bot.send_message,
                 chat_id=Config.OWNER_ID,
                 text=safe_text,
                 entities=[e.to_dict() for e in entities],
@@ -949,7 +972,8 @@ class TelegramBot:
         )
         safe_text, entities = convert(text)
         try:
-            await self.app.bot.send_message(
+            await self._retry_tg(
+                self.app.bot.send_message,
                 chat_id=Config.OWNER_ID,
                 text=safe_text,
                 entities=[e.to_dict() for e in entities],
@@ -960,7 +984,11 @@ class TelegramBot:
 
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Global error handler for the Telegram application."""
-        logger.error(f"Update {update} caused error: {context.error}")
+        err = context.error
+        if isinstance(err, (NetworkError, TimedOut)):
+            logger.warning(f"Telegram Network Error (Bad Gateway/Timeout): {err}")
+            return
+        logger.error(f"Update {update} caused error: {err}", exc_info=context.error)
 
     def _fmt_raw_list(self, rows: list, title: str) -> str:
         """Formatting helper for lists of promotions."""
@@ -976,7 +1004,8 @@ class TelegramBot:
             results = await telegramify(text)
             for item in results:
                 if item.content_type == ContentType.TEXT:
-                    await update.message.reply_text(
+                    await self._retry_tg(
+                        update.message.reply_text,
                         item.text,
                         entities=[e.to_dict() for e in item.entities],
                         link_preview_options=LinkPreviewOptions(is_disabled=True)
