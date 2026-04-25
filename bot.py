@@ -75,6 +75,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("diag", self.cmd_diag))
         self.app.add_handler(CommandHandler("today", self.cmd_today))
         self.app.add_handler(CommandHandler("chart", self.cmd_chart))
+        self.app.add_handler(CommandHandler("review", self.cmd_review))
         self.app.add_handler(CommandHandler("clear", self.cmd_clear))
         self.app.add_handler(CommandHandler("debug", self.cmd_debug))
         self.app.add_handler(CallbackQueryHandler(self.handle_callback))
@@ -313,10 +314,116 @@ class TelegramBot:
 
     @_owner_only
     async def cmd_chart(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Manually triggers a visual trend chart."""
-        import jobs
-        await update.message.reply_text("📊 *Generating chart...*", parse_mode=ParseMode.MARKDOWN)
+...
         await jobs.visual_trend_job(self.db, self)
+
+    @_owner_only
+    async def cmd_review(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Dashboard to review messages skipped by AI."""
+        await self._render_review_page(update, page=1)
+
+    async def _render_review_page(self, update: Update | object, page: int = 1) -> None:
+        """Helper to render a specific page of AI-skipped messages for review."""
+        page_size = 10
+        offset = (page - 1) * page_size
+        
+        rows = await self.db.get_skipped_messages(limit=page_size, offset=offset)
+        total_skipped = await self.db.get_total_skipped()
+        total_pages = (total_skipped + page_size - 1) // page_size if total_skipped > 0 else 1
+        
+        if not rows and page == 1:
+            msg_text = "🎉 All caught up! No messages left to review."
+            if isinstance(update, Update) and update.message:
+                await self._send_markdown(update, msg_text)
+            elif hasattr(update, 'edit_message_text'):
+                safe_text, entities = convert(msg_text)
+                await update.edit_message_text(safe_text, entities=[e.to_dict() for e in entities])
+            return
+
+        header = f"🧐 **Review Dashboard**\n"
+        header += f"🔍 Pending: **{total_skipped} msgs** (Hal {page}/{total_pages})\n\n"
+        
+        lines = []
+        buttons = []
+        row_buttons = []
+        
+        for i, r in enumerate(rows):
+            clean_text = (r['text'] or "").replace('\n', ' ')[:50]
+            # Use icons for the list items
+            idx_icon = ["①","②","③","④","⑤","⑥","⑦","⑧","⑨","⑩"][i]
+            lines.append(f"{idx_icon} `{clean_text}...`")
+            row_buttons.append(InlineKeyboardButton(idx_icon, callback_data=f"inspect_{r['id']}"))
+            if len(row_buttons) == 5:
+                buttons.append(row_buttons)
+                row_buttons = []
+        
+        if row_buttons: buttons.append(row_buttons)
+            
+        text = header + "\n".join(lines)
+        
+        # Navigation
+        nav = []
+        if page > 1: nav.append(InlineKeyboardButton("⏮ First", callback_data="review_page:1"))
+        if page > 1: nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"review_page:{page-1}"))
+        if page < total_pages: nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"review_page:{page+1}"))
+        if page < total_pages: nav.append(InlineKeyboardButton("Last ⏭", callback_data=f"review_page:{total_pages}"))
+        if nav: buttons.append(nav)
+
+        reply_markup = InlineKeyboardMarkup(buttons)
+        safe_text, entities = convert(text)
+        
+        try:
+            if isinstance(update, Update) and update.message:
+                await update.message.reply_text(
+                    safe_text,
+                    entities=[e.to_dict() for e in entities],
+                    reply_markup=reply_markup,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
+                )
+            elif hasattr(update, 'edit_message_text'):
+                await update.edit_message_text(
+                    safe_text,
+                    entities=[e.to_dict() for e in entities],
+                    reply_markup=reply_markup,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
+                )
+        except Exception as e:
+            logger.error(f"Failed to render review page {page}: {e}")
+
+    async def _send_inspect_poll(self, query: object, msg_id: int) -> None:
+        """Opens a verification poll for a specific historical message."""
+        async with self.db.conn.execute("SELECT id, text, chat_id, tg_msg_id FROM messages WHERE id=?", (msg_id,)) as cur:
+            r = await cur.fetchone()
+            if not r: return
+            
+        tg_link = _make_tg_link(r['chat_id'], r['tg_msg_id'])
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Deal", callback_data=f"poll_{r['id']}_yes"),
+                InlineKeyboardButton("❌ No Deal", callback_data=f"poll_{r['id']}_no")
+            ],
+            [
+                InlineKeyboardButton("🚫 Spam", callback_data=f"poll_{r['id']}_spam"),
+                InlineKeyboardButton("⌨️ Custom", callback_data=f"poll_{r['id']}_custom")
+            ],
+            [
+                InlineKeyboardButton("🛒 Buka", url=tg_link),
+                InlineKeyboardButton("🔙 Back to Review", callback_data="review_page:1")
+            ]
+        ]
+        
+        text = (
+            f"🕵️ **Manual Review** (ID: `{r['id']}`)\n\n"
+            f"📝 \"{r['text']}\""
+        )
+        
+        safe_text, entities = convert(text)
+        await query.edit_message_text(
+            safe_text,
+            entities=[e.to_dict() for e in entities],
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
     async def _render_today_page(self, update: Update | object, page: int = 1) -> None:
         """Helper to render a specific page of today's promos."""
@@ -544,6 +651,16 @@ class TelegramBot:
         elif data.startswith("today_page:"):
             page = int(data.split(":")[1])
             await self._render_today_page(query, page=page)
+            return
+
+        elif data.startswith("review_page:"):
+            page = int(data.split(":")[1])
+            await self._render_review_page(query, page=page)
+            return
+
+        elif data.startswith("inspect_"):
+            msg_id = int(data.split("_")[1])
+            await self._send_inspect_poll(query, msg_id)
             return
 
         elif data.startswith("weight_"):

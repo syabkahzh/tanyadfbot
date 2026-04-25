@@ -1017,6 +1017,30 @@ class Database:
             row = await cur.fetchone()
             return cast(int, row[0]) if row else 0
 
+    async def get_skipped_messages(self, limit: int = 15, offset: int = 0) -> list[aiosqlite.Row]:
+        """Retrieves messages skipped by AI for manual review."""
+        if not self.conn: return []
+        async with self.conn.execute("""
+            SELECT m.id, m.text, m.timestamp, m.chat_id, m.tg_msg_id
+            FROM messages m
+            WHERE m.skip_reason = 'ai_skip'
+            AND m.id NOT IN (SELECT original_msg_id FROM ai_corrections)
+            ORDER BY m.id DESC
+            LIMIT ? OFFSET ?
+        """, (limit, offset)) as cur:
+            return await cur.fetchall()
+
+    async def get_total_skipped(self) -> int:
+        """Counts remaining messages that need review."""
+        if not self.conn: return 0
+        async with self.conn.execute("""
+            SELECT COUNT(*) FROM messages 
+            WHERE skip_reason = 'ai_skip'
+            AND id NOT IN (SELECT original_msg_id FROM ai_corrections)
+        """) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
+
     async def get_queue_size(self) -> int:
         """Retrieves the current count of unprocessed messages.
 
