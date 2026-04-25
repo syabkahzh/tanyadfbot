@@ -436,7 +436,7 @@ class TelegramBot:
             
             # Use raw text without markdown for the snippet
             lines.append(f"{idx_icon} {clean_text}...")
-            row_buttons.append(InlineKeyboardButton(idx_icon, callback_data=f"inspect_{r["id"]}"))
+            row_buttons.append(InlineKeyboardButton(idx_icon, callback_data=f"inspect_{r['id']}"))
             if len(row_buttons) == 5:
                 buttons.append(row_buttons)
                 row_buttons = []
@@ -544,7 +544,7 @@ class TelegramBot:
             brand = r["brand"] if r["brand"] and r["brand"].lower() not in ("unknown", "sunknown", "") else "❓"
             time_str = _to_wib(r["msg_time"])
             link = r["tg_link"] or "#"
-            lines.append(f"• `[{time_str}]` **{brand}**: {r["summary"]} [➤]({link})")
+            lines.append(f"• `[{time_str}]` **{brand}**: {r['summary']} [➤]({link})")
             
         text = header + "\n".join(lines)
         

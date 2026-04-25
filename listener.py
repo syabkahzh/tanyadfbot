@@ -1,3 +1,4 @@
+"""
 listener.py — Telethon Message Listener
 Bulletproof rewrite:
 - BUG 4 FIX: asyncio.timeout(0.5) on DB lookup in fast-path — never stalls

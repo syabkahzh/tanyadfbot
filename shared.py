@@ -625,5 +625,3 @@ _BRAND_KEYWORDS: dict[str, str] = {
     'svip': 'ShopeeFood',
     'spud': 'SPUD',
 }
-
-(File has 626 lines total.)
