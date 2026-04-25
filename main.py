@@ -352,10 +352,11 @@ async def processing_loop() -> None:
                 await asyncio.sleep(0.2)
                 continue
 
-            circuit_wait = shared.ai_circuit_open_remaining()
-            if circuit_wait > 0:
-                await asyncio.sleep(min(circuit_wait, 2.0))
-                continue
+            # Circuit breaker disabled: Rely on processor.py's fleet fallback instead
+            # circuit_wait = shared.ai_circuit_open_remaining()
+            # if circuit_wait > 0:
+            #     await asyncio.sleep(min(circuit_wait, 2.0))
+            #     continue
 
             now_m = time.monotonic()
             total_used = sum(len([t for t in slot._calls if now_m - t < 60]) for slot in gemini._slots.values())
@@ -363,9 +364,9 @@ async def processing_loop() -> None:
             headroom_pct = max(0.0, 1.0 - (total_used / max(total_cap, 1)))
 
             if _queue_emergency_mode:
-                batch_size = int(40 + 20 * headroom_pct)
+                batch_size = int(80 + 40 * headroom_pct)
             else:
-                batch_size = int(25 + 15 * headroom_pct)
+                batch_size = int(40 + 20 * headroom_pct)
 
             # Optimization: Fetch candidates OUTSIDE of the lock to minimize contention
             ancient_reserve = int(batch_size * 0.3)
@@ -375,7 +376,7 @@ async def processing_loop() -> None:
             priority_cap = max(1, batch_size - ancient_reserve - backlog_reserve)
 
             # Query DB (can be slow under load)
-            ancient_raw = await db.get_unprocessed_ancient(min_age_minutes=15, batch_size=ancient_reserve + 100)
+            ancient_raw = await db.get_unprocessed_ancient(min_age_minutes=10, batch_size=ancient_reserve + 100)
             priority_raw = await db.get_unprocessed_recent(minutes=10, batch_size=priority_cap + 50)
 
             combined: list[Any] = []
@@ -592,7 +593,7 @@ async def main() -> None:
     asyncio.create_task(_reconnect_listener(BOOT_CATCHUP_WINDOW / 60))
 
     # ── Scheduled jobs ─────────────────────────────────────────────────────────
-    scheduler.add_job(jobs.image_processing_job, "interval", minutes=5, id="images", args=[db, gemini, listener], jitter=30)
+    scheduler.add_job(jobs.image_processing_job, "interval", seconds=30, id="images", args=[db, gemini, listener], jitter=5)
     scheduler.add_job(jobs.brewing_digest_job, "cron", minute=0, hour="0,1,5-23", id="brewing_digest", args=[bot])
     scheduler.add_job(jobs.hourly_digest_job, "cron", minute=1, hour="0,1,5-23", id="digest", args=[db, gemini, bot, WIB], jitter=60)
     scheduler.add_job(jobs.midnight_digest_job, "cron", hour=5, minute=0, id="midnight_digest", args=[db, gemini, bot], jitter=300)
