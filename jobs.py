@@ -775,52 +775,40 @@ async def time_mention_job(db: Database, bot: TelegramBot) -> None:
         if not db.conn:
             return
 
-        async with db.conn.execute(
-            "SELECT id, text, timestamp, chat_id, tg_msg_id FROM messages "
-            "WHERE has_time_mention=1 AND time_alerted=0 ORDER BY id ASC"
-        ) as cur:
+        # Single query fetching message and its parent context via self-join
+        async with db.conn.execute("""
+            SELECT m1.id, m1.text, m1.timestamp, m1.chat_id, m1.tg_msg_id,
+                   m2.text as parent_text
+            FROM messages m1
+            LEFT JOIN messages m2 ON m1.reply_to_msg_id = m2.tg_msg_id AND m1.chat_id = m2.chat_id
+            WHERE m1.has_time_mention=1 AND m1.time_alerted=0 
+            ORDER BY m1.id ASC
+        """) as cur:
             rows = await cur.fetchall()
+            
         if not rows:
             return
 
-        from telegram.constants import ParseMode
-
-        alerted_ids = []
-        noise_ids = []
+        all_done = []
+        noise_count = 0
         for r in rows:
             text = r['text'] or ""
             msg_id = r['id']
-            
+            all_done.append(msg_id)
+
             # FastText weighting: skip noise
             ft_label, ft_conf = await shared.classify_one(text)
-            if ft_label == "__label__JUNK" and ft_conf > 0.85:
-                noise_ids.append(msg_id)
+            if (ft_label == "__label__JUNK" and ft_conf > 0.85) or not _is_time_signal_worthy(text):
+                noise_count += 1
                 continue
 
-            if not _is_time_signal_worthy(text):
-                noise_ids.append(msg_id)
-                continue
-
-            link  = _make_tg_link(r['chat_id'], r['tg_msg_id'])
+            link = _make_tg_link(r['chat_id'], r['tg_msg_id'])
             now_str = datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%H:%M:%S')
             
-            # Fetch parent context
             context_header = ""
-            async with db.conn.execute(
-                "SELECT reply_to_msg_id FROM messages WHERE id = ?", (msg_id,)
-            ) as cur:
-                m_row = await cur.fetchone()
-                reply_to = m_row[0] if m_row else None
-            
-            if reply_to:
-                async with db.conn.execute(
-                    "SELECT text FROM messages WHERE tg_msg_id = ? AND chat_id = ? LIMIT 1",
-                    (reply_to, r['chat_id'])
-                ) as ccur:
-                    prow = await ccur.fetchone()
-                    if prow and prow[0]:
-                        p_text = prow[0].replace('\n', ' ')[:100]
-                        context_header = f"💬 _Balasan untuk: \"{p_text}...\"_\n\n"
+            if r['parent_text']:
+                p_text = r['parent_text'].replace('\n', ' ')[:100]
+                context_header = f"💬 _Balasan untuk: \"{p_text}...\"_\n\n"
 
             alert = (
                 f"🕒 **Sinyal Waktu:**\n"
@@ -831,9 +819,7 @@ async def time_mention_job(db: Database, bot: TelegramBot) -> None:
                 f"\n\n🔗 Lihat Pesan:\n{link}"
             )
             await bot.send_plain(alert)
-            alerted_ids.append(msg_id)
 
-        all_done = alerted_ids + noise_ids
         if all_done:
             # Chunk updates to avoid SQLite variable limits (standard is 999)
             chunk_size = 900
@@ -845,8 +831,8 @@ async def time_mention_job(db: Database, bot: TelegramBot) -> None:
                 )
             await db.conn.commit()
 
-            if noise_ids:
-                logger.info(f"⏰ [Job] Marked {len(noise_ids)} noise time-mentions as alerted.")
+            if noise_count > 0:
+                logger.info(f"⏰ [Job] Marked {noise_count} noise time-mentions as alerted.")
 
         logger.info("✅ [Job] Finished time_mention_job")
     except Exception as e:
@@ -1023,11 +1009,6 @@ async def spike_detection_job(db: Database, gemini: GeminiProcessor, bot: Telegr
 async def dead_promo_reaper_job(db: Database, bot: TelegramBot) -> None:
     """Closes expired promotions based on subsequent community chat signals."""
     logger.info("⏰ [Job] Starting dead_promo_reaper_job...")
-    re.compile(
-        r'\b(nt|abis|habis|sold.?out|expired|kehabisan|ga bisa|gabisa|'
-        r'udah mati|mati|nonaktif|hangus|error terus|ga work|gak work|off)\b',
-        re.IGNORECASE
-    )
     try:
         if not db.conn:
             return
@@ -1224,35 +1205,34 @@ async def visual_trend_job(db: Database, bot: TelegramBot) -> None:
         import io
         try:
             import matplotlib.pyplot as plt
-            import matplotlib
-            plt.switch_backend('Agg') # Headless mode
+            import io
             
+            # Encapsulate synchronous plotting logic
+            def _draw_chart(b, c):
+                plt.switch_backend('Agg')
+                plt.figure(figsize=(10, 6))
+                colors = plt.cm.Paired(range(len(b)))
+                bars = plt.bar(b, c, color=colors)
+                plt.title('Top 10 Brands (Last 24h)', fontsize=15, pad=20)
+                plt.xlabel('Brand', fontsize=12)
+                plt.ylabel('Promo Count', fontsize=12)
+                plt.xticks(rotation=45, ha='right')
+                for bar in bars:
+                    yval = bar.get_height()
+                    plt.text(bar.get_x() + bar.get_width()/2, yval + 0.1, yval, ha='center', va='bottom')
+                plt.tight_layout()
+                buf = io.BytesIO()
+                plt.savefig(buf, format='png', dpi=150)
+                plt.close('all') # Critical to prevent memory leak
+                buf.seek(0)
+                return buf
+
             brands = [r['brand'] for r in rows]
             counts = [r['count'] for r in rows]
             
-            plt.figure(figsize=(10, 6))
-            colors = plt.cm.Paired(range(len(brands)))
-            bars = plt.bar(brands, counts, color=colors)
+            # Execute in a separate thread to prevent blocking the async loop
+            buf = await asyncio.to_thread(_draw_chart, brands, counts)
             
-            plt.title('Top 10 Brands (Last 24h)', fontsize=15, pad=20)
-            plt.xlabel('Brand', fontsize=12)
-            plt.ylabel('Promo Count', fontsize=12)
-            plt.xticks(rotation=45, ha='right')
-            
-            # Add value labels on top of bars
-            for bar in bars:
-                yval = bar.get_height()
-                plt.text(bar.get_x() + bar.get_width()/2, yval + 0.1, yval, ha='center', va='bottom')
-            
-            plt.tight_layout()
-            
-            # Save to buffer
-            buf = io.BytesIO()
-            plt.savefig(buf, format='png', dpi=150)
-            buf.seek(0)
-            plt.close()
-            
-            # Send to bot
             WIB = pytz.timezone("Asia/Jakarta")
             now_str = datetime.now(WIB).strftime('%d %b %H:%M:%S')
             caption = f"📊 **Brand activity summary**\n🕒 `{now_str} WIB`"
