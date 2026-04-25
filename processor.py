@@ -468,21 +468,6 @@ class _ModelSlot:
                 return False
             await asyncio.sleep(min(2.0, remaining))
 
-    def release_last(self) -> None:
-        """Synchronously remove the most recent call record.
-
-        This is intentionally synchronous so the count is accurate the instant
-        this method returns — no fire-and-forget task races.
-        """
-        if self._calls:
-            self._calls.pop()
-        if self._tokens:
-            self._tokens.pop()
-        if self.daily_limit > 0 and self._daily_calls:
-            self._daily_calls.pop()
-        if self.tpd_limit > 0 and self._daily_tokens:
-            self._daily_tokens.pop()
-
     def current_usage(self) -> int:
         now = time.monotonic()
         return sum(1 for t in self._calls if now - t < 60)
@@ -668,7 +653,8 @@ class GeminiProcessor:
 
         except Exception as e:
             logger.warning(f"AI ({slot.model_id}) failed on attempt {attempt}: {type(e).__name__}: {repr(e)}")
-            slot.release_last() # Don't count failed calls against RPM
+            # CRITICAL FIX: Removed release_last(). Failed API attempts still consume provider
+            # rate limits. Do not refund them, otherwise the local bucket desyncs from the server.
 
             if attempt < max_attempts:
                 # Determine if vision is needed

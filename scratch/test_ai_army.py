@@ -25,9 +25,9 @@ async def test_init():
         picked = await processor._pick_model()
         print(f"\nPicked model: {picked}")
         
-        # Release it
-        processor._slots[picked].release_last()
-        print(f"Released {picked}")
+        # NOTE: release_last() removed. Calls consume provider rate limits
+        # regardless of outcome to prevent local bucket desync.
+        print(f"Picked {picked} (slot auto-expires after 60s)")
         
     except Exception as e:
         print(f"Error during initialization: {e}")

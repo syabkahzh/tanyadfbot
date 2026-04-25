@@ -38,8 +38,8 @@ async def test_fleet():
         except Exception as e:
             print(f"❌ {name} ERROR: {e}")
             results[name] = "ERROR"
-        finally:
-            slot.release_last()
+        # NOTE: release_last() removed. Calls consume provider rate limits
+        # regardless of outcome to prevent local bucket desync.
             
     print("\n" + "="*30)
     print("📊 FLEET STATUS SUMMARY")

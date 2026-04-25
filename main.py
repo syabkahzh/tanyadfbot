@@ -293,8 +293,13 @@ async def processing_loop() -> None:
                             t = shared.get_buffer_flush_task()
                             if t is None or t.done():
                                 shared.set_buffer_flush_task(asyncio.create_task(_flush_alert_buffer(delay=0.8)))
+                            
+                            # CRITICAL FIX: Truncate history to prevent RAM exhaustion
                             async with _recent_alerts_lock:
                                 _recent_alerts_history.append({"brand": brand_key, "summary": p.summary})
+                                if len(_recent_alerts_history) > 300:
+                                    del _recent_alerts_history[:-300]
+                                    
                             recently_alerted_brands.add(brand_key.lower())
                         else:
                             if brand_norm == "Unknown": continue
@@ -645,5 +650,10 @@ async def main() -> None:
         logger.info("👋 Shutdown complete.")
 
 if __name__ == "__main__":
-    try: asyncio.run(main())
-    except KeyboardInterrupt: pass
+    try: 
+        asyncio.run(main())
+    except KeyboardInterrupt: 
+        sys.exit(0) # Clean exit on CTRL+C
+    except Exception as e:
+        logger.critical(f"Fatal crash escaping event loop: {e}", exc_info=True)
+        sys.exit(1) # Error exit - triggers the auto-restart!

@@ -78,9 +78,13 @@ def test_pick_model_short_timeout_allows_fast_retry():
 
 
 async def _fake_ai_call(slot):
-    """Simulate an AI call that takes ~50ms holding a slot."""
+    """Simulate an AI call that takes ~50ms holding a slot.
+    
+    NOTE: We no longer call release_last(). Failed/successful calls both
+    consume provider rate limits to keep local bucket in sync with server.
+    The slot will naturally expire from the bucket after 60s.
+    """
     await asyncio.sleep(0.05)
-    slot.release_last()
 
 
 def test_model_slot_allows_up_to_limit_concurrent():

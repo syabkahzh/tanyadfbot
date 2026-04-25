@@ -102,6 +102,15 @@ class TelethonListener:
             connection_retries=10,
             retry_delay=1,
         )
+        
+        # CRITICAL FIX: Register handler ONCE during initialization
+        @self.client.on(events.NewMessage(chats=Config.TARGET_GROUP))
+        async def _master_handler(event):
+            if not event.text:
+                return
+            shared.mark_message_ingested()
+            asyncio.create_task(self._handle_fast_path_standalone(event))
+            asyncio.create_task(self._save_to_db(event))
 
     # ── Fast-path ─────────────────────────────────────────────────────────────
 
@@ -369,18 +378,6 @@ class TelethonListener:
     # ── Start / history sync ──────────────────────────────────────────────────
 
     async def start(self):
-        @self.client.on(events.NewMessage(chats=Config.TARGET_GROUP))
-        async def handler(event):
-            if not event.text:
-                return
-            # Record ingest timestamp BEFORE dispatch so /diag has an accurate
-            # "time since last message" signal even if downstream tasks error.
-            shared.mark_message_ingested()
-            # Fast-path as its OWN task - never waits for DB save
-            asyncio.create_task(self._handle_fast_path_standalone(event))
-            # DB save as separate task - never blocks fast-path
-            asyncio.create_task(self._save_to_db(event))
-
         # BUG FIX: Retry loop for Telethon start to handle 'database is locked'
         # which happens if a previous instance is still cleaning up or if
         # multiple startup tasks conflict.
