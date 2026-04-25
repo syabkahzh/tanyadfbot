@@ -325,6 +325,7 @@ def ai_circuit_open_remaining() -> float:
 _AI_CIRCUIT_FAILURE_THRESHOLD: int = 5
 _AI_CIRCUIT_COOLDOWN_SEC: float = 30.0
 _last_trend_alert: str = ""
+_last_trend_alert_ts: float = 0.0
 _last_spike_alert: datetime = datetime.min.replace(tzinfo=timezone.utc)
 _last_hourly_digest: str = ""
 
@@ -504,7 +505,7 @@ async def _flush_alert_buffer(delay: float = 0.5) -> None:
             except Exception as e:
                 logger.error(f"Failed to parse p_data_json in flush: {e}")
 
-        set_buffer_flush_task(None)
+
 
     try:
         tasks = []
@@ -518,12 +519,14 @@ async def _flush_alert_buffer(delay: float = 0.5) -> None:
         
         if tasks:
             await asyncio.gather(*tasks)
+        set_buffer_flush_task(None)
 
         await db.conn.execute(
             "DELETE FROM pending_alerts WHERE flush_id=?", (flush_id,)
         )
         await db.conn.commit()
     except Exception as e:
+        set_buffer_flush_task(None)
         print(f"⚠️ Alert flush failed: {e}")
         if bot:
             await bot.alert_error("_flush_alert_buffer", e)

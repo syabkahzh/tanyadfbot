@@ -31,7 +31,7 @@
         "api_key_env": "GROQ_API_KEY",
         "rpm": 55,
         "rpd": 1000,
-        "priority": 3,
+        "priority": 2,
         "base_url": "https://api.groq.com/openai/v1"
     },
     {

@@ -270,7 +270,7 @@ class TelethonListener:
             tg_link=tg_link,
             timestamp=message_data['timestamp'],
             source='python',
-            commit=False
+            commit=True
         )
 
         # BUG A FIX: also write to promos so digest/recap can see this alert

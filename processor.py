@@ -319,7 +319,13 @@ class OpenAICompatibleClient(BaseAIClient):
         kwargs = {}
         if response_schema:
             kwargs["response_format"] = {"type": "json_object"}
-            messages[0]["content"] += f"\n\nOutput MUST be valid JSON matching this schema: {response_schema.model_json_schema()}"
+            schema_str = response_schema.model_json_schema()
+            messages[0]["content"] += (
+                f"\n\nYou MUST respond with ONLY valid JSON. No explanation, no markdown, no preamble."
+                f"\nThe JSON must match this exact schema:\n{schema_str}"
+                f"\nFor promo extraction: if not a promo, set summary='SKIP' and brand='SKIP'."
+                f"\nNever write descriptions of messages. Extract or SKIP."
+            )
 
         res = await self.client.chat.completions.create(
             model=model,
@@ -764,10 +770,7 @@ class GeminiProcessor:
         )
 
         if response is None:
-            self._slots[target_model].release_last()
             return None
-
-        self._slots[target_model].release_last()
 
         if not response.parsed:
             return []
@@ -863,7 +866,6 @@ class GeminiProcessor:
             config={"system_instruction": _DIGEST_SYSTEM},
             slot_name=target,
         )
-        self._slots[target].release_last()
         res = response.text if response else "❌ Gagal merangkum."
         return f"{res}\n\n— via {target}" if response else res
 
@@ -891,7 +893,6 @@ class GeminiProcessor:
             config={"system_instruction": _DIGEST_SYSTEM},
             slot_name=target,
         )
-        self._slots[target].release_last()
         res = response.text if response else "Thread ini sedang ramai dibicarakan."
         return f"{res}\n\n— via {target}" if response else res
 
@@ -904,7 +905,6 @@ class GeminiProcessor:
             config={"system_instruction": _DIGEST_SYSTEM},
             slot_name=target,
         )
-        self._slots[target].release_last()
         res = response.text if response else "❌ AI Busy."
         return f"{res}\n\n— via {target}" if response else res
 
@@ -930,7 +930,6 @@ class GeminiProcessor:
             config=config,
             slot_name=target,
         )
-        self._slots[target].release_last()
         if not response or not response.parsed:
             return None
         res = response.parsed
@@ -988,8 +987,6 @@ class GeminiProcessor:
             ),
         }
         response = await self._call(contents=f"Pesan grup:\n{context}", config=config, slot_name=target)
-        self._slots[target].release_last()
-        
         # Cross-trend dedup
         seen_topics: list[set[str]] = []
         unique_trends: list[TrendItem] = []
@@ -1035,5 +1032,4 @@ class GeminiProcessor:
             config={"system_instruction": system},
             slot_name=target
         )
-        self._slots[target].release_last()
         return cast(str, response.text.strip()) if response and response.text and "NO_TREND" not in response.text else None

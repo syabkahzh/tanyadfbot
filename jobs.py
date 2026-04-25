@@ -162,8 +162,8 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
 
             minutes_to = (target - now_wib).total_seconds() / 60.0
 
-            # Fire when the stated time is between 2 and 3 minutes away
-            if 2.0 <= minutes_to <= 3.0:
+            # Fire when the stated time is between 1 and 6 minutes away
+            if 1.0 <= minutes_to <= 6.0:
                 now_str = now_wib.strftime('%H:%M:%S')
                 
                 # Format reply context if available
@@ -589,7 +589,7 @@ async def hot_thread_job(db: Database, gemini: GeminiProcessor, listener: Any, b
     """Identifies highly active discussion threads and summarizes them."""
     logger.info("⏰ [Job] Starting hot_thread_job...")
     try:
-        threads = await db.get_hot_threads(limit=10)
+        threads = await db.get_hot_threads(minutes=15, min_replies=3, limit=10)
         if not threads:
             return
 
@@ -608,7 +608,7 @@ async def hot_thread_job(db: Database, gemini: GeminiProcessor, listener: Any, b
             
             cooldown_ok = (now_ts - last_alerted_at).total_seconds() > 900
             
-            if t['reply_count'] >= last_count + 5 and cooldown_ok:
+            if t['reply_count'] >= last_count + 3 and cooldown_ok:
                 alerted_hot_threads[t['tg_msg_id']] = (t['reply_count'], now_ts)
                 calls_this_run += 1
 
@@ -785,21 +785,20 @@ async def time_mention_job(db: Database, bot: TelegramBot) -> None:
 
         from telegram.constants import ParseMode
 
-        all_ids = []
-        noise_count = 0
+        alerted_ids = []
+        noise_ids = []
         for r in rows:
-            text  = r['text'] or ""
+            text = r['text'] or ""
             msg_id = r['id']
-            all_ids.append(msg_id)
-
+            
             # FastText weighting: skip noise
             ft_label, ft_conf = await shared.classify_one(text)
             if ft_label == "__label__JUNK" and ft_conf > 0.85:
-                noise_count += 1
+                noise_ids.append(msg_id)
                 continue
 
             if not _is_time_signal_worthy(text):
-                noise_count += 1
+                noise_ids.append(msg_id)
                 continue
 
             link  = _make_tg_link(r['chat_id'], r['tg_msg_id'])
@@ -832,20 +831,22 @@ async def time_mention_job(db: Database, bot: TelegramBot) -> None:
                 f"\n\n🔗 Lihat Pesan:\n{link}"
             )
             await bot.send_plain(alert)
+            alerted_ids.append(msg_id)
 
-        if all_ids:
+        all_done = alerted_ids + noise_ids
+        if all_done:
             # Chunk updates to avoid SQLite variable limits (standard is 999)
             chunk_size = 900
-            for i in range(0, len(all_ids), chunk_size):
-                chunk = all_ids[i:i + chunk_size]
+            for i in range(0, len(all_done), chunk_size):
+                chunk = all_done[i:i + chunk_size]
                 ph = ','.join('?' * len(chunk))
                 await db.conn.execute(
                     f"UPDATE messages SET time_alerted=1 WHERE id IN ({ph})", chunk
                 )
             await db.conn.commit()
 
-            if noise_count > 0:
-                logger.info(f"⏰ [Job] Marked {noise_count} noise time-mentions as alerted.")
+            if noise_ids:
+                logger.info(f"⏰ [Job] Marked {len(noise_ids)} noise time-mentions as alerted.")
 
         logger.info("✅ [Job] Finished time_mention_job")
     except Exception as e:
@@ -880,8 +881,11 @@ async def trend_job(db: Database, gemini: GeminiProcessor, bot: TelegramBot) -> 
 
         # Use combined topics as a simple string for the dedup check
         current_summary = " ".join([t.topic for t in trends])
-        from shared import _last_trend_alert
-        if current_summary == _last_trend_alert:
+        import time as _time
+        _TREND_REPEAT_COOLDOWN = 1800  # 30 min, not "exact same string"
+        now_mono = _time.monotonic()
+        if (current_summary == shared._last_trend_alert 
+                and (now_mono - shared._last_trend_alert_ts) < _TREND_REPEAT_COOLDOWN):
             return
 
         lines: list[str] = []
@@ -901,6 +905,7 @@ async def trend_job(db: Database, gemini: GeminiProcessor, bot: TelegramBot) -> 
         await bot.send_plain(full_text)
 
         shared._last_trend_alert = current_summary
+        shared._last_trend_alert_ts = _time.monotonic()
         logger.info("✅ [Job] Finished trend_job")
     except Exception as e:
         logger.error(f"trend_job error: {e}", exc_info=True)
@@ -939,8 +944,8 @@ async def spike_detection_job(db: Database, gemini: GeminiProcessor, bot: Telegr
             five_min_count = cast(int, row_5[0]) if row_5 else 0
         avg_per_min = five_min_count / 5
 
-        # More sensitive: 15 msg/min and 2.0x average (was 25 and 2.5x)
-        if count >= 15 and count >= max(avg_per_min * 2.0, 5):
+        # More sensitive: 10 msg/min and 1.5x average (helps catch sustained bursts)
+        if count >= 10 and count >= max(avg_per_min * 1.5, 5):
             recent_msgs  = await db.get_recent_messages(minutes=1)
             sample_lines = [
                 f"• {html.escape((m['text'] or '').strip()[:80])}" for m in recent_msgs[:5]
