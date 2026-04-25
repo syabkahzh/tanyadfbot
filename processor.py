@@ -258,11 +258,12 @@ class GoogleClient(BaseAIClient):
                 elif isinstance(contents, list): contents.insert(0, f"INSTRUCTION: {sys_text}")
 
             if config.get("response_mime_type") == "application/json":
-                config.pop("response_mime_type")
-                config.pop("response_schema", None)
-                json_msg = "OUTPUT MUST BE VALID JSON."
-                if isinstance(contents, str): contents += f"\n\n{json_msg}"
-                elif isinstance(contents, list): contents.append(json_msg)
+                # CRITICAL FIX: Do NOT pop response_schema. Let the SDK enforce the schema.
+                # Only inject the prompt helper if the schema is missing.
+                if "response_schema" not in config:
+                    json_msg = "OUTPUT MUST BE VALID JSON."
+                    if isinstance(contents, str): contents += f"\n\n{json_msg}"
+                    elif isinstance(contents, list): contents.append(json_msg)
 
         # Safety settings can be problematic on some models, omitting to use defaults
         # if you need to override them, use the correct HARM_CATEGORY_ prefix.
@@ -766,7 +767,9 @@ class GeminiProcessor:
             for m in filtered:
                 if m.get('reply_to_msg_id') and m['reply_to_msg_id'] in reply_map:
                     ctx_text = reply_map[m['reply_to_msg_id']]
-                    m['context'] = f"C:{ctx_text[-150:]} "
+                    # CRITICAL FIX: Give the AI the full context, up to 1000 characters.
+                    # Your fleet can easily handle the token load now.
+                    m['context'] = f"C:{ctx_text[-1000:]} "
                 else:
                     m['context'] = ""
         else:
