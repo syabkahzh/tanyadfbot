@@ -262,7 +262,23 @@ class GoogleClient(BaseAIClient):
                 sys_text = system
                 if hasattr(system, 'parts'): sys_text = system.parts[0].text
                 if isinstance(contents, str): contents = f"SYSTEM: {sys_text}\n\n{contents}"
-                elif isinstance(contents, list): contents.insert(0, f"SYSTEM: {sys_text}")
+                elif isinstance(contents, list): 
+                    # If it's a list, insert at start, but handle the case where it might contain dicts
+                    contents.insert(0, f"SYSTEM: {sys_text}")
+
+        # Ensure contents is converted to genai Parts if it contains dicts
+        if isinstance(contents, list):
+            import google.generativeai as genai
+            final_contents = []
+            for item in contents:
+                if isinstance(item, dict) and "data" in item:
+                    final_contents.append(genai.types.Part.from_bytes(data=item["data"], mime_type=item["mime_type"]))
+                else:
+                    final_contents.append(item)
+            contents = final_contents
+
+        # Explicitly disable Automatic Function Calling (AFC)
+        config["automatic_function_calling"] = {"disable": True}
 
         res = await self.client.aio.models.generate_content(
             model=model, contents=contents, config=config
@@ -290,8 +306,24 @@ class OpenAICompatibleClient(BaseAIClient):
         
         if isinstance(contents, str): messages.append({"role": "user", "content": contents})
         elif isinstance(contents, list):
+            user_content = []
             for item in contents:
-                if isinstance(item, str): messages.append({"role": "user", "content": item})
+                if isinstance(item, str):
+                    user_content.append({"type": "text", "text": item})
+                elif isinstance(item, dict) and "data" in item:
+                    # Image handling (base64)
+                    import base64
+                    img_b64 = base64.b64encode(item["data"]).decode("utf-8")
+                    user_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{item['mime_type']};base64,{img_b64}"}
+                    })
+            
+            if user_content:
+                messages.append({"role": "user", "content": user_content})
+            else:
+                # Fallback for empty or non-standard list
+                messages.append({"role": "user", "content": str(contents)})
         
         kwargs = {}
         # Adaptive reasoning format handling (e.g., Groq's hidden reasoning)
@@ -796,7 +828,7 @@ class GeminiProcessor:
             slot.release_last()
 
             # Dynamic 429 Rate Limit Handling
-            is_rate_limit = "429" in err_str or "rate limit" in err_str
+            is_rate_limit = "429" in err_str or "rate limit" in err_str or "resource has been exhausted" in err_str
             if is_rate_limit:
                 sleep_sec = 60.0
 
@@ -1089,12 +1121,14 @@ class GeminiProcessor:
         )
         contents: list[Any] = [prompt]
         if parent_photo:
-            contents.append(genai.types.Part.from_bytes(data=parent_photo, mime_type="image/jpeg"))
+            contents.append({"mime_type": "image/jpeg", "data": parent_photo})
 
         tokens = self._estimate_tokens(contents)
-        # Vision requirement only if parent_photo exists
-        provider = "google" if parent_photo else None
-        target = await self._pick_model(provider=provider, estimated_tokens=tokens)
+        # Prefer google for vision, but allow fallback
+        target = await self._pick_model(provider="google" if parent_photo else None, estimated_tokens=tokens)
+        if not target and parent_photo:
+            # Fallback to any vision-capable model
+            target = await self._pick_model(estimated_tokens=tokens)
         response = await self._call(
             contents=contents,
             config={"system_instruction": _DIGEST_SYSTEM},
@@ -1129,9 +1163,19 @@ class GeminiProcessor:
             "response_schema": PromoExtraction,
             "system_instruction": _VISION_SYSTEM,
         }
-        contents = [prompt, genai.types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")]
+        contents = [prompt, {"mime_type": "image/jpeg", "data": image_bytes}]
         tokens = self._estimate_tokens(contents)
+        
+        # Prefer google for vision, but allow fallback
         target = await self._pick_model(provider="google", estimated_tokens=tokens)
+        if not target:
+            # Fallback to any vision-capable model (like Llama Scout)
+            target = await self._pick_model(estimated_tokens=tokens)
+
+        if not target:
+            logger.error("No vision models available for process_image")
+            return None
+
         response = await self._call(
             contents=contents,
             config=config,
