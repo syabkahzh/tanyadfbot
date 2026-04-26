@@ -5,6 +5,7 @@ integrity recovery.
 """
 
 import logging
+import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Any, Sequence, cast
 import functools
