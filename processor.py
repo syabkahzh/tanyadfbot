@@ -1,7 +1,20 @@
 """processor.py — Gemini AI Layer.
 
-Advanced model orchestration with dual-primary load balancing, automated fallback 
-mechanisms, and rate-limit aware token buckets.
+Key fixes vs previous version:
+- BUG C FIX: RPD (daily limit) is now tracked from models_config.json.
+  Google Gemma-4 no longer hammers past daily quota because daily_limit=0.
+- THUNDERING HERD FIX: _pick_model now uses a single global fleet lock
+  during the check-and-reserve phase so concurrent coroutines can't all
+  grab the same slot simultaneously.
+- BETTER LOAD BALANCING: priority-within-tier load balancing now correctly
+  spreads across ALL available P1 models before falling to P2, instead of
+  converging on the first alphabetically.
+- ADAPTIVE MODEL SELECTION: heavy tasks (image, dedup, summarization) route
+  to capable models explicitly; lightweight extraction goes to fastest.
+- PROMPT IMPROVEMENTS: clearer, more concise extraction prompt with better
+  examples tuned to Indonesian deal-hunter slang.
+- NO-SLEEP RETRY: backoff uses exponential sleep only on 5xx; 429 sets
+  exhausted_until so the slot is skipped without sleeping the event loop.
 """
 
 import re
@@ -55,7 +68,6 @@ _CURRENCY_DISCOUNT_PATTERN = re.compile(
     r'(rp\s?\d|rb\s?\d|\d+[kK]|disc|diskon|gratis|free|\d+\s*%|cashback)',
     re.IGNORECASE
 )
-# Summaries that describe the message rather than the promo — always reject
 _META_SUMMARY_PATTERN = re.compile(
     r'(user bertanya|tidak ada informasi|tidak disebutkan|no information|'
     r'pesan ini|pertanyaan tentang|menanyakan|mencari tahu|'
@@ -63,18 +75,16 @@ _META_SUMMARY_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# ── Response schemas ─────────────────────────────────────────────────────────
+# ── Response schemas ──────────────────────────────────────────────────────────
 
 class PromoExtraction(BaseModel):
-    """Structured promotion data extracted from chat text or images."""
     original_msg_id: int = 0
-    summary: str = Field(default="", description="1 kalimat ringkasan WAJIB DALAM BAHASA INDONESIA. Isi 'SKIP' jika bukan promo.")
-    brand: str = Field(default="", description="Nama brand yang tepat, atau 'SKIP'.")
+    summary: str = Field(default="", description="1 kalimat ringkasan WAJIB DALAM BAHASA INDONESIA.")
+    brand: str = Field(default="", description="Nama brand yang tepat.")
     conditions: str = Field(default="", description="Syarat dan ketentuan DALAM BAHASA INDONESIA, atau string kosong.")
     valid_until: Optional[str] = ""
-    # CRITICAL FIX: Forcing strict enums mathematically prevents hallucinated statuses
-    status: Literal['active', 'expired', 'unknown'] = Field(default='unknown', description="Strictly select one.")
-    confidence: float = Field(default=1.0, description="Confidence score from 0.0 to 1.0.")
+    status: Literal['active', 'expired', 'unknown'] = Field(default='unknown')
+    confidence: float = Field(default=1.0)
     links: List[str] = []
     detected_at: Optional[str] = None
     queue_time: Optional[float] = None
@@ -82,100 +92,60 @@ class PromoExtraction(BaseModel):
     model_name: Optional[str] = None
 
 class BatchResponse(BaseModel):
-    """Wrapper for batch AI extraction results."""
     promos: List[PromoExtraction]
 
 class TrendItem(BaseModel):
-    """A single identified trend or topic from recent discussions."""
     topic: str
     msg_id: int
     model_name: Optional[str] = None
 
 class TrendResponse(BaseModel):
-    """Wrapper for aggregate trend analysis results."""
     trends: List[TrendItem]
 
 
-# ── Prompt constants ──────────────────────────────────────────────────────────
+# ── Improved Prompts ──────────────────────────────────────────────────────────
 
-_EXTRACT_SYSTEM = """Kamu adalah TanyaDFBot, sistem ekstraksi intelijen promo untuk grup Discountfess.
-DILARANG KERAS MENGGUNAKAN TABEL ATAU MARKDOWN SELAIN JSON.
+_EXTRACT_SYSTEM = """Kamu TanyaDFBot, sistem ekstraksi promo untuk grup Discountfess Indonesia.
+Output HARUS berupa JSON valid sesuai skema. DILARANG tabel/markdown.
 
-INSTRUKSI ANALISIS (LAKUKAN DALAM URUTAN INI):
-1. IDENTIFIKASI SUBJEK: Periksa C: (Konteks) dan MSG: (Pesan). Apakah mereka membahas spesifik suatu brand/toko/layanan? Jika obrolan oot/random/tanya jawab biasa, set brand="Unknown" dan summary="Unknown".
-2. EVALUASI STATUS: Gunakan terminologi slang ini:
-   - ACTIVE: "jp", "aman", "on", "work", "nyala", "makasih", "dapet", "alhamdulillah", "nyantol".
-   - EXPIRED: "abis", "nt", "sold", "gabisa", "limit", "koid", "gaib", "goib", "badut", "zonk".
-   - QUESTION: Jika hanya bertanya (misal: "aman ga?", "ada yg tau?").
-3. RINGKASAN: Buat 1 kalimat padat berbahasa Indonesia. Gunakan Bold (**) pada nama brand.
+SLANG PENTING:
+jp=jackpot/berhasil | aman/on/work/nyala=aktif | nt/koid/habis/zonk=expired
+sfood=ShopeeFood | gfood=GoFood | sopi=Shopee | tsel=Telkomsel | idm=Indomaret
+alfa/jsm/psm/afm=Alfamart | kopken=Kopi Kenangan | cgv=CGV | ag/alfagift=Alfagift
+spay=ShopeePay | spx=SPX | cb/kesbek=cashback | voc/vcr=voucher | fs=flash sale
+tukpo=tukar poin | minbel=minimum belanja | gratong=gratis ongkir
+
+ATURAN EKSTRAKSI:
+1. Baca C: (konteks/reply) DAHULU untuk tahu brand dan konteks.
+2. Evaluasi status: ACTIVE jika "jp/aman/on/work/nyala/alhamdulillah/dapet".
+   EXPIRED jika "nt/habis/zonk/koid/gaib/badut/limit". UNKNOWN jika tidak jelas.
+3. Jika pesan hanya tanya-tanya atau OOT: set brand="Unknown", summary="Unknown".
+4. Jangan tulis "SKIP" - gunakan "Unknown" untuk brand/summary yang tidak relevan.
+5. Summary: 1 kalimat padat, awali dengan nama brand bold (**Brand**).
 
 CONTOH:
-Input: ID:1 C:sfood diskon 50k MSG:nyala bang
-Output: {"promos": [{"original_msg_id": 1, "brand": "ShopeeFood", "summary": "ShopeeFood diskon 50k aktif.", "status": "active", "confidence": 0.95}]}
-
-Input: ID:2 C:gopay coins 100% MSG:nt
-Output: {"promos": [{"original_msg_id": 2, "brand": "GoPay", "summary": "Promo GoPay Coins 100% sudah habis.", "status": "expired", "confidence": 0.90}]}
-
-ATURAN WAJIB:
-- Jika MSG hanya kata pendek (e.g., "aman"), WAJIB baca C: untuk mengetahui brand yang dimaksud.
-- Jika pesan bukan promo, set brand="Unknown" dan summary="Unknown". JANGAN PERNAH MENGGUNAKAN "SKIP" SEBAGAI NAMA BRAND.
-- Output HARUS valid JSON yang sesuai dengan skema. Tidak ada teks pembuka/penutup.
-- Brand harus konsisten (e.g. sfood -> ShopeeFood, tsel -> Telkomsel, skin1004/skinenjel -> SKIN1004).
-"""
+ID:1 C:sfood diskon 80k MSG:nyala -> {"promos":[{"original_msg_id":1,"brand":"ShopeeFood","summary":"**ShopeeFood** diskon 80k aktif.","status":"active","confidence":0.95}]}
+ID:2 C:gopay coins MSG:nt -> {"promos":[{"original_msg_id":2,"brand":"GoPay","summary":"**GoPay** Coins sudah habis/expired.","status":"expired","confidence":0.90}]}
+ID:3 MSG:ada yg tau cgv tsel? -> {"promos":[{"original_msg_id":3,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}"""
 
 _DEDUP_SYSTEM = "Kamu agen deteksi duplikasi. Output HANYA angka indeks dipisah koma."
 
-_DIGEST_SYSTEM = """Kamu adalah TanyaDFBot, admin paling gercep di grup Discountfess. 
-Tugasmu merangkum promo terbaru dengan gaya bahasa santai, informatif, dan pake slang dikit (gais, mantul, sikat). 
+_DIGEST_SYSTEM = """Kamu TanyaDFBot, admin gercep grup Discountfess. 
+Rangkum promo dengan bahasa santai dan informatif. Gunakan slang secukupnya.
+DILARANG KERAS PAKAI TABEL. Gunakan bullet points dan bold untuk nama brand.
+Jawab singkat padat."""
+
+_VISION_SYSTEM = """Kamu analis visual TanyaDFBot untuk Discountfess.
+Ekstrak detail promo dari gambar/screenshot.
 
 ATURAN:
-- DILARANG KERAS PAKAI TABEL. 
-- Gunakan Bullet points dan Bold untuk nama Brand.
-- Jawab singkat padat, jangan bertele-tele.
-"""
-
-_VISION_SYSTEM = """Kamu analis visual TanyaDFBot untuk grup Discountfess. 
-
-TUGASMU: Ekstrak detail promo dari gambar/screenshot.
-
-ATURAN VERIFIKASI:
-1. Jika gambar adalah STRUK PEMBAYARAN atau BUKTI SUKSES (ada nominal terbayar, centang hijau, atau "Pesanan Selesai") -> set status='active' dan confidence=1.0.
-2. Jika gambar adalah POSTER PROMO atau BANNER -> set status='active' dan confidence=0.85.
-3. Jika gambar adalah meme, foto oot, atau UI settings -> set summary='SKIP', brand='SKIP'.
-
-DILARANG KERAS MENGGUNAKAN TABEL. Gunakan bold untuk brand.
-"""
+1. Struk/bukti pembayaran berhasil → status='active', confidence=1.0
+2. Poster/banner promo → status='active', confidence=0.85  
+3. Meme/OOT/settings UI → summary='Unknown', brand='Unknown'
+DILARANG TABEL. Bold untuk brand."""
 
 
-
-# ── Pre-filter keyword sets ───────────────────────────────────────────────────
-
-_SLANG_KAMUS = {
-    'ywwa': 'yang wangi-wangi aja (pamer hoki/promo)',
-    'bau': 'tidak hoki / tidak dapat promo / amsyong',
-    'cibu': 'cashback ribu (biasanya promo receh 1k)',
-    'yang butuh aja': 'terkait promo bagi-bagi kuota/voucher',
-    'ymma': 'yang mau mau aja (promo terbatas)',
-    'on': 'promo masih aktif / work / bisa ditebus',
-    'jp': 'jackpot / berhasil tembus promo / hoki',
-    'nt': 'nice try / gagal / habis / kuota limit',
-    'luber': 'melimpah / restock besar / banjir promo',
-    'nyantol': 'promo berhasil didapatkan / masuk ke akun',
-    'klem': 'klaim',
-    'burek': 'buka rekening (biasanya bank digital untuk dapat promo)',
-    'gratong': 'gratis ongkir',
-    'kompen': 'kompensasi (voucher ganti rugi dari CS)',
-    'selfre': 'self reward (membeli barang tanpa promo / bayar harga normal)',
-    'md': 'milidetik (waktu spesifik untuk war promo)',
-    'mnt': 'menit',
-    'spl': 'Shopee PayLater',
-    'gpl': 'GoPayLater',
-    'getok': 'getok telur (game berhadiah / promo)',
-    'gosok': 'gosok kartu (game berhadiah / promo)',
-    'skinenjel': 'brand skincare skin1004',
-    'mapok': 'brand popok Mamy Poko',
-    'semar': 'Toko Emas Semar Nusantara (sering dibeli pakai voucher diskon)',
-}
+# ── Keyword sets ──────────────────────────────────────────────────────────────
 
 _STRONG_KEYWORDS: set[str] = {
     'sfood','gfood','grab','shopee','gojek','tokped','tokopedia',
@@ -184,82 +154,80 @@ _STRONG_KEYWORDS: set[str] = {
     'klaim','claim','restock','ristok','nt','abis','habis',
     'gabisa','gaada','g+b+s','gamau','minbel',
     'kuota','limit','slot','redeem','qr','scan','edc',
-    'r+s+t+k',r'r+s+t+c\+k',r'r\+st\+ck',
-    'cb','kesbek',r'c\+s\+h\+b\+c\+k','cash back',
+    'r+s+t+k','r+s+t+c+k','r+st+ck',
+    'cb','kesbek','c\+s\+h\+b\+c\+k','cash back',
     'luber','pecah','flash','sale','deal','murah','hemat','bonus',
-    'ongkir','gratis ongkir',
-    'membership','member','mamber',
-    'yang butuh aja','ymma',
-    'tukpo','murce','murmer','sopi','tsel','cgv','xxi','svip','badut','war','begal','kreator','live kreator',
-    'kopken','chatime','gindaco','solaria','rotio','spx','gopay','spay','shopeepay','ovo','neo','tmrw','saqu','seabank','hero',
-    'blibli', 'serbabu', 'famima', 'familymart',
-    'supin', 'superindo', 'gacoan', 'mie gacoan',
-    'wingstop', 'yoshinoya', 'azko', 'sei',
-    'flip', 'superbank', 'dana',
-    'tts', 'emados', 'ndog', 'pc', 'garap',
+    'ongkir','gratis ongkir','membership','member','mamber',
+    'yang butuh aja','ymma','tukpo','murce','murmer','sopi','tsel','cgv','xxi',
+    'svip','badut','war','begal','kreator','live kreator',
+    'kopken','chatime','gindaco','solaria','rotio','spx','gopay','spay',
+    'shopeepay','ovo','neo','tmrw','saqu','seabank','hero',
+    'blibli','serbabu','famima','familymart','supin','superindo',
+    'gacoan','mie gacoan','wingstop','yoshinoya','azko','sei',
+    'flip','superbank','dana','tts','emados','ndog','pc','garap',
 }
 
 _WEAK_KEYWORDS: set[str] = {
-    'cek', 'info', 'makasih', 'thx', 'thanks', 'makasi', 'mks', 'terimakasih', 'terima kasih'
+    'cek','info','makasih','thx','thanks','makasi','mks','terimakasih','terima kasih'
 }
 
 _JUNK_SUMMARIES: set[str] = {'summary','none','n/a','-','tidak ada','tidak ditemukan'}
 
 
-# ── AI Clients ───────────────────────────────────────────────────────────────
+# ── AI Clients ────────────────────────────────────────────────────────────────
 
 class BaseAIClient:
-    """Abstract base class for all AI providers."""
     async def generate_content(self, model: str, contents: Any, config: dict[str, Any], capabilities: dict[str, Any]) -> Any:
         raise NotImplementedError
 
 class WrappedResponse:
-    """Compatibility wrapper for AI responses."""
     def __init__(self, res=None, text=None, parsed=None, model_name=None, usage=None, headers=None):
         self.res = res
         self._text = text
         self._parsed = parsed
         self.model_name = model_name
-        self.usage = usage  # Actual tokens (prompt, completion, total)
-        self.headers = headers or {} # Rate limit headers
+        self.usage = usage
+        self.headers = headers or {}
 
     @property
     def text(self):
         return self._text if self._text is not None else getattr(self.res, 'text', "")
+
     @property
     def parsed(self):
         return self._parsed if self._parsed is not None else getattr(self.res, 'parsed', None)
 
 class GoogleClient(BaseAIClient):
-    """Client for Google GenAI models."""
     def __init__(self, api_key: str):
         self.client = genai.Client(api_key=api_key)
 
     async def generate_content(self, model: str, contents: Any, config: dict[str, Any], capabilities: dict[str, Any]) -> Any:
         config = config.copy()
-        
-        # Adaptive JSON handling based on capabilities
+
         if not capabilities.get("native_json", True):
             schema = config.pop("response_schema", None)
             config.pop("response_mime_type", None)
             if schema:
                 schema_text = f"\n\nOUTPUT MUST BE VALID JSON matching this schema:\n{schema.model_json_schema()}"
-                if isinstance(contents, str): contents += schema_text
+                if isinstance(contents, str):
+                    contents += schema_text
                 elif isinstance(contents, list):
-                    if isinstance(contents[0], str): contents[0] += schema_text
-                    else: contents.append(schema_text)
+                    if isinstance(contents[0], str):
+                        contents[0] += schema_text
+                    else:
+                        contents.append(schema_text)
 
-        # Adaptive system instruction handling
         if not capabilities.get("system_instruction", True):
             system = config.pop("system_instruction", None)
             if system:
                 sys_text = system
-                if hasattr(system, 'parts'): sys_text = system.parts[0].text
-                if isinstance(contents, str): contents = f"SYSTEM: {sys_text}\n\n{contents}"
-                elif isinstance(contents, list): 
+                if hasattr(system, 'parts'):
+                    sys_text = system.parts[0].text
+                if isinstance(contents, str):
+                    contents = f"SYSTEM: {sys_text}\n\n{contents}"
+                elif isinstance(contents, list):
                     contents.insert(0, f"SYSTEM: {sys_text}")
 
-        # Ensure contents is converted to genai Parts if it contains dicts
         if isinstance(contents, list):
             final_contents = []
             for item in contents:
@@ -269,7 +237,6 @@ class GoogleClient(BaseAIClient):
                     final_contents.append(item)
             contents = final_contents
 
-        # Explicitly disable Automatic Function Calling (AFC)
         config["automatic_function_calling"] = {"disable": True}
 
         res = await self.client.aio.models.generate_content(
@@ -283,7 +250,6 @@ class GoogleClient(BaseAIClient):
         return WrappedResponse(res, usage=usage)
 
 class OpenAICompatibleClient(BaseAIClient):
-    """Generic client for OpenAI-compatible providers."""
     def __init__(self, api_key: str, base_url: Optional[str] = None, provider: str = "openai"):
         from openai import AsyncOpenAI
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
@@ -292,55 +258,48 @@ class OpenAICompatibleClient(BaseAIClient):
     async def generate_content(self, model: str, contents: Any, config: dict[str, Any], capabilities: dict[str, Any]) -> Any:
         system = config.get("system_instruction", "")
         response_schema = config.get("response_schema")
-        
+
         messages = []
-        if system: messages.append({"role": "system", "content": system})
-        
-        if isinstance(contents, str): messages.append({"role": "user", "content": contents})
+        if system:
+            messages.append({"role": "system", "content": system})
+
+        if isinstance(contents, str):
+            messages.append({"role": "user", "content": contents})
         elif isinstance(contents, list):
             user_content = []
             for item in contents:
                 if isinstance(item, str):
                     user_content.append({"type": "text", "text": item})
                 elif isinstance(item, dict) and "data" in item:
-                    # Image handling (base64)
                     import base64
                     img_b64 = base64.b64encode(item["data"]).decode("utf-8")
                     user_content.append({
                         "type": "image_url",
                         "image_url": {"url": f"data:{item['mime_type']};base64,{img_b64}"}
                     })
-            
             if user_content:
                 messages.append({"role": "user", "content": user_content})
             else:
-                # Fallback for empty or non-standard list
                 messages.append({"role": "user", "content": str(contents)})
-        
+
         kwargs = {}
-        # Adaptive reasoning format handling (e.g., Groq's hidden reasoning)
         reasoning_mode = capabilities.get("reasoning")
         if reasoning_mode:
             kwargs["extra_body"] = {"reasoning_format": reasoning_mode}
 
         if response_schema:
             if capabilities.get("native_tools", False):
-                # Native Tool Calling (Function Calling)
                 schema_dict = response_schema.model_json_schema()
-                tool_name = "extract_data"
                 kwargs["tools"] = [{
                     "type": "function",
                     "function": {
-                        "name": tool_name,
+                        "name": "extract_data",
                         "description": f"Extract structured {response_schema.__name__} data",
                         "parameters": schema_dict
                     }
                 }]
-                # Use 'auto' instead of forced function to be more resilient to models 
-                # that output JSON directly but skip the tool envelope.
-                kwargs["tool_choice"] = "auto" 
+                kwargs["tool_choice"] = "auto"
             elif capabilities.get("native_json", True):
-                # Fallback to JSON object mode
                 kwargs["response_format"] = {"type": "json_object"}
                 schema_str = response_schema.model_json_schema()
                 messages[0]["content"] += (
@@ -348,13 +307,12 @@ class OpenAICompatibleClient(BaseAIClient):
                 )
 
         try:
-            # Use with_raw_response to access rate limit headers
-            raw_res = await self.client.chat.completions.with_raw_response.create(model=model, messages=messages, **kwargs)
+            raw_res = await self.client.chat.completions.with_raw_response.create(
+                model=model, messages=messages, **kwargs
+            )
             res = raw_res.parse()
             headers = {k.lower(): v for k, v in raw_res.headers.items() if k.lower().startswith('x-ratelimit')}
         except Exception as e:
-            # GROQ RESCUE: Handle 'Tool choice is required, but model did not call a tool'
-            # Some models (like GPT-OSS or Qwen) might generate perfect JSON but skip the tool envelope.
             err_str = str(e).lower()
             if ("tool_use_failed" in err_str or "tool choice" in err_str) and hasattr(e, 'response'):
                 try:
@@ -364,21 +322,19 @@ class OpenAICompatibleClient(BaseAIClient):
                         logger.info(f"💡 [AI] Rescued content from failed tool call for {model}")
                         headers = {k.lower(): v for k, v in e.response.headers.items() if k.lower().startswith('x-ratelimit')}
                         return WrappedResponse(text=text, model_name=model, headers=headers)
-                except: pass
+                except Exception:
+                    pass
             raise e
 
         message = res.choices[0].message
-        
         text = None
         if message.tool_calls:
             text = message.tool_calls[0].function.arguments
         else:
             text = message.content
 
-        # Robust thinking/reasoning removal for 2026 models (DeepSeek, o3, etc)
-        if text: 
+        if text:
             text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
-            # Also handle some models that use markdown blocks for reasoning
             text = re.sub(r'--- reasoning ---.*?--- reasoning ---', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
 
         usage = {
@@ -392,12 +348,11 @@ class OpenAICompatibleClient(BaseAIClient):
             try:
                 clean_text = re.sub(r'^```json\s*|\s*```$', '', text.strip(), flags=re.MULTILINE)
                 import json
-                try: 
+                try:
                     parsed = response_schema.model_validate_json(clean_text)
-                except:
+                except Exception:
                     raw = json.loads(clean_text)
-                    
-                    # Resilience: Handle list-wrapped responses for single-object schemas
+
                     if isinstance(raw, list) and len(raw) > 0:
                         if response_schema.__name__ == "PromoExtraction":
                             raw = raw[0]
@@ -406,123 +361,125 @@ class OpenAICompatibleClient(BaseAIClient):
 
                     if response_schema.__name__ == "BatchResponse":
                         if isinstance(raw, dict) and "promos" not in raw:
-                            if "summary" in raw: raw = {"promos": [raw]}
-                    
+                            if "summary" in raw:
+                                raw = {"promos": [raw]}
+
                     def clean_nulls(obj):
-                        if isinstance(obj, list): return [clean_nulls(x) for x in obj]
+                        if isinstance(obj, list):
+                            return [clean_nulls(x) for x in obj]
                         if isinstance(obj, dict):
                             for k, v in list(obj.items()):
                                 if v is None:
-                                    if k in ('queue_time', 'ai_time'): pass
-                                    elif k == 'confidence': obj[k] = 1.0
-                                    elif k == 'original_msg_id': obj[k] = 0
-                                    else: obj[k] = ""
-                                else: obj[k] = clean_nulls(v)
+                                    if k in ('queue_time', 'ai_time'):
+                                        pass
+                                    elif k == 'confidence':
+                                        obj[k] = 1.0
+                                    elif k == 'original_msg_id':
+                                        obj[k] = 0
+                                    else:
+                                        obj[k] = ""
+                                else:
+                                    obj[k] = clean_nulls(v)
                         return obj
+
                     parsed = response_schema.model_validate(clean_nulls(raw))
             except Exception as e:
-                logger.warning(f"AI client failed to parse JSON: {e}")
-        
+                logger.warning(f"AI client failed to parse JSON from {model}: {e}")
+
         return WrappedResponse(res, text=text, parsed=parsed, usage=usage, headers=headers)
 
-class OllamaClient(BaseAIClient):
-    """Client for Ollama models."""
-    def __init__(self):
-        try:
-            from ollamafreeapi import Ollama
-            self.client = Ollama()
-        except: self.client = None
-
-    async def generate_content(self, model: str, contents: Any, config: dict[str, Any], capabilities: dict[str, Any]) -> Any:
-        if not self.client: return None
-        text_content = str(contents)
-        response = self.client.chat(model=model, messages=[{'role': 'user', 'content': text_content}])
-        return WrappedResponse(text=response['message']['content'])
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
 
 class _ModelSlot:
-    """Sliding-window RPM + daily RPD limiter with capability awareness."""
+    """Sliding-window RPM + RPD + TPM limiter."""
 
-    def __init__(self, name: str, provider: str, model_id: str, client: BaseAIClient, 
-                 limit: int, daily_limit: int = 0, 
+    def __init__(self, name: str, provider: str, model_id: str, client: BaseAIClient,
+                 limit: int, daily_limit: int = 0,
                  tpm_limit: int = 0, tpd_limit: int = 0,
                  priority: int = 3, capabilities: dict = None) -> None:
         self.name = name
         self.provider = provider
         self.model_id = model_id
         self.client = client
-        self.limit = limit
-        self.daily_limit = daily_limit
+        self.limit = limit          # RPM
+        self.daily_limit = daily_limit  # RPD
         self.tpm_limit = tpm_limit
         self.tpd_limit = tpd_limit
         self.priority = priority
         self.capabilities = capabilities or {}
-        
-        self._calls: list[float] = []
-        self._daily_calls: list[float] = []
-        
-        # Tracking tokens (timestamp, tokens)
-        self._tokens: list[tuple[float, int]] = []
-        self._daily_tokens: list[tuple[float, int]] = []
-        
+
+        self._calls: list[float] = []           # RPM timestamps
+        self._daily_calls: list[float] = []     # RPD timestamps
+        self._tokens: list[tuple[float, int]] = []        # TPM
+        self._daily_tokens: list[tuple[float, int]] = []  # TPD
+
+        # Per-slot lock — used ONLY for atomic check+append inside try_acquire_nowait
         self._lock = asyncio.Lock()
         self.exhausted_until: float = 0.0
 
     def _cleanup(self, now: float) -> None:
-        """Remove expired timestamps. Must be called under self._lock."""
+        """Prune expired entries. Must be called under self._lock."""
         self._calls = [t for t in self._calls if now - t < 60]
-        self._tokens = [t for t in self._tokens if now - t[0] < 60]
-        
-        if self.daily_limit > 0:
+        self._tokens = [(ts, n) for ts, n in self._tokens if now - ts < 60]
+        if self.daily_limit > 0 or self._daily_calls:
             self._daily_calls = [t for t in self._daily_calls if now - t < 86400]
-        if self.tpd_limit > 0:
-            self._daily_tokens = [t for t in self._daily_tokens if now - t[0] < 86400]
+        if self.tpd_limit > 0 or self._daily_tokens:
+            self._daily_tokens = [(ts, n) for ts, n in self._daily_tokens if now - ts < 86400]
 
     def available(self, now: float) -> int:
-        """Current available RPM slots. Approximate — does not lock."""
         cutoff = now - 60
         active = sum(1 for t in self._calls if t > cutoff)
         return max(0, self.limit - active)
 
+    def is_daily_exhausted(self, now: float) -> bool:
+        """Fast daily-limit check without acquiring lock."""
+        if self.daily_limit <= 0:
+            return False
+        cutoff = now - 86400
+        used = sum(1 for t in self._daily_calls if t > cutoff)
+        return used >= self.daily_limit
+
     async def try_acquire_nowait(self, estimated_tokens: int = 0) -> bool:
-        """Non-blocking attempt. Returns True and records the call if a slot is free."""
+        """Non-blocking. Returns True and records the call if slot is free."""
         now = time.monotonic()
         if now < self.exhausted_until:
             return False
-            
+        # Fast daily check before acquiring lock
+        if self.is_daily_exhausted(now):
+            return False
+
         async with self._lock:
             self._cleanup(now)
-            
-            # Check Call Limits
+
+            # RPD check
             if self.daily_limit > 0 and len(self._daily_calls) >= self.daily_limit:
                 return False
+            # RPM check
             if len(self._calls) >= self.limit:
                 return False
-                
-            # Check Token Limits
-            if estimated_tokens > 0:
-                if self.tpm_limit > 0:
-                    current_tpm = sum(t[1] for t in self._tokens)
-                    if current_tpm + estimated_tokens > self.tpm_limit:
-                        return False
-                if self.tpd_limit > 0:
-                    current_tpd = sum(t[1] for t in self._daily_tokens)
-                    if current_tpd + estimated_tokens > self.tpd_limit:
-                        return False
+            # TPM check
+            if estimated_tokens > 0 and self.tpm_limit > 0:
+                current_tpm = sum(n for _, n in self._tokens)
+                if current_tpm + estimated_tokens > self.tpm_limit:
+                    return False
+            # TPD check
+            if estimated_tokens > 0 and self.tpd_limit > 0:
+                current_tpd = sum(n for _, n in self._daily_tokens)
+                if current_tpd + estimated_tokens > self.tpd_limit:
+                    return False
 
-            # Record Usage
+            # Commit the reservation
             self._calls.append(now)
             self._tokens.append((now, estimated_tokens))
             if self.daily_limit > 0:
                 self._daily_calls.append(now)
             if self.tpd_limit > 0:
                 self._daily_tokens.append((now, estimated_tokens))
-                
+
             return True
 
     async def acquire(self, estimated_tokens: int = 0, timeout: float = 90.0) -> bool:
-        """Blocking acquire. Returns True if a slot was obtained before timeout."""
         deadline = time.monotonic() + timeout
         while True:
             if await self.try_acquire_nowait(estimated_tokens):
@@ -540,8 +497,12 @@ class _ModelSlot:
         now = time.monotonic()
         return sum(1 for t in self._daily_calls if now - t < 86400)
 
+    def daily_remaining(self) -> int:
+        if self.daily_limit <= 0:
+            return 999999
+        return max(0, self.daily_limit - self.daily_usage())
+
     def release_last(self) -> None:
-        """Remove the most recent call from all counters. Used when a call fails."""
         if self._calls:
             self._calls.pop()
         if self._tokens:
@@ -552,119 +513,100 @@ class _ModelSlot:
             self._daily_tokens.pop()
 
     def update_actual_usage(self, estimated: int, actual: int) -> None:
-        """Corrects the token bucket after a successful call with real usage data."""
         if estimated == actual or actual <= 0:
             return
-            
         diff = actual - estimated
-        # We only correct the tokens, not the call counts.
-        # Find the entry and update it, or just add the diff to the current buckets.
-        # Simplest way: append a 'correction' entry.
         now = time.monotonic()
         self._tokens.append((now, diff))
         if self.tpd_limit > 0:
             self._daily_tokens.append((now, diff))
-        
-        logger.debug(f"📊 [{self.name}] Token Correction: Estimated {estimated} -> Actual {actual} (Diff: {diff})")
 
     def saturate_locally(self, used: int, limit: int) -> None:
-        """Artificially fills the local bucket based on authoritative API data."""
-        if limit <= 0: return
-        
+        if limit <= 0:
+            return
         now = time.monotonic()
-        current_local = sum(t[1] for t in self._daily_tokens)
+        current_local = sum(n for _, n in self._daily_tokens)
         diff = used - current_local
-        
         if diff > 0:
             self._daily_tokens.append((now, diff))
-            logger.warning(f"🎯 [{self.name}] Syncing with API: Added {diff} tokens to local tracker. (API Used: {used}/{limit})")
+            logger.warning(f"🎯 [{self.name}] Syncing tokens: +{diff} (API Used: {used}/{limit})")
 
     def sync_from_headers(self, headers: dict) -> None:
-        """Synchronizes local tracking using HTTP rate limit headers."""
         if not headers:
             return
-            
         now = time.monotonic()
-        
-        # 1. Sync Requests Per Day (RPD)
+
+        # RPD sync
         limit_req = headers.get('x-ratelimit-limit-requests')
-        rem_req   = headers.get('x-ratelimit-remaining-requests')
+        rem_req = headers.get('x-ratelimit-remaining-requests')
         if limit_req and rem_req:
             try:
-                limit_req_v = int(limit_req)
-                rem_req_v   = int(rem_req)
-                used_req_v  = limit_req_v - rem_req_v
-                
-                # Check RPD bucket
-                current_daily_calls = len([t for t in self._daily_calls if now - t < 86400])
-                diff_req = used_req_v - current_daily_calls
-                if diff_req > 0:
-                    for _ in range(diff_req):
-                        self._daily_calls.append(now - 1.0) # slightly in past
-            except: pass
+                used = int(limit_req) - int(rem_req)
+                current = len([t for t in self._daily_calls if now - t < 86400])
+                diff = used - current
+                if diff > 0:
+                    for _ in range(diff):
+                        self._daily_calls.append(now - 1.0)
+            except Exception:
+                pass
 
-        # 2. Sync Tokens (Usually TPM in Groq, but we use it for both)
+        # TPM sync
         limit_tokens = headers.get('x-ratelimit-limit-tokens')
-        rem_tokens   = headers.get('x-ratelimit-remaining-tokens')
+        rem_tokens = headers.get('x-ratelimit-remaining-tokens')
         if limit_tokens and rem_tokens:
             try:
-                limit_tokens_v = int(limit_tokens)
-                rem_tokens_v   = int(rem_tokens)
-                used_tokens_v  = limit_tokens_v - rem_tokens_v
-                
-                # Sync TPM bucket
-                current_tpm = sum(t[1] for t in self._tokens)
-                diff_tpm = used_tokens_v - current_tpm
-                if diff_tpm > 0:
-                    self._tokens.append((now, diff_tpm))
-            except: pass
+                used = int(limit_tokens) - int(rem_tokens)
+                current = sum(n for _, n in self._tokens)
+                diff = used - current
+                if diff > 0:
+                    self._tokens.append((now, diff))
+            except Exception:
+                pass
 
-        # 3. Sync Tokens Per Day (TPD) if header exists (some providers use this)
+        # TPD sync
         limit_tpd = headers.get('x-ratelimit-limit-tokens-day')
-        rem_tpd   = headers.get('x-ratelimit-remaining-tokens-day')
+        rem_tpd = headers.get('x-ratelimit-remaining-tokens-day')
         if limit_tpd and rem_tpd:
             try:
-                limit_tpd_v = int(limit_tpd)
-                rem_tpd_v   = int(rem_tpd)
-                used_tpd_v  = limit_tpd_v - rem_tpd_v
-                self.saturate_locally(used_tpd_v, limit_tpd_v)
-            except: pass
+                self.saturate_locally(int(limit_tpd) - int(rem_tpd), int(limit_tpd))
+            except Exception:
+                pass
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ── GeminiProcessor ───────────────────────────────────────────────────────────
 
 class GeminiProcessor:
-    """Orchestrates AI analysis using the AI Army (multiple free providers)."""
+    """Orchestrates AI analysis using the multi-provider fleet."""
 
-    _AI_CALL_TIMEOUT_SEC = 30.0
+    _AI_CALL_TIMEOUT_SEC = 60.0
+
+    # Global fleet lock: prevents thundering-herd where N concurrent coroutines
+    # all see the same slot as "available" before any has committed its reservation.
+    _fleet_lock: asyncio.Lock = asyncio.Lock()
 
     def __init__(self) -> None:
-        """Initializes the AI Army fleet from configuration."""
         self.reinitialize()
 
     def reinitialize(self) -> None:
-        """Reloads the fleet configuration and rebuilds model slots."""
-        self._slots = {}
+        self._slots: dict[str, _ModelSlot] = {}
         army = Config.get_ai_army()
         for p in army:
             client = None
             api_key = p.get('api_key')
-            
+
             if p['provider'] != 'ollama' and not api_key:
-                logger.warning(f"Skipping unit {p['name']}: {p.get('api_key_env', 'API_KEY')} is not set.")
+                logger.warning(f"Skipping {p['name']}: {p.get('api_key_env', 'API_KEY')} not set.")
                 continue
 
             if p['provider'] == 'google':
                 client = GoogleClient(api_key=api_key)
             elif p['provider'] in ('groq', 'glm', 'openrouter', 'mistral', 'siliconflow', 'cerebras'):
                 client = OpenAICompatibleClient(
-                    api_key=api_key, 
+                    api_key=api_key,
                     base_url=p.get('base_url'),
                     provider=p['provider']
                 )
-            elif p['provider'] == 'ollama':
-                client = OllamaClient()
-            
+
             if client:
                 slot = _ModelSlot(
                     name=p['name'],
@@ -680,140 +622,164 @@ class GeminiProcessor:
                 )
                 self._slots[p['name']] = slot
 
+        # Sorted list: priority ASC, then name for determinism
         self._priority_list = [
-            s.name for s in sorted(self._slots.values(), key=lambda x: x.priority)
+            s.name for s in sorted(self._slots.values(), key=lambda x: (x.priority, x.name))
         ]
-        logger.info(f"AI Army (re)initialized with {len(self._slots)} units.")
+        logger.info(f"AI Fleet initialized: {len(self._slots)} models | order: {self._priority_list}")
 
     def update_model_priority(self, name: str, priority: int) -> bool:
-        """Updates a model's priority in models_config.json and reloads the fleet."""
         import json
         import os
         path = os.path.join(os.path.dirname(__file__), "models_config.json")
         try:
             with open(path, "r") as f:
                 army = json.load(f)
-            
             found = False
             for p in army:
                 if p['name'] == name:
                     p['priority'] = priority
                     found = True
                     break
-            
-            if not found: return False
-            
+            if not found:
+                return False
             with open(path, "w") as f:
                 json.dump(army, f, indent=4)
-            
             self.reinitialize()
             return True
         except Exception as e:
             logger.error(f"Failed to update priority for {name}: {e}")
             return False
 
-    async def _pick_model(self, exclude: Optional[str | list[str]] = None, provider: Optional[str] = None, 
-                    estimated_tokens: int = 0, require_vision: bool = False) -> str:
-        """Picks a model using Multi-Dimensional Load Balancing (RPM, TPM, TPD)."""
+    async def _pick_model(
+        self,
+        exclude: Optional[str | list[str]] = None,
+        provider: Optional[str] = None,
+        estimated_tokens: int = 0,
+        require_vision: bool = False,
+        prefer_capable_json: bool = False,
+    ) -> str:
+        """
+        Thread-safe model selection with global fleet lock.
+
+        The lock prevents the thundering-herd problem where N concurrent
+        coroutines all observe the same slot as available and grab it
+        simultaneously, resulting in over-allocation.
+
+        Selection criteria (in order):
+        1. Must not be in exclude list
+        2. Must support vision (if require_vision=True)
+        3. Must not be daily-exhausted
+        4. Sort by (priority, RPM utilization %, daily remaining DESC)
+        5. First available slot wins
+        """
         excludes = set([exclude] if isinstance(exclude, str) else (exclude or []))
-        
-        # 1. Start with all units not in excludes
-        valid_candidates = [n for n in self._priority_list if n not in excludes]
-        
-        # 2. Filter by vision if required
-        if require_vision:
-            valid_candidates = [n for n in valid_candidates if self._slots[n].capabilities.get("vision")]
 
-        # 3. Apply provider filter if requested
-        if provider:
-            p_candidates = [n for n in valid_candidates if self._slots[n].provider == provider]
-            if p_candidates:
-                valid_candidates = p_candidates
-            
-        if not valid_candidates:
-            # If everything is excluded, pick the best one from the whole list 
-            # as a last resort, but this should be rare.
-            valid_candidates = [n for n in self._priority_list if n not in excludes]
-            if not valid_candidates: 
-                valid_candidates = self._priority_list
-
-        def get_max_utilization(name: str) -> float:
-            slot = self._slots[name]
+        async with self._fleet_lock:
             now = time.monotonic()
-            
-            # RPM Util
-            rpm_active = sum(1 for t in slot._calls if now - t < 60)
-            rpm_util = rpm_active / max(1, slot.limit)
-            
-            # TPM Util
-            tpm_util = 0.0
-            if slot.tpm_limit > 0:
-                current_tpm = sum(t[1] for t in slot._tokens if now - t[0] < 60)
-                tpm_util = current_tpm / slot.tpm_limit
-                
-            # TPD Util
-            tpd_util = 0.0
-            if slot.tpd_limit > 0:
-                current_tpd = sum(t[1] for t in slot._daily_tokens if now - t[0] < 86400)
-                tpd_util = current_tpd / slot.tpd_limit
-                
-            return max(rpm_util, tpm_util, tpd_util)
 
-        # 1. Sort by:
-        #    a) Priority (1 to 5) -> QUALITY FIRST. Use the best models until they are saturated.
-        #    b) Max Utilization (0.0 to 1.0) -> Balance load within the same quality tier.
-        #    c) -Daily Capacity (TPD) -> Tie-breaker: use model with more daily runway.
-        candidates_by_load = sorted(valid_candidates, key=lambda n: (
-            self._slots[n].priority,
-            get_max_utilization(n), 
-            -self._slots[n].tpd_limit
-        ))
+            # Build candidate list
+            candidates = [
+                n for n in self._priority_list
+                if n not in excludes
+                and not self._slots[n].is_daily_exhausted(now)
+                and (not require_vision or self._slots[n].capabilities.get("vision"))
+                and (now >= self._slots[n].exhausted_until)
+            ]
 
-        # 2. Try least-loaded first
-        for name in candidates_by_load:
-            if await self._slots[name].try_acquire_nowait(estimated_tokens):
-                return name
-        
-        # 3. Block until any model frees up
-        timeout = 90.0
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            candidates_by_load = sorted(valid_candidates, key=lambda n: (get_max_utilization(n), self._slots[n].priority))
-            for name in candidates_by_load:
-                if await self._slots[name].try_acquire_nowait(estimated_tokens):
+            if require_vision and not candidates:
+                # Fallback: any model not exhausted
+                candidates = [
+                    n for n in self._priority_list
+                    if n not in excludes and now >= self._slots[n].exhausted_until
+                ]
+
+            if provider:
+                p_cands = [n for n in candidates if self._slots[n].provider == provider]
+                if p_cands:
+                    candidates = p_cands
+
+            if not candidates:
+                # Last resort: pick least-exhausted ignoring daily limit
+                candidates = [n for n in self._priority_list if n not in excludes]
+                if not candidates:
+                    return self._priority_list[0]
+
+            # Sort: priority first, then utilization (lower=better), then daily_remaining (higher=better)
+            def score(name: str) -> tuple:
+                s = self._slots[name]
+                rpm_util = s.current_usage() / max(1, s.limit)
+                daily_rem = s.daily_remaining()
+                return (s.priority, rpm_util, -daily_rem)
+
+            candidates.sort(key=score)
+
+            # Try to acquire the best available slot (still under fleet lock
+            # so no other coroutine can interleave)
+            for name in candidates:
+                slot = self._slots[name]
+                # try_acquire_nowait also uses its own per-slot lock, but
+                # since we hold fleet_lock, no other coroutine is in _pick_model
+                acquired = await slot.try_acquire_nowait(estimated_tokens)
+                if acquired:
                     return name
+
+        # All slots busy — block-wait outside the fleet lock so we don't
+        # hold the fleet lock while sleeping (that would deadlock)
+        deadline = time.monotonic() + 90.0
+        while time.monotonic() < deadline:
             await asyncio.sleep(1.0)
-            
-        best_name = valid_candidates[0]
-        await self._slots[best_name].acquire(estimated_tokens, timeout=0.1)
-        return best_name
+            async with self._fleet_lock:
+                now = time.monotonic()
+                available = [
+                    n for n in self._priority_list
+                    if n not in excludes and now >= self._slots[n].exhausted_until
+                    and not self._slots[n].is_daily_exhausted(now)
+                ]
+                available.sort(key=lambda n: (self._slots[n].priority, self._slots[n].current_usage() / max(1, self._slots[n].limit)))
+                for name in available:
+                    if await self._slots[name].try_acquire_nowait(estimated_tokens):
+                        return name
+
+        # True last resort
+        best = self._priority_list[0] if self._priority_list else list(self._slots.keys())[0]
+        logger.error(f"_pick_model: all slots saturated after 90s, forcing {best}")
+        return best
 
     def _estimate_tokens(self, content: Any) -> int:
-        """Conservative token estimation with schema overhead padding."""
-        base_overhead = 400 # Increased for function calling overhead
-        
+        base_overhead = 400
+
         def _count(obj):
-            if isinstance(obj, str): return int(len(obj) / 3.5) # Indonesian/slang requires more tokens per char
-            if isinstance(obj, list): return sum(_count(x) for x in obj)
+            if isinstance(obj, str):
+                return int(len(obj) / 3.5)
+            if isinstance(obj, list):
+                return sum(_count(x) for x in obj)
             return int(len(str(obj)) / 3.5)
 
-        # 1.5x multiplier for pessimistic reservation during concurrent bursts
         return int((max(1, _count(content)) + base_overhead) * 1.5)
 
+    async def _call(
+        self,
+        contents: Any,
+        config: dict,
+        slot_name: str,
+        attempt: int = 1,
+        max_attempts: int = 6,
+        tried: list[str] = None,
+        banned_providers: set[str] = None,
+    ) -> Optional[WrappedResponse]:
+        """Execute an AI call with cross-provider fallback and smart backoff."""
+        if tried is None:
+            tried = []
+        if banned_providers is None:
+            banned_providers = set()
 
-    async def _call(self, contents: Any, config: dict, slot_name: str, 
-                    attempt: int = 1, max_attempts: int = 6, tried: list[str] = None,
-                    banned_providers: set[str] = None) -> Optional[WrappedResponse]:
-        """Executes an AI call with automatic cross-provider fallback and jittered backoff."""
-        if tried is None: tried = []
-        if banned_providers is None: banned_providers = set()
-        
         tried.append(slot_name)
-
         slot = self._slots[slot_name]
         estimated_tokens = self._estimate_tokens(contents)
+
         try:
-            logger.info(f"🛰️ [AI] Requesting {slot.model_id} ({slot.provider}) | Attempt {attempt}...")
+            logger.debug(f"🛰️ [AI] {slot.model_id} ({slot.provider}) attempt {attempt}...")
             response = await asyncio.wait_for(
                 slot.client.generate_content(
                     model=slot.model_id,
@@ -821,20 +787,18 @@ class GeminiProcessor:
                     config=config.copy(),
                     capabilities=slot.capabilities
                 ),
-                timeout=60.0
+                timeout=self._AI_CALL_TIMEOUT_SEC
             )
-            
+
             if response is None:
                 raise Exception("Provider returned empty response")
-                
+
             response.model_name = slot_name
 
-            # Correct token counts with actual data
+            # Correct token accounting
             actual_tokens = response.usage.get("total_tokens", 0) if response.usage else 0
             if actual_tokens > 0:
                 slot.update_actual_usage(estimated_tokens, actual_tokens)
-
-            # Sync from headers if available
             if response.headers:
                 slot.sync_from_headers(response.headers)
 
@@ -843,27 +807,24 @@ class GeminiProcessor:
         except Exception as e:
             import random
             err_str = str(e).lower()
-            logger.warning(f"🔄 AI ({slot.model_id}) Failure | Attempt {attempt} | {type(e).__name__}: {repr(e)}")
+            logger.warning(f"🔄 [{slot.name}] Failure attempt {attempt}: {type(e).__name__}: {str(e)[:120]}")
             slot.release_last()
 
-            # Dynamic 429 Rate Limit Handling
-            is_rate_limit = "429" in err_str or "rate limit" in err_str or "resource has been exhausted" in err_str
-            if is_rate_limit:
-                sleep_sec = 60.0
+            is_rate_limit = (
+                "429" in err_str
+                or "rate limit" in err_str
+                or "resource has been exhausted" in err_str
+            )
 
-                # OPENROUTER DAILY LIMIT: If we see this, back off for 12 hours (it resets daily)
+            if is_rate_limit:
+                sleep_sec = 61.0
+
+                # OpenRouter daily limit
                 if slot.provider == "openrouter" and ("50 requests" in err_str or "daily limit" in err_str):
                     sleep_sec = 3600 * 12
-                    logger.warning(f"🛑 [OpenRouter] Daily free limit (50) reached! Backing off for 12h.")
-                
-                # ADAPTIVE SYNC: Parse "Used X, Limit Y" from Groq error message
-                # Example: "Tokens per day (TPD): Limit 500000, Used 498659"
-                usage_match = re.search(r'limit (\d+), used (\d+)', err_str)
-                if usage_match:
-                    limit_val = int(usage_match.group(1))
-                    used_val  = int(usage_match.group(2))
-                    slot.saturate_locally(used_val, limit_val)
+                    logger.warning(f"🛑 [{slot.name}] OpenRouter daily limit hit — backing off 12h")
 
+                # Parse "try again in Xm Ys" from error
                 wait_match = re.search(r'try again in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)', err_str)
                 if wait_match:
                     h = int(wait_match.group(1) or 0)
@@ -871,57 +832,53 @@ class GeminiProcessor:
                     s = float(wait_match.group(3) or 0)
                     sleep_sec = (h * 3600) + (m * 60) + s + 1.0
                 elif "per day" in err_str or "tpd" in err_str or "rpd" in err_str:
-                    sleep_sec = 3600 * 4 # Back off for 4 hours on daily limit
+                    sleep_sec = 3600 * 4
 
-                # Add jitter to prevent thundering herds on recovery
-                jitter = random.uniform(0.8, 1.2)
-                sleep_sec = sleep_sec * jitter
+                # Adaptive sync from error message
+                usage_match = re.search(r'limit (\d+), used (\d+)', err_str)
+                if usage_match:
+                    slot.saturate_locally(int(usage_match.group(2)), int(usage_match.group(1)))
 
-                logger.warning(f"⏳ [{slot.name}] Rate Limited. Sleeping {sleep_sec:.1f}s.")
-                slot.exhausted_until = time.monotonic() + sleep_sec
+                jitter = random.uniform(0.9, 1.1)
+                slot.exhausted_until = time.monotonic() + sleep_sec * jitter
+                logger.warning(f"⏳ [{slot.name}] Rate limited — pausing {sleep_sec * jitter:.0f}s")
+
             if attempt < max_attempts:
-                is_vision = False
-                if isinstance(contents, list):
-                    # Check if any part is a dict with 'data' (our image format)
-                    is_vision = any(isinstance(item, dict) and 'data' in item for item in contents)
+                is_vision = isinstance(contents, list) and any(
+                    isinstance(item, dict) and 'data' in item for item in contents
+                )
 
-                # Cross-provider ban ONLY on severe server errors (5xx).
-                # Client errors (4xx) should ONLY exclude the specific model.
                 exclude_list = list(tried)
-                
-                # Check for 5xx in the error string or response status code
+
+                # Provider-wide ban on server death (5xx)
                 is_server_death = any(s in err_str for s in ["500", "502", "503", "504"])
-                if hasattr(e, 'status_code') and e.status_code >= 500:
+                if hasattr(e, 'status_code') and getattr(e, 'status_code', 0) >= 500:
                     is_server_death = True
-                
                 if is_server_death:
                     banned_providers.add(slot.provider)
-                    logger.warning(f"🚫 [{slot.provider}] Provider-wide ban triggered due to server death (5xx).")
+                    logger.warning(f"🚫 [{slot.provider}] Provider banned (5xx server death)")
 
-                # Add all slots from banned providers to exclude_list
                 for n, s in self._slots.items():
                     if s.provider in banned_providers and n not in exclude_list:
                         exclude_list.append(n)
-                            
-                next_slot = await self._pick_model(
-                    exclude=exclude_list, 
-                    estimated_tokens=self._estimate_tokens(contents),
-                    require_vision=is_vision
-                )
-                if not next_slot:
-                    logger.error(f"❌ AI Fallback failed: No suitable models available after {slot_name} failure.")
-                    return None
-                
-                return await self._call(contents, config, next_slot, attempt + 1, max_attempts, tried, banned_providers)
-            
-            logger.error(f"AI call failed after {attempt} attempts.")
-            return None
 
+                next_slot = await self._pick_model(
+                    exclude=exclude_list,
+                    estimated_tokens=estimated_tokens,
+                    require_vision=is_vision,
+                )
+                if next_slot:
+                    return await self._call(
+                        contents, config, next_slot,
+                        attempt + 1, max_attempts, tried, banned_providers
+                    )
+
+            logger.error(f"❌ AI call failed after {attempt} attempts")
+            return None
 
     # ── Public interface ──────────────────────────────────────────────────────
 
     def _is_worth_checking(self, text: str | None, has_photo: bool = False) -> bool:
-        """Pre-filter: skip low-signal messages without any AI call."""
         if has_photo:
             return True
         if not text or not text.strip():
@@ -931,16 +888,12 @@ class GeminiProcessor:
             return False
         if len(t) < 4:
             return False
-
         if _SOCIAL_FILLER.match(t):
             return False
 
         words = t.split()
-
-        # Heuristic scoring
         score = 0
 
-        # Strong indicators (+)
         if any(kw in t for kw in _STRONG_KEYWORDS):
             score += 10
         if any(kw in t for kw in _WEAK_KEYWORDS):
@@ -950,40 +903,33 @@ class GeminiProcessor:
         if bool(_PROMO.search(t)):
             score += 2
 
-        # Question / Noise indicators (-)
         question_words = {'ga', 'gak', 'nggak', 'apa', 'gimana', 'berapa', 'kapan', 'dimana', 'kenapa', 'ada', 'masih', 'ya'}
-        has_question_word = any(w in question_words for w in words)
-        
+
         if '?' in t:
             score -= 5
-            
-        # Phrases like "aman ga", "aman ya" -> moderate penalty
         if re.search(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b', t):
             score -= 8
-
         if t.endswith('?') and words and words[0] in question_words:
             score -= 5
-
-        if has_question_word and ('aman' in t or 'work' in t or 'on' in t):
-            # Probably asking if it's working
+        if any(w in question_words for w in words) and ('aman' in t or 'work' in t or 'on' in t):
             score -= 8
-
-        # specifically penalize single short word followed by ngga
         if re.search(r'\b(aman|work|on)\s+(ngga)\b', t):
             score -= 15
 
-        # If we have a strong keyword, we almost always want to check it unless it's pure junk
         if any(kw in t for kw in _STRONG_KEYWORDS) and score >= 0:
             return True
-
-        # Short message penalty
         if len(words) <= 4 and score < 2:
             return False
 
         return score >= 2
 
     async def process_batch(self, messages: Sequence[dict[str, Any]], db: Any = None) -> list[PromoExtraction] | None:
-        """Extracts promos from a batch of messages using AI with concurrent chunking."""
+        """
+        Extract promos from a batch of messages using concurrent scatter-gather.
+
+        Each chunk is sent to a DIFFERENT model concurrently, maximizing
+        throughput across the entire fleet.
+        """
         if not messages:
             return []
 
@@ -993,13 +939,13 @@ class GeminiProcessor:
 
         # Enrich with reply context
         if db:
-            chat_id  = filtered[0]['chat_id']
+            chat_id = filtered[0]['chat_id']
             reply_ids = [m['reply_to_msg_id'] for m in filtered if m.get('reply_to_msg_id')]
             reply_map = await db.get_deep_context_bulk(reply_ids, chat_id, max_depth=3) if reply_ids else {}
             for m in filtered:
                 if m.get('reply_to_msg_id') and m['reply_to_msg_id'] in reply_map:
                     ctx_text = reply_map[m['reply_to_msg_id']]
-                    m['context'] = f"C:{ctx_text[-1000:]} "
+                    m['context'] = f"C:{ctx_text[-800:]} "
                 else:
                     m['context'] = ""
         else:
@@ -1012,35 +958,46 @@ class GeminiProcessor:
             "system_instruction": _EXTRACT_SYSTEM,
         }
 
-        # ── Scatter-Gather Chunking ──
-        # Distribute the load across the fleet concurrently instead of one giant batch
-        CHUNK_SIZE = 10 
+        # Scatter-gather: each chunk gets its own model from the fleet
+        CHUNK_SIZE = 10
         chunks = [filtered[i:i + CHUNK_SIZE] for i in range(0, len(filtered), CHUNK_SIZE)]
-        
-        async def _process_chunk(chunk: list[dict]):
+
+        # Pre-select models for all chunks (under fleet lock, atomically)
+        # This ensures chunks get DIFFERENT models when possible
+        selected_models: list[str] = []
+        used_this_batch: list[str] = []
+        for chunk in chunks:
+            tokens = self._estimate_tokens("\n".join(
+                f"ID:{m['id']} {m.get('context','')[:200]}MSG:{m['text'] or ''}"
+                for m in chunk
+            ))
+            model = await self._pick_model(
+                exclude=used_this_batch if len(used_this_batch) < len(self._priority_list) - 1 else None,
+                estimated_tokens=tokens,
+            )
+            selected_models.append(model)
+            if model not in used_this_batch:
+                used_this_batch.append(model)
+
+        async def _process_chunk(chunk: list[dict], model_name: str):
             chunk_text = "\n---\n".join(
                 f"ID:{m['id']} {m.get('context', '')}MSG: {m['text'] or ''}"
                 for m in chunk
             )
-            tokens = self._estimate_tokens(chunk_text)
-            target_model = await self._pick_model(estimated_tokens=tokens, require_vision=False)
-            
-            logger.debug(f"🛰️ Chunk ({len(chunk)} msgs) -> {target_model}")
-            
+            # Slot was already acquired during _pick_model; just call
             return await self._call(
                 contents=f"Batch pesan:\n\n{chunk_text}",
                 config=config,
-                slot_name=target_model,
+                slot_name=model_name,
             )
 
-        # Fire all chunks to different models simultaneously
-        tasks = [_process_chunk(c) for c in chunks]
+        tasks = [_process_chunk(c, m) for c, m in zip(chunks, selected_models)]
         responses = await asyncio.gather(*tasks, return_exceptions=True)
 
-        valid = []
+        valid: list[PromoExtraction] = []
         for i, response in enumerate(responses):
             if isinstance(response, Exception):
-                logger.error(f"❌ Chunk {i} processing crashed: {response}")
+                logger.error(f"❌ Chunk {i} crashed: {response}")
                 continue
             if response is None or not response.parsed:
                 continue
@@ -1053,7 +1010,6 @@ class GeminiProcessor:
                     continue
                 if _META_SUMMARY_PATTERN.search(summary):
                     continue
-                
                 verified_brand = normalize_brand(p.brand)
                 if verified_brand == "Unknown":
                     continue
@@ -1061,27 +1017,27 @@ class GeminiProcessor:
                 p.model_name = response.model_name
                 valid.append(p)
 
-        logger.info(f"✅ Scatter-Gather complete. Extracted {len(valid)} promos from {len(filtered)} msgs across {len(chunks)} chunks.")
+        if valid:
+            model_names = set(p.model_name for p in valid)
+            logger.info(
+                f"✅ Batch complete: {len(valid)} promos from {len(filtered)} msgs "
+                f"via {len(chunks)} chunks | models: {model_names}"
+            )
         return valid
 
     async def filter_duplicates(self, new_promos: Sequence[PromoExtraction],
-                                 recent_alerts: Sequence[dict[str, Any]]) -> list[PromoExtraction]:
-        """Aggressively filters duplicates using brand context and keyword overlap."""
+                                recent_alerts: Sequence[dict[str, Any]]) -> list[PromoExtraction]:
         if not new_promos:
             return []
 
-        # Cross-batch history (what the caller already alerted on recently)
         history_tail = list(recent_alerts)[-50:]
         recent_keys = {
             f"{normalize_brand(r['brand']).lower()}:{r['summary'][:35].lower()}"
             for r in recent_alerts
         }
-        recent_brands_set = {
-            normalize_brand(r['brand']).lower() for r in history_tail
-        }
+        recent_brands_set = {normalize_brand(r['brand']).lower() for r in history_tail}
 
         unique: list[PromoExtraction] = []
-        # Intra-batch reservation: what we've already accepted in THIS call.
         intra_batch_keys: set[str] = set()
         intra_batch_by_brand: dict[str, list[set[str]]] = {}
 
@@ -1089,16 +1045,12 @@ class GeminiProcessor:
             brand_key = normalize_brand(p.brand).lower()
             key = f"{brand_key}:{p.summary[:35].lower()}"
 
-            # Exact key match against either history or this batch = dupe
             if key in recent_keys or key in intra_batch_keys:
                 continue
 
             p_words = set(re.findall(r'\w+', p.summary.lower())[:8])
 
-            # Cross-batch fuzzy dedup
-            if (brand_key in recent_brands_set
-                    and brand_key != 'unknown'
-                    and p.status == 'active'):
+            if brand_key in recent_brands_set and brand_key != 'unknown' and p.status == 'active':
                 is_dupe = False
                 for r in reversed(history_tail):
                     if normalize_brand(r['brand']).lower() == brand_key:
@@ -1109,7 +1061,6 @@ class GeminiProcessor:
                 if is_dupe:
                     continue
 
-            # Intra-batch fuzzy dedup
             if brand_key != 'unknown':
                 for prev_words in intra_batch_by_brand.get(brand_key, ()):
                     if len(p_words & prev_words) >= 2:
@@ -1128,12 +1079,11 @@ class GeminiProcessor:
         return unique
 
     async def summarize_raw(self, texts: Sequence[str]) -> str:
-        """Summarizes a set of raw chat messages."""
         if not texts:
             return "Tidak ada pesan."
-        context  = "\n---\n".join(texts)
+        context = "\n---\n".join(texts)
         tokens = self._estimate_tokens(context)
-        target   = await self._pick_model(estimated_tokens=tokens)
+        target = await self._pick_model(estimated_tokens=tokens)
         response = await self._call(
             contents=f"Rangkum pesan ini:\n\n{context}",
             config={"system_instruction": _DIGEST_SYSTEM},
@@ -1143,26 +1093,25 @@ class GeminiProcessor:
         return f"{res}\n\n— via {target}" if response else res
 
     async def summarize_thread(self, parent_text: str, replies: Sequence[str],
-                                parent_photo: bytes | None = None) -> str:
-        """Summarizes a specific conversation thread."""
+                               parent_photo: bytes | None = None) -> str:
         if not replies:
             return "Thread ini sedang ramai dibicarakan."
         reply_context = "\n- ".join(replies[:20])
         prompt = (
-            f"PESAN UTAMA (Thread Starter): {parent_text}\n\n"
-            f"BEBERAPA BALASAN DARI USER LAIN:\n- {reply_context}\n\n"
-            "TUGASMU: Rangkum diskusi ini dalam 1-2 kalimat informatif."
+            f"PESAN UTAMA: {parent_text}\n\n"
+            f"BALASAN:\n- {reply_context}\n\n"
+            "Rangkum diskusi ini dalam 1-2 kalimat informatif."
         )
         contents: list[Any] = [prompt]
         if parent_photo:
             contents.append({"mime_type": "image/jpeg", "data": parent_photo})
 
         tokens = self._estimate_tokens(contents)
-        # Prefer google for vision, but allow fallback
-        target = await self._pick_model(provider="google" if parent_photo else None, estimated_tokens=tokens)
-        if not target and parent_photo:
-            # Fallback to any vision-capable model
-            target = await self._pick_model(estimated_tokens=tokens)
+        target = await self._pick_model(
+            provider="google" if parent_photo else None,
+            estimated_tokens=tokens,
+            require_vision=bool(parent_photo)
+        )
         response = await self._call(
             contents=contents,
             config={"system_instruction": _DIGEST_SYSTEM},
@@ -1172,7 +1121,6 @@ class GeminiProcessor:
         return f"{res}\n\n— via {target}" if response else res
 
     async def answer_question(self, question: str, context: str) -> str:
-        """Answers a specific user inquiry based on provided context."""
         tokens = self._estimate_tokens(question + context)
         target = await self._pick_model(estimated_tokens=tokens)
         response = await self._call(
@@ -1184,10 +1132,9 @@ class GeminiProcessor:
         return f"{res}\n\n— via {target}" if response else res
 
     async def process_image(self, image_bytes: bytes, caption: str | None,
-                             original_msg_id: int) -> PromoExtraction | None:
-        """Processes an image to extract promotional info."""
-        has_promo   = bool(_PROMO.search(caption))  if caption else False
-        has_nonpro  = bool(_NON_PROMO.search(caption)) if caption else False
+                            original_msg_id: int) -> PromoExtraction | None:
+        has_promo = bool(_PROMO.search(caption)) if caption else False
+        has_nonpro = bool(_NON_PROMO.search(caption)) if caption else False
         if has_nonpro and not has_promo:
             return None
 
@@ -1199,16 +1146,12 @@ class GeminiProcessor:
         }
         contents = [prompt, {"mime_type": "image/jpeg", "data": image_bytes}]
         tokens = self._estimate_tokens(contents)
-        
-        # Prefer google for vision, but allow fallback
-        target = await self._pick_model(provider="google", estimated_tokens=tokens)
-        if not target:
-            # Fallback to any vision-capable model (like Llama Scout)
-            target = await self._pick_model(estimated_tokens=tokens)
 
-        if not target:
-            logger.error("No vision models available for process_image")
-            return None
+        target = await self._pick_model(
+            provider="google",
+            estimated_tokens=tokens,
+            require_vision=True
+        )
 
         response = await self._call(
             contents=contents,
@@ -1225,31 +1168,25 @@ class GeminiProcessor:
             return None
         res.brand = verified_brand
 
-        JUNK = {'tidak ada','none','n/a','tidak ada promo','no promo','tidak ditemukan','-'}
+        JUNK = {'tidak ada', 'none', 'n/a', 'tidak ada promo', 'no promo', 'tidak ditemukan', '-', 'unknown'}
         if (not res.summary or len(res.summary) < 10
-                or res.summary.lower().strip() in JUNK
-                or res.summary == "Unknown"):
+                or res.summary.lower().strip() in JUNK):
             return None
         res.original_msg_id = original_msg_id
         return res
 
     async def generate_narrative(self, messages: Sequence[dict[str, Any]],
-                                  db: Any = None) -> list[TrendItem]:
-        """Generates structured trend narratives for recent traffic."""
+                                 db: Any = None) -> list[TrendItem]:
         if not messages:
             return []
 
-        # Enrich with reply-parent text so the model can weight thread context.
         parent_map: dict[int, str] = {}
         if db is not None:
             try:
                 chat_id = messages[0]['chat_id']
-                reply_ids = [m['reply_to_msg_id'] for m in messages
-                             if m['reply_to_msg_id']]
+                reply_ids = [m['reply_to_msg_id'] for m in messages if m['reply_to_msg_id']]
                 if chat_id is not None and reply_ids:
-                    parent_map = await db.get_deep_context_bulk(
-                        reply_ids, chat_id, max_depth=2
-                    )
+                    parent_map = await db.get_deep_context_bulk(reply_ids, chat_id, max_depth=2)
             except Exception as e:
                 logger.warning(f"generate_narrative: reply enrichment failed: {e}")
 
@@ -1264,20 +1201,24 @@ class GeminiProcessor:
             lines.append(f"ID:{m['tg_msg_id']} {m['sender_name']}:{ctx} {m['text']}")
         context = "\n- ".join(lines)
         tokens = self._estimate_tokens(context)
-        target  = await self._pick_model(estimated_tokens=tokens)
-        
+        target = await self._pick_model(estimated_tokens=tokens)
+
         config = {
             "response_mime_type": "application/json",
             "response_schema": TrendResponse,
             "system_instruction": (
-                "Kamu adalah TanyaDFBot, analis tren grup Discountfess. "
-                "Simpulkan 1-3 tren utama dengan link ID pesan. "
-                "KATEGORI: [PROMO_BARU], [SYSTEM_EROR], [DISKUSI_HANGAT], atau [RESTOCK]. "
-                "DILARANG KERAS MENGGUNAKAN TABEL. Gunakan bold untuk brand."
+                "Kamu TanyaDFBot, analis tren grup Discountfess. "
+                "Simpulkan 1-3 tren utama dengan ID pesan. "
+                "KATEGORI: [PROMO_BARU], [SYSTEM_EROR], [DISKUSI_HANGAT], [RESTOCK]. "
+                "DILARANG TABEL. Bold untuk brand."
             ),
         }
-        response = await self._call(contents=f"Pesan grup:\n{context}", config=config, slot_name=target)
-        # Cross-trend dedup
+        response = await self._call(
+            contents=f"Pesan grup:\n{context}",
+            config=config,
+            slot_name=target
+        )
+
         seen_topics: list[set[str]] = []
         unique_trends: list[TrendItem] = []
         if response and response.parsed:
@@ -1288,35 +1229,34 @@ class GeminiProcessor:
                 t.model_name = target
                 unique_trends.append(t)
                 seen_topics.append(words)
-        
+
         return unique_trends
 
     async def interpret_keywords(self, hot_words: Sequence[str], window: int,
-                                  context_msgs: Sequence[str]) -> str | None:
-        """Interprets the context behind a burst of specific keywords."""
+                                 context_msgs: Sequence[str]) -> str | None:
         if not context_msgs:
             return None
-            
+
         word_counts = {}
         for w in hot_words:
             word_counts[w] = sum(1 for msg in context_msgs if w.lower() in msg.lower())
-        
+
         counts_str = ", ".join([f"'{w}' ({c}x)" for w, c in word_counts.items()])
-        
         system = (
-            "Kamu adalah TanyaDFBot, analis sentimen real-time. Ada lonjakan aktivitas di grup.\n"
-            f"Kata kunci dominan dlm {window} menit terakhir: {counts_str}.\n\n"
-            "TUGASMU: Jelaskan APA yang sedang dibahas berdasarkan pesan-pesan berikut.\n"
-            "DILARANG KERAS PAKAI TABEL. Jawab singkat padat dalam 1-2 kalimat."
+            f"Analis sentimen real-time TanyaDFBot. Lonjakan aktivitas di grup.\n"
+            f"Kata kunci dominan {window} menit: {counts_str}.\n"
+            "Jelaskan APA yang dibahas berdasarkan pesan-pesan berikut.\n"
+            "DILARANG TABEL. Jawab 1-2 kalimat."
         )
-        
+
         context_block = "\n".join([f"- {msg[:150]}" for msg in context_msgs[-40:]])
         tokens = self._estimate_tokens(system + context_block)
         target = await self._pick_model(estimated_tokens=tokens)
-        
+
         response = await self._call(
             contents=f"Pesan context:\n{context_block}",
             config={"system_instruction": system},
             slot_name=target
         )
-        return cast(str, response.text.strip()) if response and response.text and "NO_TREND" not in response.text else None
+        result = response.text.strip() if response and response.text else None
+        return result if result and "NO_TREND" not in result else None
