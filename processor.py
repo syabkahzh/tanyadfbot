@@ -221,12 +221,13 @@ class BaseAIClient:
 
 class WrappedResponse:
     """Compatibility wrapper for AI responses."""
-    def __init__(self, res=None, text=None, parsed=None, model_name=None, usage=None):
+    def __init__(self, res=None, text=None, parsed=None, model_name=None, usage=None, headers=None):
         self.res = res
         self._text = text
         self._parsed = parsed
         self.model_name = model_name
         self.usage = usage  # Actual tokens (prompt, completion, total)
+        self.headers = headers or {} # Rate limit headers
 
     @property
     def text(self):
@@ -311,7 +312,9 @@ class OpenAICompatibleClient(BaseAIClient):
                         "parameters": schema_dict
                     }
                 }]
-                kwargs["tool_choice"] = {"type": "function", "function": {"name": tool_name}}
+                # Use 'auto' instead of forced function to be more resilient to models 
+                # that output JSON directly but skip the tool envelope.
+                kwargs["tool_choice"] = "auto" 
             elif capabilities.get("native_json", True):
                 # Fallback to JSON object mode
                 kwargs["response_format"] = {"type": "json_object"}
@@ -320,7 +323,26 @@ class OpenAICompatibleClient(BaseAIClient):
                     f"\n\nYou MUST respond with ONLY valid JSON. No preamble.\nSchema:\n{schema_str}"
                 )
 
-        res = await self.client.chat.completions.create(model=model, messages=messages, **kwargs)
+        try:
+            # Use with_raw_response to access rate limit headers
+            raw_res = await self.client.chat.completions.with_raw_response.create(model=model, messages=messages, **kwargs)
+            res = raw_res.parse()
+            headers = {k.lower(): v for k, v in raw_res.headers.items() if k.lower().startswith('x-ratelimit')}
+        except Exception as e:
+            # GROQ RESCUE: Handle 'Tool choice is required, but model did not call a tool'
+            # Some models (like GPT-OSS or Qwen) might generate perfect JSON but skip the tool envelope.
+            err_str = str(e).lower()
+            if ("tool_use_failed" in err_str or "tool choice" in err_str) and hasattr(e, 'response'):
+                try:
+                    body = e.response.json()
+                    text = body.get('error', {}).get('failed_generation')
+                    if text:
+                        logger.info(f"💡 [AI] Rescued content from failed tool call for {model}")
+                        headers = {k.lower(): v for k, v in e.response.headers.items() if k.lower().startswith('x-ratelimit')}
+                        return WrappedResponse(text=text, model_name=model, headers=headers)
+                except: pass
+            raise e
+
         message = res.choices[0].message
         
         text = None
@@ -365,7 +387,7 @@ class OpenAICompatibleClient(BaseAIClient):
             except Exception as e:
                 logger.warning(f"AI client failed to parse JSON: {e}")
         
-        return WrappedResponse(res, text=text, parsed=parsed, usage=usage)
+        return WrappedResponse(res, text=text, parsed=parsed, usage=usage, headers=headers)
 
 class OllamaClient(BaseAIClient):
     """Client for Ollama models."""
@@ -520,6 +542,57 @@ class _ModelSlot:
         if diff > 0:
             self._daily_tokens.append((now, diff))
             logger.warning(f"🎯 [{self.name}] Syncing with API: Added {diff} tokens to local tracker. (API Used: {used}/{limit})")
+
+    def sync_from_headers(self, headers: dict) -> None:
+        """Synchronizes local tracking using HTTP rate limit headers."""
+        if not headers:
+            return
+            
+        now = time.monotonic()
+        
+        # 1. Sync Requests Per Day (RPD)
+        limit_req = headers.get('x-ratelimit-limit-requests')
+        rem_req   = headers.get('x-ratelimit-remaining-requests')
+        if limit_req and rem_req:
+            try:
+                limit_req_v = int(limit_req)
+                rem_req_v   = int(rem_req)
+                used_req_v  = limit_req_v - rem_req_v
+                
+                # Check RPD bucket
+                current_daily_calls = len([t for t in self._daily_calls if now - t < 86400])
+                diff_req = used_req_v - current_daily_calls
+                if diff_req > 0:
+                    for _ in range(diff_req):
+                        self._daily_calls.append(now - 1.0) # slightly in past
+            except: pass
+
+        # 2. Sync Tokens (Usually TPM in Groq, but we use it for both)
+        limit_tokens = headers.get('x-ratelimit-limit-tokens')
+        rem_tokens   = headers.get('x-ratelimit-remaining-tokens')
+        if limit_tokens and rem_tokens:
+            try:
+                limit_tokens_v = int(limit_tokens)
+                rem_tokens_v   = int(rem_tokens)
+                used_tokens_v  = limit_tokens_v - rem_tokens_v
+                
+                # Sync TPM bucket
+                current_tpm = sum(t[1] for t in self._tokens)
+                diff_tpm = used_tokens_v - current_tpm
+                if diff_tpm > 0:
+                    self._tokens.append((now, diff_tpm))
+            except: pass
+
+        # 3. Sync Tokens Per Day (TPD) if header exists (some providers use this)
+        limit_tpd = headers.get('x-ratelimit-limit-tokens-day')
+        rem_tpd   = headers.get('x-ratelimit-remaining-tokens-day')
+        if limit_tpd and rem_tpd:
+            try:
+                limit_tpd_v = int(limit_tpd)
+                rem_tpd_v   = int(rem_tpd)
+                used_tpd_v  = limit_tpd_v - rem_tpd_v
+                self.saturate_locally(used_tpd_v, limit_tpd_v)
+            except: pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -679,9 +752,12 @@ class GeminiProcessor:
 
 
     async def _call(self, contents: Any, config: dict, slot_name: str, 
-                    attempt: int = 1, max_attempts: int = 3, tried: list[str] = None) -> Optional[WrappedResponse]:
+                    attempt: int = 1, max_attempts: int = 3, tried: list[str] = None,
+                    banned_providers: set[str] = None) -> Optional[WrappedResponse]:
         """Executes an AI call with automatic cross-provider fallback."""
         if tried is None: tried = []
+        if banned_providers is None: banned_providers = set()
+        
         tried.append(slot_name)
 
         slot = self._slots[slot_name]
@@ -695,7 +771,7 @@ class GeminiProcessor:
                     config=config.copy(),
                     capabilities=slot.capabilities
                 ),
-                timeout=40.0
+                timeout=60.0
             )
             
             if response is None:
@@ -707,6 +783,10 @@ class GeminiProcessor:
             actual_tokens = response.usage.get("total_tokens", 0) if response.usage else 0
             if actual_tokens > 0:
                 slot.update_actual_usage(estimated_tokens, actual_tokens)
+
+            # Sync from headers if available
+            if response.headers:
+                slot.sync_from_headers(response.headers)
 
             return response
 
@@ -759,13 +839,21 @@ class GeminiProcessor:
                 exclude_list = list(tried)
                 is_server_death = isinstance(e, (asyncio.TimeoutError, TimeoutError)) or "timeout" in err_str or any(s in err_str for s in ["500", "502", "503", "504", "408"])
                 
-                if is_server_death and not (is_vision and slot.provider == "google"):
-                    for n, s in self._slots.items():
-                        if s.provider == slot.provider and n not in exclude_list:
-                            exclude_list.append(n)
+                if is_server_death:
+                    banned_providers.add(slot.provider)
+                    logger.warning(f"🚫 [{slot.provider}] Provider-wide ban triggered due to server death.")
+
+                # Add all slots from banned providers to exclude_list
+                for n, s in self._slots.items():
+                    if s.provider in banned_providers and n not in exclude_list:
+                        exclude_list.append(n)
                             
                 next_slot = await self._pick_model(exclude=exclude_list, provider=provider_filter, estimated_tokens=self._estimate_tokens(contents))
-                return await self._call(contents, config, next_slot, attempt + 1, max_attempts, tried)
+                if not next_slot:
+                    logger.error(f"❌ AI Fallback failed: No models available after {slot_name} failure.")
+                    return None
+                
+                return await self._call(contents, config, next_slot, attempt + 1, max_attempts, tried, banned_providers)
             
             logger.error(f"AI call failed after {attempt} attempts.")
             return None
