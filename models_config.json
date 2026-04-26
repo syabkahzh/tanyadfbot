@@ -4,11 +4,12 @@
         "provider": "google",
         "model_id": "gemma-4-31b-it",
         "api_key_env": "GEMINI_API_KEY",
-        "rpm": 12,
+        "rpm": 7,
         "priority": 1,
         "capabilities": {
             "native_json": false,
-            "system_instruction": false
+            "system_instruction": false,
+            "vision": true
         }
     },
     {
@@ -16,11 +17,12 @@
         "provider": "google",
         "model_id": "gemma-4-26b-a4b-it",
         "api_key_env": "GEMINI_API_KEY",
-        "rpm": 12,
+        "rpm": 7,
         "priority": 1,
         "capabilities": {
             "native_json": false,
-            "system_instruction": false
+            "system_instruction": false,
+            "vision": true
         }
     },
     {
@@ -32,7 +34,7 @@
         "rpd": 1000,
         "tpm": 12000,
         "tpd": 100000,
-        "priority": 2,
+        "priority": 1,
         "base_url": "https://api.groq.com/openai/v1",
         "capabilities": {
             "native_tools": true
@@ -47,22 +49,7 @@
         "rpd": 1000,
         "tpm": 8000,
         "tpd": 200000,
-        "priority": 2,
-        "base_url": "https://api.groq.com/openai/v1",
-        "capabilities": {
-            "native_tools": true
-        }
-    },
-    {
-        "name": "groq-qwen-32b",
-        "provider": "groq",
-        "model_id": "qwen/qwen3-32b",
-        "api_key_env": "GROQ_API_KEY",
-        "rpm": 60,
-        "rpd": 1000,
-        "tpm": 6000,
-        "tpd": 500000,
-        "priority": 3,
+        "priority": 1,
         "base_url": "https://api.groq.com/openai/v1",
         "capabilities": {
             "native_tools": true
@@ -77,11 +64,86 @@
         "rpd": 1000,
         "tpm": 30000,
         "tpd": 500000,
-        "priority": 4,
+        "priority": 1,
         "base_url": "https://api.groq.com/openai/v1",
         "capabilities": {
             "native_tools": true,
             "vision": true
+        }
+    },
+    {
+        "name": "groq-qwen-32b",
+        "provider": "groq",
+        "model_id": "qwen/qwen3-32b",
+        "api_key_env": "GROQ_API_KEY",
+        "rpm": 60,
+        "rpd": 1000,
+        "tpm": 6000,
+        "tpd": 500000,
+        "priority": 2,
+        "base_url": "https://api.groq.com/openai/v1",
+        "capabilities": {
+            "native_tools": true
+        }
+    },
+    {
+        "name": "or-gpt-oss",
+        "provider": "openrouter",
+        "model_id": "openai/gpt-oss-120b:free",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "rpm": 15,
+        "priority": 4,
+        "base_url": "https://openrouter.ai/api/v1",
+        "capabilities": {
+            "native_json": true
+        }
+    },
+    {
+        "name": "or-nemotron-super",
+        "provider": "openrouter",
+        "model_id": "nvidia/nemotron-3-super-120b-a12b:free",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "rpm": 15,
+        "priority": 4,
+        "base_url": "https://openrouter.ai/api/v1",
+        "capabilities": {
+            "native_json": true
+        }
+    },
+    {
+        "name": "or-glm-4.5",
+        "provider": "openrouter",
+        "model_id": "z-ai/glm-4.5-air:free",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "rpm": 15,
+        "priority": 4,
+        "base_url": "https://openrouter.ai/api/v1",
+        "capabilities": {
+            "native_json": true
+        }
+    },
+    {
+        "name": "or-lfm-2.5",
+        "provider": "openrouter",
+        "model_id": "liquid/lfm-2.5-1.2b-instruct:free",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "rpm": 15,
+        "priority": 4,
+        "base_url": "https://openrouter.ai/api/v1",
+        "capabilities": {
+            "native_json": true
+        }
+    },
+    {
+        "name": "or-minimax-2.5",
+        "provider": "openrouter",
+        "model_id": "minimax/minimax-m2.5:free",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "rpm": 15,
+        "priority": 4,
+        "base_url": "https://openrouter.ai/api/v1",
+        "capabilities": {
+            "native_json": true
         }
     }
 ]

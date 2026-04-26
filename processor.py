@@ -263,12 +263,10 @@ class GoogleClient(BaseAIClient):
                 if hasattr(system, 'parts'): sys_text = system.parts[0].text
                 if isinstance(contents, str): contents = f"SYSTEM: {sys_text}\n\n{contents}"
                 elif isinstance(contents, list): 
-                    # If it's a list, insert at start, but handle the case where it might contain dicts
                     contents.insert(0, f"SYSTEM: {sys_text}")
 
         # Ensure contents is converted to genai Parts if it contains dicts
         if isinstance(contents, list):
-            import google.generativeai as genai
             final_contents = []
             for item in contents:
                 if isinstance(item, dict) and "data" in item:
@@ -652,7 +650,7 @@ class GeminiProcessor:
 
             if p['provider'] == 'google':
                 client = GoogleClient(api_key=api_key)
-            elif p['provider'] in ('groq', 'glm'):
+            elif p['provider'] in ('groq', 'glm', 'openrouter'):
                 client = OpenAICompatibleClient(
                     api_key=api_key, 
                     base_url=p.get('base_url'),
@@ -708,16 +706,30 @@ class GeminiProcessor:
             logger.error(f"Failed to update priority for {name}: {e}")
             return False
 
-    async def _pick_model(self, exclude: Optional[str | list[str]] = None, provider: Optional[str] = None, estimated_tokens: int = 0) -> str:
+    async def _pick_model(self, exclude: Optional[str | list[str]] = None, provider: Optional[str] = None, 
+                    estimated_tokens: int = 0, require_vision: bool = False) -> str:
         """Picks a model using Multi-Dimensional Load Balancing (RPM, TPM, TPD)."""
-        excludes = [exclude] if isinstance(exclude, str) else (exclude or [])
+        excludes = set([exclude] if isinstance(exclude, str) else (exclude or []))
         
+        # 1. Start with all units not in excludes
         valid_candidates = [n for n in self._priority_list if n not in excludes]
+        
+        # 2. Filter by vision if required
+        if require_vision:
+            valid_candidates = [n for n in valid_candidates if self._slots[n].capabilities.get("vision")]
+
+        # 3. Apply provider filter if requested
         if provider:
-            valid_candidates = [n for n in valid_candidates if self._slots[n].provider == provider]
+            p_candidates = [n for n in valid_candidates if self._slots[n].provider == provider]
+            if p_candidates:
+                valid_candidates = p_candidates
             
         if not valid_candidates:
-            valid_candidates = [n for n in self._priority_list if not provider or self._slots[n].provider == provider]
+            # If everything is excluded, pick the best one from the whole list 
+            # as a last resort, but this should be rare.
+            valid_candidates = [n for n in self._priority_list if n not in excludes]
+            if not valid_candidates: 
+                valid_candidates = self._priority_list
 
         def get_max_utilization(name: str) -> float:
             slot = self._slots[name]
@@ -766,7 +778,7 @@ class GeminiProcessor:
                     return name
             await asyncio.sleep(1.0)
             
-        best_name = self._priority_list[0]
+        best_name = valid_candidates[0]
         await self._slots[best_name].acquire(estimated_tokens, timeout=0.1)
         return best_name
 
@@ -784,7 +796,7 @@ class GeminiProcessor:
 
 
     async def _call(self, contents: Any, config: dict, slot_name: str, 
-                    attempt: int = 1, max_attempts: int = 3, tried: list[str] = None,
+                    attempt: int = 1, max_attempts: int = 6, tried: list[str] = None,
                     banned_providers: set[str] = None) -> Optional[WrappedResponse]:
         """Executes an AI call with automatic cross-provider fallback."""
         if tried is None: tried = []
@@ -832,6 +844,11 @@ class GeminiProcessor:
             if is_rate_limit:
                 sleep_sec = 60.0
 
+                # OPENROUTER DAILY LIMIT: If we see this, back off for 12 hours (it resets daily)
+                if slot.provider == "openrouter" and ("50 requests" in err_str or "daily limit" in err_str):
+                    sleep_sec = 3600 * 12
+                    logger.warning(f"🛑 [OpenRouter] Daily free limit (50) reached! Backing off for 12h.")
+                
                 # ADAPTIVE SYNC: Parse "Used X, Limit Y" from Groq error message
                 # Example: "Tokens per day (TPD): Limit 500000, Used 498659"
                 usage_match = re.search(r'limit (\d+), used (\d+)', err_str)
@@ -854,35 +871,30 @@ class GeminiProcessor:
             if attempt < max_attempts:
                 is_vision = False
                 if isinstance(contents, list):
-                    is_vision = any(hasattr(item, 'data') or (isinstance(item, dict) and 'image' in str(item).lower()) for item in contents)
+                    # Check if any part is a dict with 'data' (our image format)
+                    is_vision = any(isinstance(item, dict) and 'data' in item for item in contents)
 
-                # Pick provider with vision capability if needed
-                provider_filter = None
-                if is_vision:
-                    # Find any slot with vision capability that isn't excluded
-                    vision_slots = [n for n, s in self._slots.items() if s.capabilities.get("vision") and n not in tried]
-                    if not vision_slots:
-                        logger.error("No alternative vision models available.")
-                        return None
-
-                # Cross-provider ban ONLY on severe server errors (50x) or Timeouts.
-
-                # Do NOT ban the whole provider for a 429 (rate limit) or 400 (bad request).
+                # Cross-provider ban ONLY on severe server errors (50x).
+                # Timeouts only exclude the specific model (already in 'tried').
                 exclude_list = list(tried)
-                is_server_death = isinstance(e, (asyncio.TimeoutError, TimeoutError)) or "timeout" in err_str or any(s in err_str for s in ["500", "502", "503", "504", "408"])
+                is_server_death = any(s in err_str for s in ["500", "502", "503", "504"])
                 
                 if is_server_death:
                     banned_providers.add(slot.provider)
-                    logger.warning(f"🚫 [{slot.provider}] Provider-wide ban triggered due to server death.")
+                    logger.warning(f"🚫 [{slot.provider}] Provider-wide ban triggered due to server death (5xx).")
 
                 # Add all slots from banned providers to exclude_list
                 for n, s in self._slots.items():
                     if s.provider in banned_providers and n not in exclude_list:
                         exclude_list.append(n)
                             
-                next_slot = await self._pick_model(exclude=exclude_list, provider=provider_filter, estimated_tokens=self._estimate_tokens(contents))
+                next_slot = await self._pick_model(
+                    exclude=exclude_list, 
+                    estimated_tokens=self._estimate_tokens(contents),
+                    require_vision=is_vision
+                )
                 if not next_slot:
-                    logger.error(f"❌ AI Fallback failed: No models available after {slot_name} failure.")
+                    logger.error(f"❌ AI Fallback failed: No suitable models available after {slot_name} failure.")
                     return None
                 
                 return await self._call(contents, config, next_slot, attempt + 1, max_attempts, tried, banned_providers)
@@ -928,11 +940,11 @@ class GeminiProcessor:
         has_question_word = any(w in question_words for w in words)
         
         if '?' in t:
-            score -= 10
+            score -= 5
             
-        # Phrases like "aman ga", "aman ya" -> high penalty
+        # Phrases like "aman ga", "aman ya" -> moderate penalty
         if re.search(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b', t):
-            score -= 15
+            score -= 8
 
         if t.endswith('?') and words and words[0] in question_words:
             score -= 5
@@ -945,11 +957,15 @@ class GeminiProcessor:
         if re.search(r'\b(aman|work|on)\s+(ngga)\b', t):
             score -= 15
 
+        # If we have a strong keyword, we almost always want to check it unless it's pure junk
+        if any(kw in t for kw in _STRONG_KEYWORDS) and score >= 0:
+            return True
+
         # Short message penalty
-        if len(words) <= 4 and score < 5:
+        if len(words) <= 4 and score < 2:
             return False
 
-        return score > 2
+        return score >= 2
 
     async def process_batch(self, messages: Sequence[dict[str, Any]], db: Any = None) -> list[PromoExtraction] | None:
         """Extracts promos from a batch of messages using AI."""
@@ -990,7 +1006,7 @@ class GeminiProcessor:
         
 
         tokens = self._estimate_tokens(batch_text)
-        target_model = await self._pick_model(estimated_tokens=tokens)
+        target_model = await self._pick_model(estimated_tokens=tokens, require_vision=False)
         logger.debug(f"Using {target_model} for {len(filtered)} msgs")
 
         response = await self._call(

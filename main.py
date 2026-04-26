@@ -242,7 +242,7 @@ async def processing_loop() -> None:
                     if brand_norm != "Unknown":
                         await shared.context_tracker.update_brand(m['chat_id'], brand_norm)
 
-                    if brand_norm == "Unknown" and len(summary_stripped) < 30:
+                    if brand_norm == "Unknown" and len(summary_stripped) < 30 and p.confidence < 0.85:
                         logic_skip_ids.append(m['id'])
                         continue
 
@@ -357,16 +357,15 @@ async def processing_loop() -> None:
             headroom_pct = max(0.0, 1.0 - (total_used / max(total_cap, 1)))
 
             if _queue_emergency_mode:
-                batch_size = int(80 + 40 * headroom_pct)
+                batch_size = 20 # Still keep it somewhat small
             else:
-                batch_size = int(40 + 20 * headroom_pct)
+                batch_size = 12 # Ideal for fast parallel extraction
 
             # Optimization: Fetch candidates OUTSIDE of the lock to minimize contention
-            ancient_reserve = int(batch_size * 0.3)
-            if queue_size > 200: backlog_reserve = int(batch_size * 0.3)
-            elif queue_size > 50: backlog_reserve = int(batch_size * 0.2)
+            ancient_reserve = int(batch_size * 0.4)
+            if queue_size > 100: backlog_reserve = int(batch_size * 0.4)
             else: backlog_reserve = 0
-            priority_cap = max(1, batch_size - ancient_reserve - backlog_reserve)
+            priority_cap = max(2, batch_size - ancient_reserve - backlog_reserve)
 
             # Query DB (can be slow under load)
             ancient_raw = await db.get_unprocessed_ancient(min_age_minutes=10, batch_size=ancient_reserve + 100)
@@ -477,7 +476,7 @@ async def processing_loop() -> None:
                 await asyncio.sleep(0.5)
                 continue
 
-            logger.info(f"🧬 [Spawn] Processing {len(to_ai)} messages | Tasks: {shared._active_ai_tasks} | Headroom: {headroom_pct:.0%} | Q: {queue_size}")
+            logger.info(f"🧬 [Spawn] Processing {len(to_ai)} messages | Tasks: {shared._active_ai_tasks} | Q: {queue_size}")
             shared.mark_batch_spawned()
             _spawned_task = asyncio.create_task(process_one_batch(to_ai))
             _active_spawn_tasks.add(_spawned_task)
@@ -489,7 +488,12 @@ async def processing_loop() -> None:
                 if exc:
                     logger.error(f"Spawned batch task failed: {exc}", exc_info=exc)
             _spawned_task.add_done_callback(_cleanup_spawn_task)
-            await asyncio.sleep(0.01)
+            
+            # If the queue is still large, don't sleep — go right back for another batch!
+            if queue_size > 20:
+                await asyncio.sleep(0.05)
+            else:
+                await asyncio.sleep(0.2)
         except Exception as e:
             logger.error(f"processing_loop error: {e}", exc_info=True)
             try: await bot.alert_error("processing_loop", e)
@@ -611,7 +615,7 @@ async def main() -> None:
     asyncio.create_task(_reconnect_listener(BOOT_CATCHUP_WINDOW / 60))
 
     # ── Scheduled jobs ─────────────────────────────────────────────────────────
-    scheduler.add_job(jobs.image_processing_job, "interval", seconds=30, id="images", args=[db, gemini, listener], jitter=5)
+    scheduler.add_job(jobs.image_processing_job, "interval", seconds=30, id="images", args=[db, gemini, listener], jitter=5, max_instances=3)
     scheduler.add_job(jobs.brewing_digest_job, "cron", minute=0, hour="0,1,5-23", id="brewing_digest", args=[bot])
     scheduler.add_job(jobs.hourly_digest_job, "cron", minute=1, hour="0,1,5-23", id="digest", args=[db, gemini, bot, WIB], jitter=60)
     scheduler.add_job(jobs.midnight_digest_job, "cron", hour=5, minute=0, id="midnight_digest", args=[db, gemini, bot], jitter=300)

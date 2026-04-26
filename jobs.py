@@ -98,6 +98,7 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
     """
     logger.info("⏰ [Job] Starting time_reminder_job...")
     try:
+        import pytz
         if not db.conn:
             return
 
@@ -413,6 +414,7 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
     """Processes unhandled photo messages with the vision model."""
     logger.info("⏰ [Job] Starting image_processing_job...")
     try:
+        import pytz
         if not db.conn:
             return
 
@@ -453,10 +455,9 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
 
         if not rows:
             return
-        rows = rows[:5]
-        processed_ids = []
-
-        for r in rows:
+        rows = rows[:10]
+        
+        async def _process_single_image(r):
             msg_id, tg_msg_id, chat_id, text, ts = (
                 r['id'], r['tg_msg_id'], r['chat_id'], r['text'], r['timestamp']
             )
@@ -464,8 +465,8 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                 # Fetch message and photo bytes
                 msg_obj = await listener.client.get_messages(chat_id, ids=tg_msg_id)
                 if not msg_obj or not msg_obj.photo:
-                    processed_ids.append(msg_id)
-                    continue
+                    await db.conn.execute("UPDATE messages SET image_processed=1 WHERE id=?", (msg_id,))
+                    return msg_id
 
                 downloaded = await listener.client.download_media(msg_obj, bytes)
                 if not downloaded:
@@ -480,8 +481,8 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                     photo_bytes = downloaded
 
                 if not photo_bytes:
-                    processed_ids.append(msg_id)
-                    continue
+                    await db.conn.execute("UPDATE messages SET image_processed=1 WHERE id=?", (msg_id,))
+                    return msg_id
 
                 start_ai = time.monotonic()
                 promo = await gemini.process_image(photo_bytes, text or "", msg_id)
@@ -510,7 +511,7 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                         await db.save_pending_alert(
                             promo.brand.lower().strip(),
                             promo.model_dump_json(), tg_link, ts,
-                            source='ai', commit=True
+                            source='ai', commit=False
                         )
                         t = shared.get_buffer_flush_task()
                         if t is None or t.done():
@@ -518,16 +519,23 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                                 asyncio.create_task(_flush_alert_buffer(delay=0.5))
                             )
 
-                # Commit image_processed status immediately per item to avoid holding write locks
+                # Commit image_processed status immediately per item
                 await db.conn.execute(
                     "UPDATE messages SET image_processed=1 WHERE id=?", (msg_id,)
                 )
-                await db.conn.commit()
-                processed_ids.append(msg_id)
+                return msg_id
             except Exception as e:
                 logger.error(f"image_processing_job item (msg {tg_msg_id}) error: {e}")
+                return None
 
-        logger.info("✅ [Job] Finished image_processing_job")
+        tasks = [_process_single_image(r) for r in rows]
+        results = await asyncio.gather(*tasks)
+        processed_ids = [res for res in results if res is not None]
+        
+        if processed_ids:
+            await db.conn.commit()
+
+        logger.info(f"✅ [Job] Finished image_processing_job (processed {len(processed_ids)} imgs)")
     except Exception as e:
         logger.error(f"image_processing_job critical error: {e}", exc_info=True)
         if shared.bot:
@@ -780,6 +788,7 @@ async def time_mention_job(db: Database, bot: TelegramBot) -> None:
     """Monitors and alerts on relevant time-sensitive messages."""
     logger.info("⏰ [Job] Starting time_mention_job...")
     try:
+        import pytz
         if not db.conn:
             return
 
@@ -1018,6 +1027,7 @@ async def dead_promo_reaper_job(db: Database, bot: TelegramBot) -> None:
     """Closes expired promotions based on subsequent community chat signals."""
     logger.info("💀 [Job] Starting dead_promo_reaper_job...")
     try:
+        import pytz
         if not db.conn:
             return
             
@@ -1085,6 +1095,7 @@ async def confirmation_gate_job(db: Database) -> None:
     """Processes low-confidence promotions that were waiting for confirmation."""
     logger.info("⏰ [Job] Starting confirmation_gate_job...")
     try:
+        import pytz
         if not db.conn:
             return
             
