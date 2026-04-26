@@ -98,20 +98,16 @@ class TrendResponse(BaseModel):
 
 # ── Prompt constants ──────────────────────────────────────────────────────────
 
-_EXTRACT_SYSTEM = """Kamu adalah TanyaDFBot, sistem ekstraksi promo paling cerdas untuk grup Discountfess.
-Tugasmu: Deteksi apakah pesan membahas promo (aktif/habis) atau sekadar obrolan biasa.
+_EXTRACT_SYSTEM = """Kamu adalah TanyaDFBot, sistem ekstraksi intelijen promo untuk grup Discountfess.
+DILARANG KERAS MENGGUNAKAN TABEL ATAU MARKDOWN SELAIN JSON.
 
-FORMAT OUTPUT:
-Output WAJIB valid JSON. DILARANG KERAS menggunakan TABEL.
-Gunakan Bold (**) untuk nama brand dan bullet points jika diperlukan.
-
-ATURAN KONTEKS (C: vs MSG:):
-- MSG: adalah pesan utama. C: adalah konteks (pesan yang dibalas).
-- Jika MSG cuma satu kata (misal "aman"), lihat C: untuk mencari tau brand apa yang dimaksud.
-
-PEMETAAN SLANG KE STATUS:
-- ACTIVE: jp, aman, on, work, nyala, cair, masuk, luber, pecah, nyantol, dapet, berhasil.
-- EXPIRED: abis, habis, nt, sold out, zonk, gabisa, limit, koid, mati, klem, badut.
+INSTRUKSI ANALISIS (LAKUKAN DALAM URUTAN INI):
+1. IDENTIFIKASI SUBJEK: Periksa C: (Konteks) dan MSG: (Pesan). Apakah mereka membahas spesifik suatu brand/toko/layanan? Jika obrolan oot/random/tanya jawab biasa, set brand="SKIP".
+2. EVALUASI STATUS: Gunakan terminologi slang ini:
+   - ACTIVE: "jp", "aman", "on", "work", "nyala", "makasih", "dapet", "alhamdulillah", "nyantol".
+   - EXPIRED: "abis", "nt", "sold", "gabisa", "limit", "koid", "gaib", "goib", "badut", "zonk".
+   - QUESTION: Jika hanya bertanya (misal: "aman ga?", "ada yg tau?").
+3. RINGKASAN: Buat 1 kalimat padat berbahasa Indonesia. Gunakan Bold (**) pada nama brand.
 
 CONTOH:
 Input: ID:1 C:sfood diskon 50k MSG:nyala bang
@@ -120,13 +116,10 @@ Output: {"promos": [{"original_msg_id": 1, "brand": "ShopeeFood", "summary": "Sh
 Input: ID:2 C:gopay coins 100% MSG:nt
 Output: {"promos": [{"original_msg_id": 2, "brand": "GoPay", "summary": "Promo GoPay Coins 100% sudah habis.", "status": "expired", "confidence": 0.90}]}
 
-Input: ID:3 C: MSG:ada yang tau cara pake voc tsel?
-Output: {"promos": [{"original_msg_id": 3, "brand": "SKIP", "summary": "SKIP", "status": "unknown", "confidence": 0.0}]}
-
-ATURAN EKSTRAKSI:
-1. Brand harus konsisten (e.g. sfood -> ShopeeFood).
-2. Jika bukan promo atau pertanyaan murni -> brand="SKIP", summary="SKIP".
-3. DILARANG memberikan penjelasan. Output HANYA JSON.
+ATURAN WAJIB:
+- Jika MSG hanya kata pendek (e.g., "aman"), WAJIB baca C: untuk mengetahui brand yang dimaksud.
+- Output HARUS valid JSON yang sesuai dengan skema. Tidak ada teks pembuka/penutup.
+- Brand harus konsisten (e.g. sfood -> ShopeeFood, tsel -> Telkomsel).
 """
 
 _DEDUP_SYSTEM = "Kamu agen deteksi duplikasi. Output HANYA angka indeks dipisah koma."
@@ -381,7 +374,11 @@ class OpenAICompatibleClient(BaseAIClient):
         else:
             text = message.content
 
-        if text: text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+        # Robust thinking/reasoning removal for 2026 models (DeepSeek, o3, etc)
+        if text: 
+            text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+            # Also handle some models that use markdown blocks for reasoning
+            text = re.sub(r'--- reasoning ---.*?--- reasoning ---', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
 
         usage = {
             "prompt_tokens": getattr(res.usage, 'prompt_tokens', 0),
@@ -650,7 +647,7 @@ class GeminiProcessor:
 
             if p['provider'] == 'google':
                 client = GoogleClient(api_key=api_key)
-            elif p['provider'] in ('groq', 'glm', 'openrouter'):
+            elif p['provider'] in ('groq', 'glm', 'openrouter', 'mistral', 'siliconflow', 'cerebras'):
                 client = OpenAICompatibleClient(
                     api_key=api_key, 
                     base_url=p.get('base_url'),
@@ -783,22 +780,22 @@ class GeminiProcessor:
         return best_name
 
     def _estimate_tokens(self, content: Any) -> int:
-        """Conservative token estimation (~4 chars per token for Indonesian)."""
-        # Base overhead for system prompt and generated response
-        base_overhead = 300
-
+        """Conservative token estimation with schema overhead padding."""
+        base_overhead = 400 # Increased for function calling overhead
+        
         def _count(obj):
-            if isinstance(obj, str): return len(obj) // 4
+            if isinstance(obj, str): return int(len(obj) / 3.5) # Indonesian/slang requires more tokens per char
             if isinstance(obj, list): return sum(_count(x) for x in obj)
-            return len(str(obj)) // 4
+            return int(len(str(obj)) / 3.5)
 
-        return max(1, _count(content) + base_overhead)
+        # 1.5x multiplier for pessimistic reservation during concurrent bursts
+        return int((max(1, _count(content)) + base_overhead) * 1.5)
 
 
     async def _call(self, contents: Any, config: dict, slot_name: str, 
                     attempt: int = 1, max_attempts: int = 6, tried: list[str] = None,
                     banned_providers: set[str] = None) -> Optional[WrappedResponse]:
-        """Executes an AI call with automatic cross-provider fallback."""
+        """Executes an AI call with automatic cross-provider fallback and jittered backoff."""
         if tried is None: tried = []
         if banned_providers is None: banned_providers = set()
         
@@ -835,6 +832,7 @@ class GeminiProcessor:
             return response
 
         except Exception as e:
+            import random
             err_str = str(e).lower()
             logger.warning(f"🔄 AI ({slot.model_id}) Failure | Attempt {attempt} | {type(e).__name__}: {repr(e)}")
             slot.release_last()
@@ -866,6 +864,10 @@ class GeminiProcessor:
                 elif "per day" in err_str or "tpd" in err_str or "rpd" in err_str:
                     sleep_sec = 3600 * 4 # Back off for 4 hours on daily limit
 
+                # Add jitter to prevent thundering herds on recovery
+                jitter = random.uniform(0.8, 1.2)
+                sleep_sec = sleep_sec * jitter
+
                 logger.warning(f"⏳ [{slot.name}] Rate Limited. Sleeping {sleep_sec:.1f}s.")
                 slot.exhausted_until = time.monotonic() + sleep_sec
             if attempt < max_attempts:
@@ -874,10 +876,14 @@ class GeminiProcessor:
                     # Check if any part is a dict with 'data' (our image format)
                     is_vision = any(isinstance(item, dict) and 'data' in item for item in contents)
 
-                # Cross-provider ban ONLY on severe server errors (50x).
-                # Timeouts only exclude the specific model (already in 'tried').
+                # Cross-provider ban ONLY on severe server errors (5xx).
+                # Client errors (4xx) should ONLY exclude the specific model.
                 exclude_list = list(tried)
+                
+                # Check for 5xx in the error string or response status code
                 is_server_death = any(s in err_str for s in ["500", "502", "503", "504"])
+                if hasattr(e, 'status_code') and e.status_code >= 500:
+                    is_server_death = True
                 
                 if is_server_death:
                     banned_providers.add(slot.provider)
@@ -968,7 +974,7 @@ class GeminiProcessor:
         return score >= 2
 
     async def process_batch(self, messages: Sequence[dict[str, Any]], db: Any = None) -> list[PromoExtraction] | None:
-        """Extracts promos from a batch of messages using AI."""
+        """Extracts promos from a batch of messages using AI with concurrent chunking."""
         if not messages:
             return []
 
@@ -984,8 +990,6 @@ class GeminiProcessor:
             for m in filtered:
                 if m.get('reply_to_msg_id') and m['reply_to_msg_id'] in reply_map:
                     ctx_text = reply_map[m['reply_to_msg_id']]
-                    # CRITICAL FIX: Give the AI the full context, up to 1000 characters.
-                    # Your fleet can easily handle the token load now.
                     m['context'] = f"C:{ctx_text[-1000:]} "
                 else:
                     m['context'] = ""
@@ -993,57 +997,60 @@ class GeminiProcessor:
             for m in filtered:
                 m['context'] = ""
 
-        batch_text = "\n---\n".join(
-            f"ID:{m['id']} {m['context']}MSG: {m['text'] or ''}"
-            for m in filtered
-        )
         config = {
             "response_mime_type": "application/json",
             "response_schema": BatchResponse,
             "system_instruction": _EXTRACT_SYSTEM,
         }
 
+        # ── Scatter-Gather Chunking ──
+        # Distribute the load across the fleet concurrently instead of one giant batch
+        CHUNK_SIZE = 10 
+        chunks = [filtered[i:i + CHUNK_SIZE] for i in range(0, len(filtered), CHUNK_SIZE)]
         
+        async def _process_chunk(chunk: list[dict]):
+            chunk_text = "\n---\n".join(
+                f"ID:{m['id']} {m.get('context', '')}MSG: {m['text'] or ''}"
+                for m in chunk
+            )
+            tokens = self._estimate_tokens(chunk_text)
+            target_model = await self._pick_model(estimated_tokens=tokens, require_vision=False)
+            
+            logger.debug(f"🛰️ Chunk ({len(chunk)} msgs) -> {target_model}")
+            
+            return await self._call(
+                contents=f"Batch pesan:\n\n{chunk_text}",
+                config=config,
+                slot_name=target_model,
+            )
 
-        tokens = self._estimate_tokens(batch_text)
-        target_model = await self._pick_model(estimated_tokens=tokens, require_vision=False)
-        logger.debug(f"Using {target_model} for {len(filtered)} msgs")
-
-        response = await self._call(
-            contents=f"Batch pesan:\n\n{batch_text}",
-            config=config,
-            slot_name=target_model,
-        )
-
-        if response is None:
-            return None
-
-        if not response.parsed:
-            return []
+        # Fire all chunks to different models simultaneously
+        tasks = [_process_chunk(c) for c in chunks]
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
 
         valid = []
-        for p in response.parsed.promos:
-            summary = (p.summary or "").strip()
-            if not summary or len(summary) < 8:
+        for i, response in enumerate(responses):
+            if isinstance(response, Exception):
+                logger.error(f"❌ Chunk {i} processing crashed: {response}")
                 continue
-            if summary.lower() in _JUNK_SUMMARIES:
+            if response is None or not response.parsed:
                 continue
-            if _META_SUMMARY_PATTERN.search(summary):
-                logger.debug(f"Rejected meta-summary: {summary[:60]}")
-                continue
-            
-            # CRITICAL FIX: Brand Normalization Interceptor
-            # Forces the AI's guess through the deterministic Python dictionary
-            verified_brand = normalize_brand(p.brand)
-            if verified_brand == "Unknown" and "SKIP" not in p.brand.upper():
-                logger.warning(f"AI hallucinated unknown brand: '{p.brand}'. Forcing to Unknown.")
-            p.brand = verified_brand
 
-            p.model_name = response.model_name
-            valid.append(p)
+            for p in response.parsed.promos:
+                summary = (p.summary or "").strip()
+                if not summary or len(summary) < 8:
+                    continue
+                if summary.lower() in _JUNK_SUMMARIES:
+                    continue
+                if _META_SUMMARY_PATTERN.search(summary):
+                    continue
+                
+                verified_brand = normalize_brand(p.brand)
+                p.brand = verified_brand
+                p.model_name = response.model_name
+                valid.append(p)
 
-        actual_model = response.model_name if response and hasattr(response, 'model_name') else target_model
-        logger.info(f"✅ Extracted {len(valid)} promos from batch of {len(filtered)} msgs. [Model: {actual_model}]")
+        logger.info(f"✅ Scatter-Gather complete. Extracted {len(valid)} promos from {len(filtered)} msgs across {len(chunks)} chunks.")
         return valid
 
     async def filter_duplicates(self, new_promos: Sequence[PromoExtraction],

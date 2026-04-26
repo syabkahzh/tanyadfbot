@@ -1,15 +1,53 @@
 [
     {
+        "name": "google-gemma-3-4b",
+        "provider": "google",
+        "model_id": "gemma-3-4b-it",
+        "api_key_env": "GEMINI_API_KEY",
+        "rpm": 25,
+        "tpm": 14000,
+        "priority": 1,
+        "capabilities": {
+            "native_json": false,
+            "system_instruction": false
+        }
+    },
+    {
+        "name": "google-gemma-3-12b",
+        "provider": "google",
+        "model_id": "gemma-3-12b-it",
+        "api_key_env": "GEMINI_API_KEY",
+        "rpm": 25,
+        "tpm": 14000,
+        "priority": 1,
+        "capabilities": {
+            "native_json": false,
+            "system_instruction": false
+        }
+    },
+    {
+        "name": "google-gemma-3-27b",
+        "provider": "google",
+        "model_id": "gemma-3-27b-it",
+        "api_key_env": "GEMINI_API_KEY",
+        "rpm": 25,
+        "tpm": 14000,
+        "priority": 1,
+        "capabilities": {
+            "native_json": false,
+            "system_instruction": false
+        }
+    },
+    {
         "name": "gemma-4-31b-it",
         "provider": "google",
         "model_id": "gemma-4-31b-it",
         "api_key_env": "GEMINI_API_KEY",
-        "rpm": 7,
-        "priority": 1,
+        "rpm": 14,
+        "priority": 2,
         "capabilities": {
             "native_json": false,
-            "system_instruction": false,
-            "vision": true
+            "system_instruction": false
         }
     },
     {
@@ -17,23 +55,31 @@
         "provider": "google",
         "model_id": "gemma-4-26b-a4b-it",
         "api_key_env": "GEMINI_API_KEY",
-        "rpm": 7,
-        "priority": 1,
+        "rpm": 14,
+        "priority": 2,
         "capabilities": {
             "native_json": false,
-            "system_instruction": false,
-            "vision": true
+            "system_instruction": false
         }
     },
     {
-        "name": "groq-llama-70b",
+        "name": "mistral-nemo",
+        "provider": "mistral",
+        "model_id": "open-mistral-nemo",
+        "api_key_env": "MISTRAL_API_KEY",
+        "rpm": 60,
+        "priority": 1,
+        "base_url": "https://api.mistral.ai/v1",
+        "capabilities": {
+            "native_json": true
+        }
+    },
+    {
+        "name": "groq-llama-8b",
         "provider": "groq",
-        "model_id": "llama-3.3-70b-versatile",
+        "model_id": "llama-3.1-8b-instant",
         "api_key_env": "GROQ_API_KEY",
         "rpm": 30,
-        "rpd": 1000,
-        "tpm": 12000,
-        "tpd": 100000,
         "priority": 1,
         "base_url": "https://api.groq.com/openai/v1",
         "capabilities": {
@@ -41,46 +87,12 @@
         }
     },
     {
-        "name": "groq-gpt-oss-120b",
+        "name": "groq-gpt-oss",
         "provider": "groq",
         "model_id": "openai/gpt-oss-120b",
         "api_key_env": "GROQ_API_KEY",
         "rpm": 30,
-        "rpd": 1000,
-        "tpm": 8000,
-        "tpd": 200000,
         "priority": 1,
-        "base_url": "https://api.groq.com/openai/v1",
-        "capabilities": {
-            "native_tools": true
-        }
-    },
-    {
-        "name": "groq-llama-scout",
-        "provider": "groq",
-        "model_id": "meta-llama/llama-4-scout-17b-16e-instruct",
-        "api_key_env": "GROQ_API_KEY",
-        "rpm": 30,
-        "rpd": 1000,
-        "tpm": 30000,
-        "tpd": 500000,
-        "priority": 1,
-        "base_url": "https://api.groq.com/openai/v1",
-        "capabilities": {
-            "native_tools": true,
-            "vision": true
-        }
-    },
-    {
-        "name": "groq-qwen-32b",
-        "provider": "groq",
-        "model_id": "qwen/qwen3-32b",
-        "api_key_env": "GROQ_API_KEY",
-        "rpm": 60,
-        "rpd": 1000,
-        "tpm": 6000,
-        "tpd": 500000,
-        "priority": 2,
         "base_url": "https://api.groq.com/openai/v1",
         "capabilities": {
             "native_tools": true
@@ -92,10 +104,47 @@
         "model_id": "openai/gpt-oss-120b:free",
         "api_key_env": "OPENROUTER_API_KEY",
         "rpm": 15,
-        "priority": 4,
+        "priority": 1,
         "base_url": "https://openrouter.ai/api/v1",
         "capabilities": {
             "native_json": true
+        }
+    },
+    {
+        "name": "mistral-small",
+        "provider": "mistral",
+        "model_id": "mistral-small-latest",
+        "api_key_env": "MISTRAL_API_KEY",
+        "rpm": 60,
+        "priority": 2,
+        "base_url": "https://api.mistral.ai/v1",
+        "capabilities": {
+            "native_json": true
+        }
+    },
+    {
+        "name": "mistral-14b",
+        "provider": "mistral",
+        "model_id": "ministral-14b-latest",
+        "api_key_env": "MISTRAL_API_KEY",
+        "rpm": 60,
+        "priority": 2,
+        "base_url": "https://api.mistral.ai/v1",
+        "capabilities": {
+            "native_json": true,
+            "vision": true
+        }
+    },
+    {
+        "name": "groq-qwen-7b",
+        "provider": "groq",
+        "model_id": "qwen-2.5-coder-7b-instruct",
+        "api_key_env": "GROQ_API_KEY",
+        "rpm": 30,
+        "priority": 2,
+        "base_url": "https://api.groq.com/openai/v1",
+        "capabilities": {
+            "native_tools": true
         }
     },
     {
@@ -104,7 +153,7 @@
         "model_id": "nvidia/nemotron-3-super-120b-a12b:free",
         "api_key_env": "OPENROUTER_API_KEY",
         "rpm": 15,
-        "priority": 4,
+        "priority": 3,
         "base_url": "https://openrouter.ai/api/v1",
         "capabilities": {
             "native_json": true
@@ -116,7 +165,7 @@
         "model_id": "z-ai/glm-4.5-air:free",
         "api_key_env": "OPENROUTER_API_KEY",
         "rpm": 15,
-        "priority": 4,
+        "priority": 3,
         "base_url": "https://openrouter.ai/api/v1",
         "capabilities": {
             "native_json": true
@@ -128,7 +177,7 @@
         "model_id": "liquid/lfm-2.5-1.2b-instruct:free",
         "api_key_env": "OPENROUTER_API_KEY",
         "rpm": 15,
-        "priority": 4,
+        "priority": 3,
         "base_url": "https://openrouter.ai/api/v1",
         "capabilities": {
             "native_json": true
@@ -138,6 +187,18 @@
         "name": "or-minimax-2.5",
         "provider": "openrouter",
         "model_id": "minimax/minimax-m2.5:free",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "rpm": 15,
+        "priority": 3,
+        "base_url": "https://openrouter.ai/api/v1",
+        "capabilities": {
+            "native_json": true
+        }
+    },
+    {
+        "name": "or-nemotron-3-nano",
+        "provider": "openrouter",
+        "model_id": "nvidia/nemotron-3-nano-30b-a3b:free",
         "api_key_env": "OPENROUTER_API_KEY",
         "rpm": 15,
         "priority": 4,

@@ -39,8 +39,8 @@ class Config:
     SESSION_NAME: str = "tg_session"
     
     # Models
-    MODEL_ID: str = "gemma-4-31b-it"
-    MODEL_FALLBACK: str = "gemma-4-26b-a4b-it"
+    MODEL_ID: str = "gemma-3-4b-it"
+    MODEL_FALLBACK: str = "gemma-4-31b-it"
     MODEL_LAST_RESORT_RPD: int = 450
 
     # Timezone: WIB = UTC+7
