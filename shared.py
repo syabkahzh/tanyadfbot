@@ -15,15 +15,15 @@ try:
     import numpy as np
     _orig_array = np.array
     def _fixed_array(obj, *args, **kwargs):
-        if kwargs.get('copy') is False:
-            kwargs.pop('copy')
+        if kwargs.get("copy") is False:
+            kwargs.pop("copy")
             return np.asarray(obj, *args, **kwargs)
         return _orig_array(obj, *args, **kwargs)
     np.array = _fixed_array
 except ImportError:
     pass
 
-from db import Database, normalize_brand
+from db import Database, normalize_brand, get_brand_canon
 from processor import GeminiProcessor, PromoExtraction, _CURRENCY_DISCOUNT_PATTERN
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,7 @@ async def classify_batch(texts: list[str]) -> list[tuple[str, float]]:
         List of (label, confidence) tuples.
     """
     if _ft_model is None:
+        logger.warning("FastText model not loaded — traffic cop disabled, all messages will pass through")
         return [("__label__UNKNOWN", 0.0)] * len(texts)
     if not texts:
         return []
@@ -228,9 +229,10 @@ async def is_fuzzy_duplicate(brand: str, summary: str,
 
         for alert in _fuzzy_dedup_queue:
             if alert['brand'] == norm_brand:
-                similarity = difflib.SequenceMatcher(
-                    None, alert['summary'], norm_summary
-                ).ratio()
+                # Offload CPU-bound SequenceMatcher to thread to avoid blocking event loop
+                similarity = await asyncio.to_thread(
+                    difflib.SequenceMatcher(None, alert['summary'], norm_summary).ratio
+                )
                 if similarity > threshold:
                     return True
 
@@ -322,9 +324,10 @@ def ai_circuit_open_remaining() -> float:
     return remaining if remaining > 0 else 0.0
 
 # Threshold + cooldown. Kept here (not main.py) so /diag can read them.
-_AI_CIRCUIT_FAILURE_THRESHOLD: int = 5
-_AI_CIRCUIT_COOLDOWN_SEC: float = 30.0
+_AI_CIRCUIT_FAILURE_THRESHOLD: int = 50
+_AI_CIRCUIT_COOLDOWN_SEC: float = 5.0
 _last_trend_alert: str = ""
+_last_trend_alert_ts: float = 0.0
 _last_spike_alert: datetime = datetime.min.replace(tzinfo=timezone.utc)
 _last_hourly_digest: str = ""
 
@@ -347,7 +350,8 @@ def _score_confidence(p: PromoExtraction, msg: dict, recently_alerted_brands: se
         score += 30
         
     # BUG S1 FIX: Slang active signals count as implicit confirmation
-    if _ACTIVE_SLANG.search(p.summary or ''):
+    if _ACTIVE_SLANG.search(p.summary or 
+''):
         score += 15
         
     if p.status == 'active': score += 15
@@ -452,15 +456,17 @@ def _guess_brand(text: str | None) -> str:
     t_raw = text.lower()
     t_norm = _ELONGATION_RE.sub(r'\1', t_raw)
 
-    from shared import _BRAND_KEYWORDS
+    brand_canon = get_brand_canon()
     global _BRAND_PATTERNS
     if not _BRAND_PATTERNS:
-        for kw in _BRAND_KEYWORDS.keys():
-            if len(kw) <= 5 or '+' in kw:
-                _BRAND_PATTERNS[kw] = re.compile(rf'(^|[^a-zA-Z0-9]){re.escape(kw)}($|[^a-zA-Z0-9])')
+        for kw in brand_canon.keys():
+            if len(kw) <= 5 or "+" in kw:
+                _BRAND_PATTERNS[kw] = re.compile(
+                    rf"(^|[^a-zA-Z0-9]){re.escape(kw)}($|[^a-zA-Z0-9])"
+                )
 
-    for kw, brand in _BRAND_KEYWORDS.items():
-        if len(kw) <= 5 or '+' in kw:
+    for kw, brand in brand_canon.items():
+        if len(kw) <= 5 or "+" in kw:
             pattern = _BRAND_PATTERNS[kw]
             if pattern.search(t_raw) or pattern.search(t_norm):
                 return brand
@@ -508,90 +514,58 @@ async def _flush_alert_buffer(delay: float = 0.5) -> None:
             except Exception as e:
                 logger.error(f"Failed to parse p_data_json in flush: {e}")
 
-        set_buffer_flush_task(None)
-
     try:
         tasks = []
+        task_to_item = []
         from telegram.constants import ParseMode
         for brand_key, items in snapshot.items():
             if len(items) == 1:
                 p, link, ts, corr, ctexts, src = items[0]
                 tasks.append(bot.send_alert(p, link, timestamp=ts, corroborations=corr, corroboration_texts=ctexts, source=src))
+                task_to_item.append((brand_key, 0))
             else:
                 tasks.append(bot.send_grouped_alert(brand_key, items))
+                task_to_item.append((brand_key, None))
         
         if tasks:
-            await asyncio.gather(*tasks)
-
-        await db.conn.execute(
-            "DELETE FROM pending_alerts WHERE flush_id=?", (flush_id,)
-        )
-        await db.conn.commit()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Identify which alerts succeeded vs failed
+            failed_brands: set[str] = set()
+            for idx, res in enumerate(results):
+                if isinstance(res, Exception):
+                    brand_key, _ = task_to_item[idx]
+                    failed_brands.add(brand_key)
+            
+            if failed_brands:
+                # Only delete alerts for brands that succeeded
+                brands_to_delete = [b for b, _ in task_to_item if b not in failed_brands]
+                if brands_to_delete:
+                    ph = ",".join("?" * len(brands_to_delete))
+                    await db.conn.execute(
+                        f"DELETE FROM pending_alerts WHERE flush_id=? AND brand IN ({ph})",
+                        (flush_id, *brands_to_delete)
+                    )
+                    await db.conn.commit()
+                # Reset flush_id for failed brands so they retry
+                if failed_brands:
+                    ph = ",".join("?" * len(failed_brands))
+                    await db.conn.execute(
+                        f"UPDATE pending_alerts SET flush_id=NULL WHERE flush_id=? AND brand IN ({ph})",
+                        (flush_id, *failed_brands)
+                    )
+                    await db.conn.commit()
+            else:
+                await db.conn.execute(
+                    "DELETE FROM pending_alerts WHERE flush_id=?", (flush_id,)
+                )
+                await db.conn.commit()
+        set_buffer_flush_task(None)
     except Exception as e:
-        print(f"⚠️ Alert flush failed: {e}")
+        set_buffer_flush_task(None)
+        logger.error(f"⚠️ Alert flush failed: {e}")
         if bot:
             await bot.alert_error("_flush_alert_buffer", e)
         await db.conn.execute(
             "UPDATE pending_alerts SET flush_id=NULL WHERE flush_id=?", (flush_id,)
         )
         await db.conn.commit()
-
-_BRAND_KEYWORDS: dict[str, str] = {
-    'kopken': 'Kopi Kenangan', 'kopi kenangan': 'Kopi Kenangan',
-    'kenangan': 'Kopi Kenangan', 'k+p+k+n': 'Kopi Kenangan',
-    'hokben': 'HokBen', 'hoka ben': 'HokBen', 'h+k+b+n': 'HokBen', 'h+o+k+b+e+n': 'HokBen',
-    'hophop': 'HopHop', 'hop hop': 'HopHop', 'h+p+h+p': 'HopHop',
-    'sfood': 'ShopeeFood', 'shopeefood': 'ShopeeFood',
-    's+f+d': 'ShopeeFood', 'sfud': 'ShopeeFood',
-    'sopifut': 'ShopeeFood', 'sopifud': 'ShopeeFood', 's+p+f+d': 'ShopeeFood',
-    'gfood': 'GoFood', 'gofood': 'GoFood', 'g+f+d': 'GoFood', 'g+o+f+o+o+d': 'GoFood',
-    'spx': 'SPX', 'shopee xpress': 'SPX', 's+p+x': 'SPX',
-    'alfamart': 'Alfamart', 'alfa': 'Alfamart', 'a+l+f+a': 'Alfamart', 'a+l+f+a+m+a+r+t': 'Alfamart',
-    'jsm': 'Alfamart', 'j+s+m': 'Alfamart',
-    'psm': 'Alfamart', 'p+s+m': 'Alfamart',
-    'afm': 'Alfamart', 'a+f+m': 'Alfamart',
-    'indomaret': 'Indomaret', 'idm': 'Indomaret', 'i+d+m': 'Indomaret', 'i+n+d+o': 'Indomaret',
-    'chatime': 'Chatime', 'chtm': 'Chatime',
-    'c+h+t+m': 'Chatime', 'ctm': 'Chatime', 'c+t+m': 'Chatime',
-    'starbucks': 'Starbucks', 's+t+a+r+b+u+c+k+s': 'Starbucks',
-    'ismaya': 'Ismaya', 'gindaco': 'Gindaco', 'g+i+n+d+a+c+o': 'Gindaco',
-    'g+n+d+c': 'Gindaco',
-    'kawanlama': 'Kawan Lama', 'kawan lama': 'Kawan Lama', 'k+w+n+l+m': 'Kawan Lama',
-    'cgv': 'CGV', 'xxi': 'XXI', 'c+g+v': 'CGV', 'x+x+i': 'XXI',
-    'mcd': 'McD', 'kfc': 'KFC', 'm+c+d': 'McD', 'k+f+c': 'KFC',
-    'gopay': 'GoPay', 'gpy': 'GoPay', 'g+p+y': 'GoPay', 'g+o+p+a+y': 'GoPay',
-    'spay': 'ShopeePay', 'shopeepay': 'ShopeePay', 's+p+a+y': 'ShopeePay', 's+h+o+p+e+e+p+a+y': 'ShopeePay',
-    'ovo': 'OVO', 'o+v+o': 'OVO',
-    'goco': 'GoPay Coins', 'g+o+c+o': 'GoPay Coins',
-    'grab': 'Grab', 'gojek': 'Gojek', 'g+r+a+b': 'Grab', 'g+o+j+e+k': 'Gojek',
-    'goride': 'GoRide', 'grd': 'GoRide', 'g+r+d': 'GoRide', 'gored': 'GoRide',
-    'pln': 'PLN', 'pulsa': 'Pulsa', 'ag': 'Alfagift', 'alfagift': 'Alfagift', 'a+g': 'Alfagift', 'a+l+f+a+g+i+f+t': 'Alfagift',
-    'astrapay': 'AstraPay', 'alt': 'Astra', 'a+s+t+r+a+p+a+y': 'AstraPay', 'a+l+t': 'Astra',
-    'tsel': 'Telkomsel', 'mytsel': 'Telkomsel', 'mytelkomsel': 'Telkomsel', 't+s+e+l': 'Telkomsel',
-    'tokopedia': 'Tokopedia', 'tokped': 'Tokopedia',
-    'toped': 'Tokopedia', 'tkpd': 'Tokopedia', 't+k+p+d': 'Tokopedia',
-    'lazada': 'Lazada', 'lzd': 'Lazada', 'l+z+d': 'Lazada', 'l+a+z+a+d+a': 'Lazada',
-    'dilan': 'Dilan', 'bandung': 'Bandung',
-    'cetem': 'Cetem', 'cetam': 'Cetem', 'pubg': 'PUBG', 'pugb': 'PUBG', 'p+u+b+g': 'PUBG',
-    'rotio': 'Roti O', 'roti o': 'Roti O', 'roti-o': 'Roti O',
-    'tomoro': 'Tomoro Coffee', 'tomoro coffee': 'Tomoro Coffee',
-    'jago': 'Bank Jago', 'saqu': 'Bank Saqu', 'seabank': 'SeaBank', 'aladin': 'Bank Aladin',
-    'g+b+s': 'GaBisa',
-    'r+s+t+k': 'Restock', 'r+s+t+c+k': 'Restock', 'r+st+ck': 'Restock',
-    'cb': 'Cashback', 'kesbek': 'Cashback', 'c+s+h+b+c+k': 'Cashback', 'cash back': 'Cashback',
-    'pchematapril': 'PC HematApril',
-    'sopi': 'Shopee', 'sopie': 'Shopee',
-    'solaria': 'Solaria',
-    'neo': 'Bank Neo Commerce', 'bank neo': 'Bank Neo Commerce',
-    'tmrw': 'TMRW', 'tmrw by uob': 'TMRW',
-    'hero': 'Hero', 'hero supermarket': 'Hero',
-    'bsya': 'Bank Syariah',
-    'fortklass': 'Fortklass',
-    'g2g': 'G2G',
-    'burek': 'Burek',
-    'aice': 'Aice', 'a+i+c+e': 'Aice',
-    'point coffee': 'Point Coffee', 'poin coffee': 'Point Coffee',
-    'tukpo': 'Tukar Poin',
-    'svip': 'ShopeeFood',
-    'spud': 'SPUD',
-}

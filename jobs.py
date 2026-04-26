@@ -9,6 +9,8 @@ import html
 import re
 import pytz
 import logging
+import time
+import os
 from datetime import datetime, timezone, timedelta
 from typing import Any, cast
 
@@ -22,39 +24,47 @@ from shared import _make_tg_link, _flush_alert_buffer, _reconnect_listener
 logger = logging.getLogger(__name__)
 
 
+def _read_file_bytes(path: str) -> bytes:
+    """Synchronous helper to read a file — intended for asyncio.to_thread."""
+    with open(path, 'rb') as f:
+        return f.read()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Time reminder job — "sinyal waktu"
 # Scans active promos for an HH:MM time of day in valid_until/summary/conditions
 # and fires a T-2min reminder so users don't miss a time-bounded promo window.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# HH:MM / HH.MM / HH:MM WIB — anchored to word boundaries to avoid price numbers.
+# HH:MM / HH.MM / HH:MM WIB — anchored to word boundaries.
 _TIME_OF_DAY_RE = re.compile(
-    r'\b(?:jam|pukul|pkl|pk|s[./]?d|sampai|sebelum)?\s*'
-    r'(\d{1,2})[:.](\d{2})\s*(wib)?\b',
+    r'\b(?:jam|pukul|pkl|pk|s[./]?d|sampai|sebelum|pada)?\s*'
+    r'(\d{1,2})[:.](\d{2})\s*(?:wib|wit|wita)?\b',
     re.IGNORECASE,
 )
 # "jam 10" / "pukul 14" without minutes (interpreted as :00).
 _TIME_HOUR_RE = re.compile(
-    r'\b(?:jam|pukul|pkl|pk|s[./]?d|sampai|sebelum)\s+(\d{1,2})(?:\s*(wib|pagi|siang|sore|malem|malam))?\b',
+    r'\b(?:jam|pukul|pkl|pk|s[./]?d|sampai|sebelum|pukul|pada)\s+(\d{1,2})(?:\s*(wib|wit|wita|pagi|siang|sore|malem|malam))?\b',
     re.IGNORECASE,
 )
 
 
 def _extract_time_of_day(text: str) -> tuple[int, int] | None:
-    """Return (hour, minute) if text explicitly names a time of day in WIB.
+    """Return (hour, minute) if text explicitly names a time of day.
 
-    Conservative: only returns when we're confident the number is a clock
-    time, not a price or date. Prefers the HH:MM form; falls back to
-    "jam/pukul N" (minute=0) only when anchored by a time preposition.
+    Improved to handle more variations and common typos.
     """
     if not text:
         return None
+    # Pre-clean: "jam 10.00wib" -> "jam 10.00 wib"
+    text = re.sub(r'(\d{2})(wib|wit|wita)', r'\1 \2', text, flags=re.IGNORECASE)
+    
     m = _TIME_OF_DAY_RE.search(text)
     if m:
         hh, mm = int(m.group(1)), int(m.group(2))
         if 0 <= hh <= 23 and 0 <= mm <= 59:
             return (hh, mm)
+            
     m = _TIME_HOUR_RE.search(text)
     if m:
         hh = int(m.group(1))
@@ -65,7 +75,16 @@ def _extract_time_of_day(text: str) -> tuple[int, int] | None:
                 hh += 12
             elif tod in ('malem', 'malam') and hh < 12:
                 hh += 12
+            elif tod in ('pagi',) and hh == 12:
+                hh = 0
             return (hh, 0)
+    
+    # Special case: "tengah malam" -> 00:00
+    if "tengah malam" in text.lower() or "jam 12 malam" in text.lower():
+        return (0, 0)
+    if "nanti siang" in text.lower() or "jam 12 siang" in text.lower():
+        return (12, 0)
+        
     return None
 
 
@@ -79,6 +98,7 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
     """
     logger.info("⏰ [Job] Starting time_reminder_job...")
     try:
+        import pytz
         if not db.conn:
             return
 
@@ -118,7 +138,7 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
             classifications = await shared.classify_batch(summaries)
             ft_results = {summaries[i]: classifications[i] for i in range(len(summaries))}
 
-        fired = 0
+        fired_ids = []
         from telegram.constants import ParseMode
 
         for r in rows:
@@ -126,7 +146,7 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
             ft_label, ft_conf = ft_results.get(r['summary'], ("__label__PROMO", 0.0))
             if ft_label == "__label__JUNK" and ft_conf > 0.90:
                 # Mark as fired so we don't re-scan noise.
-                await db.conn.execute("UPDATE promos SET reminder_fired=1 WHERE id=?", (r['id'],))
+                fired_ids.append(r['id'])
                 continue
 
             # Prefer valid_until if it contains a time; otherwise scan the
@@ -137,9 +157,7 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
             tod = _extract_time_of_day(haystack)
             if tod is None:
                 # Mark as checked-no-time so we don't re-scan next minute.
-                await db.conn.execute(
-                    "UPDATE promos SET reminder_fired=1 WHERE id=?", (r['id'],)
-                )
+                fired_ids.append(r['id'])
                 continue
 
             hh, mm = tod
@@ -153,15 +171,13 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
                     target = target + timedelta(days=1)
                 else:
                     # Time has very recently passed, skip to prevent late alerts
-                    await db.conn.execute(
-                        "UPDATE promos SET reminder_fired=1 WHERE id=?", (r['id'],)
-                    )
+                    fired_ids.append(r['id'])
                     continue
 
             minutes_to = (target - now_wib).total_seconds() / 60.0
 
-            # Fire when the stated time is between 2 and 3 minutes away
-            if 2.0 <= minutes_to <= 3.0:
+            # Fire when the stated time is between 1 and 6 minutes away
+            if 1.0 <= minutes_to <= 6.0:
                 now_str = now_wib.strftime('%H:%M:%S')
                 
                 # Format reply context if available
@@ -190,18 +206,16 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
 
                 try:
                     await bot.send_plain(text)
-                    fired += 1
+                    fired_ids.append(r['id'])
                 except Exception as e:
                     logger.error(f"time_reminder send failed for promo {r['id']}: {e}")
                     continue
 
-                await db.conn.execute(
-                    "UPDATE promos SET reminder_fired=1 WHERE id=?", (r['id'],)
-                )
-
-        if fired:
+        if fired_ids:
+            ph = ','.join(['?'] * len(fired_ids))
+            await db.conn.execute(f"UPDATE promos SET reminder_fired=1 WHERE id IN ({ph})", fired_ids)
             await db.conn.commit()
-            logger.info(f"✅ [Job] time_reminder_job fired {fired} reminders")
+            logger.info(f"✅ [Job] time_reminder_job fired/marked {len(fired_ids)} promos")
         else:
             logger.info("✅ [Job] time_reminder_job: no promos within 2-3 min window")
     except Exception as e:
@@ -234,24 +248,26 @@ async def hourly_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegram
 
         if not rows:
             await bot.send_plain(
-                f"📊 <b>Digest {hour_label}</b>\n\n"
-                "😴 Tidak ada promo yang terdeteksi 1 jam terakhir.",
-                parse_mode='HTML'
+                f"📊 **Rekap Promo {hour_label}**\n\n"
+                "😴 _Tidak ada promo yang terdeteksi 1 jam terakhir._"
             )
             return
 
-        lines = []
+        # Group by brand
+        by_brand = {}
         for r in rows:
-            brand       = (r['brand'] if r['brand']
-                           and r['brand'].lower() not in ('unknown', 'sunknown', '') else '❓')
-            status_icon = ("🟢" if r['status'] == 'active'
-                           else ("🔴" if r['status'] == 'expired' else "⚪"))
-            link_part   = f" [→]({r['tg_link']})" if r['tg_link'] else ""
-            fast_tag    = " ⚡" if r['via_fastpath'] else ""
-            lines.append(
-                f"{status_icon} **{brand}**"
-                f"{fast_tag}: {r['summary']}{link_part}"
-            )
+            brand = (r['brand'] if r['brand'] and r['brand'].lower() not in ('unknown', 'sunknown', '') else '❓')
+            by_brand.setdefault(brand, []).append(r)
+
+        # Build output structure
+        body_lines = []
+        for brand, promos in sorted(by_brand.items()):
+            body_lines.append(f"**{brand}**")
+            for r in promos:
+                status_icon = ("🟢" if r['status'] == 'active' else ("🔴" if r['status'] == 'expired' else "⚪"))
+                fast_tag    = " ⚡" if r['via_fastpath'] else ""
+                link_part   = f" [🔗 Lihat Pesan]({r['tg_link']})" if r['tg_link'] else ""
+                body_lines.append(f"  {status_icon} {r['summary']}{fast_tag}{link_part}")
 
         context    = "\n".join([f"- {r['brand']}: {r['summary']}" for r in rows])
         try:
@@ -261,13 +277,14 @@ async def hourly_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegram
                 )
         except TimeoutError:
             logger.warning("AI timeout in hourly_digest_job. Skipping summary.")
-            ai_summary = ""
-        now_str = datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%H:%M:%S')
+            ai_summary = "_Summary unavailable._"
+
+        now_str = datetime.now(WIB).strftime('%H:%M:%S')
         full_text = (
-            f"📊 **Digest {hour_label}** ({len(rows)} promo)\n"
-            f"⏰ Waktu: `{now_str}`\n\n"
+            f"📊 **Rekap Promo {hour_label}**\n"
+            f"🕒 _({len(rows)} promo)_ · ⏱ `{now_str}`\n\n"
             f"{ai_summary}\n\n"
-            f"**Detail:**\n" + "\n".join(lines)
+            f"**Detail:**\n" + "\n".join(body_lines)
         )
         shared._last_hourly_digest = full_text
         await bot.send_plain(full_text)
@@ -290,21 +307,25 @@ async def midnight_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
 
         if not rows:
             await bot.send_plain(
-                "📊 **Rekap 02:00–05:00 WIB**\n\n"
-                "😴 Tidak ada promo yang masuk tadi malam."
+                "📊 **Rekap Promo 02:00–05:00 WIB**\n\n"
+                "😴 _Tidak ada promo yang masuk tadi malam._"
             )
             return
 
-        lines = []
+        # Group by brand
+        by_brand = {}
         for r in rows:
-            brand     = (r['brand'] if r['brand']
-                         and r['brand'].lower() not in ('unknown', 'sunknown', '') else '❓')
-            fast_tag  = " ⚡" if r['via_fastpath'] else ""
-            link_part = f" [→]({r['tg_link']})" if r['tg_link'] else ""
-            lines.append(
-                f"• **{brand}**{fast_tag}: "
-                f"{r['summary']}{link_part}"
-            )
+            brand = (r['brand'] if r['brand'] and r['brand'].lower() not in ('unknown', 'sunknown', '') else '❓')
+            by_brand.setdefault(brand, []).append(r)
+
+        # Build output structure
+        body_lines = []
+        for brand, promos in sorted(by_brand.items()):
+            body_lines.append(f"**{brand}**")
+            for r in promos:
+                fast_tag    = " ⚡" if r['via_fastpath'] else ""
+                link_part   = f" [🔗 Lihat Pesan]({r['tg_link']})" if r['tg_link'] else ""
+                body_lines.append(f"  • {r['summary']}{fast_tag}{link_part}")
 
         context = "\n".join([f"- {r['brand']}: {r['summary']}" for r in rows])
         try:
@@ -315,13 +336,14 @@ async def midnight_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
                 )
         except TimeoutError:
             logger.warning("AI timeout in midnight_digest_job. Skipping summary.")
-            digest = ""
-        now_str = datetime.now(jakarta_tz).strftime('%H:%M:%S')
+            digest = "_Summary unavailable._"
+
+        now_str = now_wib.strftime('%H:%M:%S')
         full_text = (
-            f"📊 **Rekap 02:00–05:00 WIB** ({len(rows)} promo)\n"
-            f"⏰ Waktu: `{now_str}`\n\n"
+            f"📊 **Rekap Promo 02:00–05:00 WIB**\n"
+            f"🕒 _({len(rows)} promo)_ · ⏱ `{now_str}`\n\n"
             f"{digest}\n\n"
-            f"**Detail:**\n" + "\n".join(lines)
+            f"**Detail:**\n" + "\n".join(body_lines)
         )
         await bot.send_plain(full_text)
         logger.info("✅ [Job] Finished midnight_digest_job")
@@ -342,16 +364,22 @@ async def halfhour_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
         rows = await db.get_promos(hours=0.5)
         if not rows:
             return
-        lines = []
+
+        # Group by brand
+        by_brand = {}
         for r in rows:
-            brand     = (r['brand'] if r['brand']
-                         and r['brand'].lower() not in ('unknown', 'sunknown', '') else '❓')
-            fast_tag  = " ⚡" if r['via_fastpath'] else ""
-            link_part = f" <a href='{r['tg_link']}'>[→]</a>" if r['tg_link'] else ""
-            lines.append(
-                f"• **{brand}**{fast_tag}: "
-                f"{r['summary']}{link_part}"
-            )
+            brand = (r['brand'] if r['brand'] and r['brand'].lower() not in ('unknown', 'sunknown', '') else '❓')
+            by_brand.setdefault(brand, []).append(r)
+
+        # Build output structure
+        body_lines = []
+        for brand, promos in sorted(by_brand.items()):
+            body_lines.append(f"**{brand}**")
+            for r in promos:
+                fast_tag    = " ⚡" if r['via_fastpath'] else ""
+                link_part   = f" [🔗 Lihat Pesan]({r['tg_link']})" if r['tg_link'] else ""
+                body_lines.append(f"  • {r['summary']}{fast_tag}{link_part}")
+
         label   = now_wib.strftime('%H:%M:%S WIB')
         context = "\n".join([f"- {r['brand']}: {r['summary']}" for r in rows])
         
@@ -364,11 +392,12 @@ async def halfhour_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
             logger.warning("AI timeout in halfhour_digest_job. Skipping.")
             return
 
-        now_str = datetime.now(WIB).strftime('%H:%M:%S')
+        now_str = now_wib.strftime('%H:%M:%S')
         full_text = (
             f"⚡ **Update {label}** ({len(rows)} promo)\n"
             f"⏰ Waktu: `{now_str}`\n\n"
-            f"{digest}\n\n" + "\n".join(lines)
+            f"{digest}\n\n"
+            f"**Detail:**\n" + "\n".join(body_lines)
         )
         await bot.send_plain(full_text)
         logger.info("✅ [Job] Finished halfhour_digest_job")
@@ -381,10 +410,27 @@ async def halfhour_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
 # Image processing
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ⚡ Bolt: Performance Optimization
+# Moving these pre-compiled regular expressions to the module level prevents
+# the Python interpreter from attempting to recompile them (or look them up
+# in its internal cache) every time `image_processing_job` runs. This saves
+# micro-seconds per execution and reduces overhead on the event loop.
+_IMG_SKIP = re.compile(
+    r'\b(setting|pengaturan|config|tutorial|cara|gimana|help|tolong|'
+    r'oot|random|selfie|meme|lucu|haha|wkwk|ini kak|kak ini)\b',
+    re.IGNORECASE
+)
+_IMG_KEEP = re.compile(
+    r'(\b(promo|diskon|cashback|voucher|gratis|murah|hemat|sale|deal|'
+    r'sfood|gfood|grab|shopee|gojek|aman|jp|work|flash|limit)\b|%|rp\s?\d)',
+    re.IGNORECASE
+)
+
 async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: Any) -> None:
     """Processes unhandled photo messages with the vision model."""
     logger.info("⏰ [Job] Starting image_processing_job...")
     try:
+        import pytz
         if not db.conn:
             return
 
@@ -397,17 +443,6 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
             all_rows = await cur.fetchall()
         if not all_rows:
             return
-
-        _IMG_SKIP = re.compile(
-            r'\b(setting|pengaturan|config|tutorial|cara|gimana|help|tolong|'
-            r'oot|random|selfie|meme|lucu|haha|wkwk|ini kak|kak ini)\b',
-            re.IGNORECASE
-        )
-        _IMG_KEEP = re.compile(
-            r'(\b(promo|diskon|cashback|voucher|gratis|murah|hemat|sale|deal|'
-            r'sfood|gfood|grab|shopee|gojek|aman|jp|work|flash|limit)\b|%|rp\s?\d)',
-            re.IGNORECASE
-        )
 
         rows: list[Any] = []
         for r in all_rows:
@@ -425,10 +460,9 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
 
         if not rows:
             return
-        rows = rows[:5]
-        processed_ids = []
-
-        for r in rows:
+        rows = rows[:10]
+        
+        async def _process_single_image(r):
             msg_id, tg_msg_id, chat_id, text, ts = (
                 r['id'], r['tg_msg_id'], r['chat_id'], r['text'], r['timestamp']
             )
@@ -436,26 +470,24 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                 # Fetch message and photo bytes
                 msg_obj = await listener.client.get_messages(chat_id, ids=tg_msg_id)
                 if not msg_obj or not msg_obj.photo:
-                    processed_ids.append(msg_id)
-                    continue
+                    await db.conn.execute("UPDATE messages SET image_processed=1 WHERE id=?", (msg_id,))
+                    return msg_id
 
                 downloaded = await listener.client.download_media(msg_obj, bytes)
                 if not downloaded:
                     photo_bytes = None
                 elif isinstance(downloaded, str):
-                    import os
-                    if os.path.exists(downloaded):
-                        with open(downloaded, 'rb') as f:
-                            photo_bytes = f.read()
-                        os.remove(downloaded)
+                    if await asyncio.to_thread(os.path.exists, downloaded):
+                        photo_bytes = await asyncio.to_thread(_read_file_bytes, downloaded)
+                        await asyncio.to_thread(os.remove, downloaded)
                     else:
                         photo_bytes = None
                 else:
                     photo_bytes = downloaded
 
                 if not photo_bytes:
-                    processed_ids.append(msg_id)
-                    continue
+                    await db.conn.execute("UPDATE messages SET image_processed=1 WHERE id=?", (msg_id,))
+                    return msg_id
 
                 start_ai = time.monotonic()
                 promo = await gemini.process_image(photo_bytes, text or "", msg_id)
@@ -484,7 +516,7 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                         await db.save_pending_alert(
                             promo.brand.lower().strip(),
                             promo.model_dump_json(), tg_link, ts,
-                            source='ai', commit=True
+                            source='ai', commit=False
                         )
                         t = shared.get_buffer_flush_task()
                         if t is None or t.done():
@@ -492,16 +524,23 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                                 asyncio.create_task(_flush_alert_buffer(delay=0.5))
                             )
 
-                # Commit image_processed status immediately per item to avoid holding write locks
+                # Commit image_processed status immediately per item
                 await db.conn.execute(
                     "UPDATE messages SET image_processed=1 WHERE id=?", (msg_id,)
                 )
-                await db.conn.commit()
-                processed_ids.append(msg_id)
+                return msg_id
             except Exception as e:
                 logger.error(f"image_processing_job item (msg {tg_msg_id}) error: {e}")
+                return None
 
-        logger.info("✅ [Job] Finished image_processing_job")
+        tasks = [_process_single_image(r) for r in rows]
+        results = await asyncio.gather(*tasks)
+        processed_ids = [res for res in results if res is not None]
+        
+        if processed_ids:
+            await db.conn.commit()
+
+        logger.info(f"✅ [Job] Finished image_processing_job (processed {len(processed_ids)} imgs)")
     except Exception as e:
         logger.error(f"image_processing_job critical error: {e}", exc_info=True)
         if shared.bot:
@@ -537,14 +576,26 @@ async def heartbeat_job(db: Database, gemini: GeminiProcessor, bot: TelegramBot,
             elif lag_min > 5:
                 lag_note = f"\n⚠️ *Lag: {int(lag_min)}m*"
 
-        # RPM pressure
-        active_calls = sum(
-            slot.current_usage() for slot in gemini._slots.values()
-        )
-        total_limit  = sum(slot.limit for slot in gemini._slots.values())
-        rpm_note     = f" | rpm: `{active_calls}/{total_limit}`"
-
-        text = f"💓 `{now_wib}` | queue: `{queue}`{rpm_note}{lag_note}"
+        # AI Army Fleet Status
+        fleet_status = []
+        total_active = 0
+        total_limit = 0
+        
+        # Sort by usage to show busiest ones first
+        sorted_slots = sorted(gemini._slots.values(), key=lambda s: s.current_usage(), reverse=True)
+        
+        for slot in sorted_slots:
+            usage = slot.current_usage()
+            total_active += usage
+            total_limit += slot.limit
+            if usage > 0:
+                fleet_status.append(f"{slot.name}: `{usage}/{slot.limit}`")
+        
+        army_note = f" | 🪖 `{total_active}/{total_limit}`"
+        if fleet_status:
+            army_note += "\n" + " · ".join(fleet_status[:3]) # Show top 3 active
+        
+        text = f"💓 `{now_wib}` | queue: `{queue}`{army_note}{lag_note}"
         await bot.send_plain(text)
         logger.info("✅ [Job] Finished heartbeat_job")
     except Exception as e:
@@ -561,7 +612,7 @@ async def hot_thread_job(db: Database, gemini: GeminiProcessor, listener: Any, b
     """Identifies highly active discussion threads and summarizes them."""
     logger.info("⏰ [Job] Starting hot_thread_job...")
     try:
-        threads = await db.get_hot_threads(limit=10)
+        threads = await db.get_hot_threads(minutes=15, min_replies=3, limit=10)
         if not threads:
             return
 
@@ -575,12 +626,12 @@ async def hot_thread_job(db: Database, gemini: GeminiProcessor, listener: Any, b
             if calls_this_run >= 3:
                 break
             now_ts    = datetime.now(timezone.utc)
-            last_data = alerted_hot_threads.get(t['tg_msg_id'], (0, cast(datetime, datetime.min.replace(tzinfo=timezone.utc))))
+            last_data = alerted_hot_threads.get(t['tg_msg_id'], (0, cast(datetime, datetime(1, 1, 1, tzinfo=timezone.utc))))
             last_count, last_alerted_at = last_data
             
             cooldown_ok = (now_ts - last_alerted_at).total_seconds() > 900
             
-            if t['reply_count'] >= last_count + 5 and cooldown_ok:
+            if t['reply_count'] >= last_count + 3 and cooldown_ok:
                 alerted_hot_threads[t['tg_msg_id']] = (t['reply_count'], now_ts)
                 calls_this_run += 1
 
@@ -600,10 +651,8 @@ async def hot_thread_job(db: Database, gemini: GeminiProcessor, listener: Any, b
                         if isinstance(downloaded, bytes):
                             parent_photo = downloaded
                         elif isinstance(downloaded, str):
-                            with open(downloaded, 'rb') as f:
-                                parent_photo = f.read()
-                            import os
-                            os.remove(downloaded)
+                            parent_photo = await asyncio.to_thread(_read_file_bytes, downloaded)
+                            await asyncio.to_thread(os.remove, downloaded)
                     except Exception as e:
                         logger.error(f"Hot thread photo download failed: {e}")
 
@@ -621,7 +670,7 @@ async def hot_thread_job(db: Database, gemini: GeminiProcessor, listener: Any, b
                     snip = (r['text'] or '').strip()
                     if snip:
                         snip = (snip[:57] + "...") if len(snip) > 60 else snip
-                        snippets.append(f"• _{snip}_")
+                        snippets.append(f"• _{snip}_ ")
 
                 parent_snippet = (t['text'] or '').strip()
                 if len(parent_snippet) > 100:
@@ -744,56 +793,44 @@ async def time_mention_job(db: Database, bot: TelegramBot) -> None:
     """Monitors and alerts on relevant time-sensitive messages."""
     logger.info("⏰ [Job] Starting time_mention_job...")
     try:
+        import pytz
         if not db.conn:
             return
 
-        async with db.conn.execute(
-            "SELECT id, text, timestamp, chat_id, tg_msg_id FROM messages "
-            "WHERE has_time_mention=1 AND time_alerted=0 ORDER BY id ASC"
-        ) as cur:
+        # Single query fetching message and its parent context via self-join
+        async with db.conn.execute("""
+            SELECT m1.id, m1.text, m1.timestamp, m1.chat_id, m1.tg_msg_id,
+                   m2.text as parent_text
+            FROM messages m1
+            LEFT JOIN messages m2 ON m1.reply_to_msg_id = m2.tg_msg_id AND m1.chat_id = m2.chat_id
+            WHERE m1.has_time_mention=1 AND m1.time_alerted=0 
+            ORDER BY m1.id ASC
+        """) as cur:
             rows = await cur.fetchall()
+            
         if not rows:
             return
 
-        from telegram.constants import ParseMode
-
-        all_ids = []
+        all_done = []
         noise_count = 0
         for r in rows:
-            text  = r['text'] or ""
+            text = r['text'] or ""
             msg_id = r['id']
-            all_ids.append(msg_id)
+            all_done.append(msg_id)
 
             # FastText weighting: skip noise
             ft_label, ft_conf = await shared.classify_one(text)
-            if ft_label == "__label__JUNK" and ft_conf > 0.85:
+            if (ft_label == "__label__JUNK" and ft_conf > 0.85) or not _is_time_signal_worthy(text):
                 noise_count += 1
                 continue
 
-            if not _is_time_signal_worthy(text):
-                noise_count += 1
-                continue
-
-            link  = _make_tg_link(r['chat_id'], r['tg_msg_id'])
+            link = _make_tg_link(r['chat_id'], r['tg_msg_id'])
             now_str = datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%H:%M:%S')
             
-            # Fetch parent context
             context_header = ""
-            async with db.conn.execute(
-                "SELECT reply_to_msg_id FROM messages WHERE id = ?", (msg_id,)
-            ) as cur:
-                m_row = await cur.fetchone()
-                reply_to = m_row[0] if m_row else None
-            
-            if reply_to:
-                async with db.conn.execute(
-                    "SELECT text FROM messages WHERE tg_msg_id = ? AND chat_id = ? LIMIT 1",
-                    (reply_to, r['chat_id'])
-                ) as ccur:
-                    prow = await ccur.fetchone()
-                    if prow and prow[0]:
-                        p_text = prow[0].replace('\n', ' ')[:100]
-                        context_header = f"💬 _Balasan untuk: \"{p_text}...\"_\n\n"
+            if r['parent_text']:
+                p_text = r['parent_text'].replace('\n', ' ')[:100]
+                context_header = f"💬 _Balasan untuk: \"{p_text}...\"_\n\n"
 
             alert = (
                 f"🕒 **Sinyal Waktu:**\n"
@@ -805,11 +842,11 @@ async def time_mention_job(db: Database, bot: TelegramBot) -> None:
             )
             await bot.send_plain(alert)
 
-        if all_ids:
+        if all_done:
             # Chunk updates to avoid SQLite variable limits (standard is 999)
             chunk_size = 900
-            for i in range(0, len(all_ids), chunk_size):
-                chunk = all_ids[i:i + chunk_size]
+            for i in range(0, len(all_done), chunk_size):
+                chunk = all_done[i:i + chunk_size]
                 ph = ','.join('?' * len(chunk))
                 await db.conn.execute(
                     f"UPDATE messages SET time_alerted=1 WHERE id IN ({ph})", chunk
@@ -852,8 +889,11 @@ async def trend_job(db: Database, gemini: GeminiProcessor, bot: TelegramBot) -> 
 
         # Use combined topics as a simple string for the dedup check
         current_summary = " ".join([t.topic for t in trends])
-        from shared import _last_trend_alert
-        if current_summary == _last_trend_alert:
+        import time as _time
+        _TREND_REPEAT_COOLDOWN = 1800  # 30 min, not "exact same string"
+        now_mono = _time.monotonic()
+        if (current_summary == shared._last_trend_alert 
+                and (now_mono - shared._last_trend_alert_ts) < _TREND_REPEAT_COOLDOWN):
             return
 
         lines: list[str] = []
@@ -863,8 +903,9 @@ async def trend_job(db: Database, gemini: GeminiProcessor, bot: TelegramBot) -> 
             lines.append(f"• {t.topic}\n  🔗 [Lihat Pesan]({link})")
 
         now_wib = datetime.now(pytz.timezone("Asia/Jakarta")).strftime('%H:%M:%S')
+        model_info = f" (via {trends[0].model_name})" if trends[0].model_name else ""
         full_text = (
-            f"📈 **Narasi Tren (15m):**\n"
+            f"📈 **Narasi Tren (15m){model_info}:**\n"
             f"⏰ Waktu: `{now_wib}`\n\n"
             + "\n\n".join(lines)
         )
@@ -872,6 +913,7 @@ async def trend_job(db: Database, gemini: GeminiProcessor, bot: TelegramBot) -> 
         await bot.send_plain(full_text)
 
         shared._last_trend_alert = current_summary
+        shared._last_trend_alert_ts = _time.monotonic()
         logger.info("✅ [Job] Finished trend_job")
     except Exception as e:
         logger.error(f"trend_job error: {e}", exc_info=True)
@@ -910,8 +952,8 @@ async def spike_detection_job(db: Database, gemini: GeminiProcessor, bot: Telegr
             five_min_count = cast(int, row_5[0]) if row_5 else 0
         avg_per_min = five_min_count / 5
 
-        # More sensitive: 15 msg/min and 2.0x average (was 25 and 2.5x)
-        if count >= 15 and count >= max(avg_per_min * 2.0, 5):
+        # More sensitive: 10 msg/min and 1.5x average (helps catch sustained bursts)
+        if count >= 10 and count >= max(avg_per_min * 1.5, 5):
             recent_msgs  = await db.get_recent_messages(minutes=1)
             sample_lines = [
                 f"• {html.escape((m['text'] or '').strip()[:80])}" for m in recent_msgs[:5]
@@ -988,16 +1030,16 @@ async def spike_detection_job(db: Database, gemini: GeminiProcessor, bot: Telegr
 
 async def dead_promo_reaper_job(db: Database, bot: TelegramBot) -> None:
     """Closes expired promotions based on subsequent community chat signals."""
-    logger.info("⏰ [Job] Starting dead_promo_reaper_job...")
-    re.compile(
-        r'\b(nt|abis|habis|sold.?out|expired|kehabisan|ga bisa|gabisa|'
-        r'udah mati|mati|nonaktif|hangus|error terus|ga work|gak work|off)\b',
-        re.IGNORECASE
-    )
+    logger.info("💀 [Job] Starting dead_promo_reaper_job...")
     try:
+        import pytz
         if not db.conn:
             return
             
+        # More robust keywords for expiry and active status
+        # expiry: nt, abis, habis, zonk, limit, sold out, koid, mati, gabisa, ga bisa, koin, koid, telat, ketinggalan, hangus, off
+        # active: aman, on, work, jp, cair, nyala, masih, bisa, dapet, dapat, pecah, luber
+        
         async with db.conn.execute("""
             WITH ActivePromos AS (
                 SELECT p.id, m.tg_msg_id, m.chat_id
@@ -1009,8 +1051,24 @@ async def dead_promo_reaper_job(db: Database, bot: TelegramBot) -> None:
             ReplySignals AS (
                 SELECT
                     ap.id AS promo_id,
-                    SUM(CASE WHEN mrt.text LIKE '%nt%' OR mrt.text LIKE '%abis%' OR mrt.text LIKE '%habis%' OR mrt.text LIKE '%sold out%' OR mrt.text LIKE '%expired%' OR mrt.text LIKE '%kehabisan%' OR mrt.text LIKE '%ga bisa%' OR mrt.text LIKE '%gabisa%' OR mrt.text LIKE '%mati%' OR mrt.text LIKE '%hangus%' OR mrt.text LIKE '%ga work%' OR mrt.text LIKE '%off%' THEN 1 ELSE 0 END) AS expiry_votes,
-                    SUM(CASE WHEN mrt.text LIKE '%aman%' OR mrt.text LIKE '%on%' OR mrt.text LIKE '%work%' OR mrt.text LIKE '%jp%' OR mrt.text LIKE '%masih%' OR mrt.text LIKE '%bisa%' THEN 1 ELSE 0 END) AS active_votes
+                    SUM(CASE WHEN 
+                        mrt.text LIKE '% nt%' OR mrt.text LIKE 'nt %' OR mrt.text = 'nt' OR
+                        mrt.text LIKE '%abis%' OR mrt.text LIKE '%habis%' OR 
+                        mrt.text LIKE '%sold out%' OR mrt.text LIKE '%expired%' OR 
+                        mrt.text LIKE '%kehabisan%' OR mrt.text LIKE '%ga bisa%' OR 
+                        mrt.text LIKE '%gabisa%' OR mrt.text LIKE '%mati%' OR 
+                        mrt.text LIKE '%hangus%' OR mrt.text LIKE '%ga work%' OR 
+                        mrt.text LIKE '%zonk%' OR mrt.text LIKE '%limit%' OR
+                        mrt.text LIKE '%off%' OR mrt.text LIKE '%koid%' OR
+                        mrt.text LIKE '%telat%' OR mrt.text LIKE '%ketinggalan%'
+                        THEN 1 ELSE 0 END) AS expiry_votes,
+                    SUM(CASE WHEN 
+                        mrt.text LIKE '%aman%' OR mrt.text LIKE '% on%' OR mrt.text LIKE 'on %' OR
+                        mrt.text LIKE '%work%' OR mrt.text LIKE '%jp%' OR 
+                        mrt.text LIKE '%masih%' OR mrt.text LIKE '%bisa%' OR
+                        mrt.text LIKE '%cair%' OR mrt.text LIKE '%nyala%' OR
+                        mrt.text LIKE '%pecah%' OR mrt.text LIKE '%luber%'
+                        THEN 1 ELSE 0 END) AS active_votes
                 FROM ActivePromos ap
                 JOIN messages mrt ON mrt.reply_to_msg_id = ap.tg_msg_id AND mrt.chat_id = ap.chat_id
                 GROUP BY ap.id
@@ -1042,6 +1100,7 @@ async def confirmation_gate_job(db: Database) -> None:
     """Processes low-confidence promotions that were waiting for confirmation."""
     logger.info("⏰ [Job] Starting confirmation_gate_job...")
     try:
+        import pytz
         if not db.conn:
             return
             
@@ -1151,7 +1210,7 @@ async def fasttext_retrain_job(db: Database, bot: TelegramBot) -> None:
         # 3. Train Model
         logger.info("🧠 Training FastText model...")
         process = await asyncio.create_subprocess_exec(
-            venv_python, train_script, "--data", "data/training.txt", "--out", "model.ftz",
+            "nice", "-n", "19", venv_python, train_script, "--data", "data/training.txt", "--out", "model.ftz",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
@@ -1190,35 +1249,34 @@ async def visual_trend_job(db: Database, bot: TelegramBot) -> None:
         import io
         try:
             import matplotlib.pyplot as plt
-            import matplotlib
-            plt.switch_backend('Agg') # Headless mode
+            import io
             
+            # Encapsulate synchronous plotting logic
+            def _draw_chart(b, c):
+                plt.switch_backend('Agg')
+                plt.figure(figsize=(10, 6))
+                colors = plt.cm.Paired(range(len(b)))
+                bars = plt.bar(b, c, color=colors)
+                plt.title('Top 10 Brands (Last 24h)', fontsize=15, pad=20)
+                plt.xlabel('Brand', fontsize=12)
+                plt.ylabel('Promo Count', fontsize=12)
+                plt.xticks(rotation=45, ha='right')
+                for bar in bars:
+                    yval = bar.get_height()
+                    plt.text(bar.get_x() + bar.get_width()/2, yval + 0.1, yval, ha='center', va='bottom')
+                plt.tight_layout()
+                buf = io.BytesIO()
+                plt.savefig(buf, format='png', dpi=150)
+                plt.close('all') # Critical to prevent memory leak
+                buf.seek(0)
+                return buf
+
             brands = [r['brand'] for r in rows]
             counts = [r['count'] for r in rows]
             
-            plt.figure(figsize=(10, 6))
-            colors = plt.cm.Paired(range(len(brands)))
-            bars = plt.bar(brands, counts, color=colors)
+            # Execute in a separate thread to prevent blocking the async loop
+            buf = await asyncio.to_thread(_draw_chart, brands, counts)
             
-            plt.title('Top 10 Brands (Last 24h)', fontsize=15, pad=20)
-            plt.xlabel('Brand', fontsize=12)
-            plt.ylabel('Promo Count', fontsize=12)
-            plt.xticks(rotation=45, ha='right')
-            
-            # Add value labels on top of bars
-            for bar in bars:
-                yval = bar.get_height()
-                plt.text(bar.get_x() + bar.get_width()/2, yval + 0.1, yval, ha='center', va='bottom')
-            
-            plt.tight_layout()
-            
-            # Save to buffer
-            buf = io.BytesIO()
-            plt.savefig(buf, format='png', dpi=150)
-            buf.seek(0)
-            plt.close()
-            
-            # Send to bot
             WIB = pytz.timezone("Asia/Jakarta")
             now_str = datetime.now(WIB).strftime('%d %b %H:%M:%S')
             caption = f"📊 **Brand activity summary**\n🕒 `{now_str} WIB`"

@@ -17,6 +17,8 @@ rsync -avz --progress \
   ./ "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}"
 
 echo "✅ Sync complete."
+echo "🧹 Cleaning up pycache on VPS..."
+ssh "${REMOTE_USER}@${REMOTE_HOST}" "find ${REMOTE_DIR} -name '__pycache__' -type d -exec rm -rf {} +"
 echo "🔄 Restarting service..."
 ssh -t "${REMOTE_USER}@${REMOTE_HOST}" "sudo systemctl restart tanyadfbot"
 echo "✨ Deployment finished!"

@@ -35,6 +35,22 @@ Detailed project knowledge and AI-generated insights are maintained in the **[De
 - `db.py`: Database interaction, schema management, and recovery.
 - `shared.py`: Global state and cross-module utilities.
 
+## Tools
+
+### `tools/export_corrections.py`
+Exports the latest AI corrections (user feedback) from the database into a readable Markdown report (`latest_feedback_export.md`).
+
+**Usage:**
+```bash
+python tools/export_corrections.py
+```
+
+**Automation (VPS):**
+A cron job runs this every 6 hours on the VPS so `latest_feedback_export.md` is always up-to-date:
+```bash
+0 */6 * * * cd /home/hfzhkn/tanyadfbot && /home/hfzhkn/tanyadfbot/venv/bin/python tools/export_corrections.py >> /home/hfzhkn/tanyadfbot/logs/export_cron.log 2>&1
+```
+
 ## Deployment
 The project is managed via a Git repository. Deployment is handled through a custom `deploy.sh` script that performs incremental syncs and service restarts.
 

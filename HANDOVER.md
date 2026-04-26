@@ -17,7 +17,8 @@ The system follows an **Ingest -> Store -> Extract -> Alert** pipeline.
 - **Atomicity:** Uses `save_promos_batch` for transactional commits (saves promos and marks messages as processed in one transaction).
 
 ### 3. AI Processing (`processor.py` & `main.py`)
-- **Model:** `gemma-4-31b-it`.
+- **Primary Model:** `gemma-3-4b-it` (Gemma 3).
+- **Fleet:** AI Army (multiple providers including Gemma 3 [4b, 12b, 27b], Gemma 4, Mistral, Llama, Qwen).
 - **Extraction:** Processes messages in batches of 150 every 1 minute.
 - **Deduplication:** Uses **Batch AI Deduplication**. A single AI call compares a batch of new promos against recent history to filter out duplicates semantically.
 - **Alert Logic:**

@@ -8,6 +8,9 @@ import asyncio
 import html
 import json
 import logging
+import pytz
+import psutil
+import os
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable, TypeVar, cast
 
@@ -35,7 +38,7 @@ from utils import _esc
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar('T', bound=Callable[..., Any])
+T = TypeVar("T", bound=Callable[..., Any])
 
 
 class TelegramBot:
@@ -55,7 +58,9 @@ class TelegramBot:
         # Track users in feedback flow: {user_id: original_msg_id}
         self._awaiting_feedback: dict[int, int] = {}
         self._feedback_weights: dict[int, float] = {} # {msg_id: weight}
-        
+        self._error_alert_cooldown: dict[str, float] = {}
+        self._ERROR_ALERT_COOLDOWN_SEC = 120.0
+
         self._setup_handlers()
 
     async def _retry_tg(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -90,11 +95,13 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("ping", self.cmd_ping))
         self.app.add_handler(CommandHandler("status", self.cmd_status))
         self.app.add_handler(CommandHandler("diag", self.cmd_diag))
+        self.app.add_handler(CommandHandler("logs", self.cmd_logs))
         self.app.add_handler(CommandHandler("today", self.cmd_today))
         self.app.add_handler(CommandHandler("chart", self.cmd_chart))
         self.app.add_handler(CommandHandler("review", self.cmd_review))
         self.app.add_handler(CommandHandler("clear", self.cmd_clear))
         self.app.add_handler(CommandHandler("debug", self.cmd_debug))
+        self.app.add_handler(CommandHandler("fleet", self.cmd_fleet))
         self.app.add_handler(CallbackQueryHandler(self.handle_callback))
         
         # Priority handler for feedback flow
@@ -135,7 +142,7 @@ class TelegramBot:
 
     async def cmd_ping(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Simple health check to confirm the bot is responsive."""
-        now = datetime.now(pytz.timezone("Asia/Jakarta")).strftime('%H:%M:%S')
+        now = datetime.now(pytz.timezone("Asia/Jakarta")).strftime("%H:%M:%S")
         await self._send_markdown(update, f"🏓 **Pong!**\n🕒 Time: `{now} WIB`")
 
     async def _send_markdown(self, update: Update | object, text: str, reply_markup: Any = None) -> None:
@@ -182,8 +189,6 @@ class TelegramBot:
         latest_ts = await self.db.get_latest_message_ts()
         
         # 3. System Load
-        import psutil
-        import os
         process = psutil.Process(os.getpid())
         ram_mb  = process.memory_info().rss / (1024 * 1024) # Bot RAM
         sys_mem = psutil.virtual_memory()
@@ -191,8 +196,8 @@ class TelegramBot:
         sys_ram_total_mb = sys_mem.total / (1024 * 1024)
         sys_ram_pct = sys_mem.percent
         
-        # Get accurate CPU (interval=0.1 blocks for 100ms, which is fine for /status)
-        cpu_usage = psutil.cpu_percent(interval=0.1)
+        # Offload to thread so the 100ms sample interval doesn't stall the event loop
+        cpu_usage = await asyncio.to_thread(psutil.cpu_percent, interval=0.1)
 
         # 4. Triage Status
         from main import _queue_emergency_mode
@@ -218,8 +223,8 @@ class TelegramBot:
         if failures:
             lines = []
             for f in failures:
-                comp = f['component']
-                err  = f['error_msg'][:60]
+                comp = f["component"]
+                err  = f["error_msg"][:60]
                 lines.append(f"• {comp}: {err}...")
             recent_log = "\n\n❌ **Recent Failures:**\n" + "\n".join(lines)
 
@@ -232,7 +237,7 @@ class TelegramBot:
         )
 
         WIB = pytz.timezone("Asia/Jakarta")
-        now_wib = datetime.now(WIB).strftime('%H:%M:%S WIB')
+        now_wib = datetime.now(WIB).strftime("%H:%M:%S WIB")
         latest_wib = _to_wib(latest_ts) + " WIB" if latest_ts else "N/A"
 
         text = (
@@ -267,7 +272,6 @@ class TelegramBot:
 
         import time as _time
         import main as _main
-
         now_m = _time.monotonic()
         loop_tick = shared.get_loop_tick()
         loop_age = (now_m - loop_tick) if loop_tick else -1
@@ -334,6 +338,88 @@ class TelegramBot:
         await self._send_markdown(update, text)
 
     @_owner_only
+    async def cmd_logs(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handler for /logs command — shows recent system logs."""
+        if not update.message: return
+        
+        try:
+            limit = 10
+            if context.args:
+                try: limit = int(context.args[0])
+                except: pass
+                
+            logs = await self.db.get_recent_logs(limit=limit)
+            if not logs:
+                await update.message.reply_text("📭 No logs found in database.")
+                return
+                
+            lines = []
+            for l in logs:
+                icon = "⚠️" if l['level'] == 'WARNING' else "🚨"
+                # Extraction time part only
+                ts = l['created_at'].split()[1].split('+')[0] if ' ' in l['created_at'] else l['created_at']
+                
+                # We use raw strings here because _send_markdown handles escaping
+                msg = l['message'][:150] + "..." if len(l['message']) > 150 else l['message']
+                lines.append(f"{icon} `{ts}` **{l['level']}** [{l['logger_name']}]\n`{msg}`")
+            
+            text = "📜 **Recent System Logs**\n\n" + "\n\n".join(lines)
+            await self._send_markdown(update, text)
+        except Exception as e:
+            logger.error(f"Failed to fetch logs: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Failed to fetch logs: {e}")
+
+    @_owner_only
+    async def cmd_fleet(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Displays and manages the AI fleet priorities."""
+        msg = update.message if update.message else update.callback_query.message if update.callback_query else None
+        if not msg:
+            return
+
+        import time as _time
+        army = self.gemini._slots
+
+        lines = ["🤖 **AI Fleet Management**\n"]
+        buttons = []
+
+        # Group models by provider for cleaner UI
+        by_provider: dict[str, list[Any]] = {}
+        for name, slot in army.items():
+            by_provider.setdefault(slot.provider, []).append(slot)
+
+        for provider, slots in sorted(by_provider.items()):
+            lines.append(f"🔹 **{provider.upper()}**")
+            for s in sorted(slots, key=lambda x: x.priority):
+                status = "✅" if s.available(_time.monotonic()) > 0 else "⏳"
+                lines.append(f"  {status} `{s.name}` (P{s.priority})")
+
+                # Cycle priority 1 -> 2 -> 3 -> 1
+                next_p = (s.priority % 3) + 1
+                buttons.append([InlineKeyboardButton(
+                    f"Set {s.name} to P{next_p}",
+                    callback_data=f"fleet_prio:{s.name}:{next_p}"
+                )])
+
+        reply_markup = InlineKeyboardMarkup(buttons)
+        text = "\n".join(lines)
+        safe_text, entities = convert(text)
+
+        if update.message:
+            await self._retry_tg(update.message.reply_text,
+                safe_text,
+                entities=[e.to_dict() for e in entities],
+                reply_markup=reply_markup,
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
+        elif update.callback_query:
+            await self._retry_tg(update.callback_query.edit_message_text,
+                safe_text,
+                entities=[e.to_dict() for e in entities],
+                reply_markup=reply_markup,
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
+
+    @_owner_only
     async def cmd_today(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Summary of promos from the start of the current day (WIB) with pagination."""
         await self._render_today_page(update, page=1)
@@ -376,7 +462,7 @@ class TelegramBot:
         row_buttons = []
         
         for i, r in enumerate(rows):
-            clean_text = (r['text'] or "").replace('\n', ' ')[:50]
+            clean_text = (r["text"] or "").replace("\n", " ")[:50]
             # Use standard number emojis
             idx_icon = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"][i]
             
@@ -426,7 +512,7 @@ class TelegramBot:
             r = await cur.fetchone()
             if not r: return
             
-        tg_link = _make_tg_link(r['chat_id'], r['tg_msg_id'])
+        tg_link = _make_tg_link(r["chat_id"], r["tg_msg_id"])
         
         keyboard = [
             [
@@ -481,15 +567,15 @@ class TelegramBot:
         end_idx = start_idx + page_size
         page_rows = rows[start_idx:end_idx]
         
-        today_str = now_wib.strftime('%d %b')
+        today_str = now_wib.strftime("%d %b")
         header = f"📅 **Promo Hari Ini — {today_str}**\n"
         header += f"🔥 Total: **{total_promos} promos** (Hal {page}/{total_pages})\n\n"
         
         lines = []
         for r in page_rows:
-            brand = r['brand'] if r['brand'] and r['brand'].lower() not in ('unknown', 'sunknown', '') else '❓'
-            time_str = _to_wib(r['msg_time'])
-            link = r['tg_link'] or "#"
+            brand = r["brand"] if r["brand"] and r["brand"].lower() not in ("unknown", "sunknown", "") else "❓"
+            time_str = _to_wib(r["msg_time"])
+            link = r["tg_link"] or "#"
             lines.append(f"• `[{time_str}]` **{brand}**: {r['summary']} [➤]({link})")
             
         text = header + "\n".join(lines)
@@ -527,7 +613,6 @@ class TelegramBot:
                 )
         except Exception as e:
             logger.error(f"Failed to render today page {page}: {e}")
-
     @_owner_only
     async def cmd_debug(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Dumps raw database rows for debugging."""
@@ -536,8 +621,8 @@ class TelegramBot:
         
         lines = []
         for r in rows:
-            clean_text = (r['text'] or '').replace('\n', ' ')[:80]
-            status = "✅" if r['processed'] else "⏳"
+            clean_text = (r["text"] or "").replace("\n", " ")[:80]
+            status = "✅" if r["processed"] else "⏳"
             lines.append(f"{status} `[{r['id']}]` {clean_text}...")
         
         await self._send_markdown(update, text + "\n".join(lines))
@@ -550,6 +635,19 @@ class TelegramBot:
         
         data = query.data or ""
         
+        if data.startswith("fleet_prio:"):
+            parts = data.split(":")
+            name = parts[1]
+            prio = int(parts[2])
+
+            success = self.gemini.update_model_priority(name, prio)
+            if success:
+                # Re-render the fleet menu
+                await self.cmd_fleet(update, context)
+            else:
+                await query.answer("Failed to update priority.")
+            return
+
         if data.startswith("feed_"):
             orig_msg_id = int(data.split("_")[1])
             
@@ -585,7 +683,7 @@ class TelegramBot:
                 user_id = update.effective_user.id
                 self._awaiting_feedback[user_id] = orig_msg_id
                 # Store weight in the user session too
-                context.user_data['pending_weight'] = weight
+                context.user_data["pending_weight"] = weight
                 await self._retry_tg(query.message.reply_text,
                     "⌨️ **Please type your correction now:**",
                     parse_mode=ParseMode.MARKDOWN
@@ -616,7 +714,7 @@ class TelegramBot:
             if vote == "custom":
                 user_id = update.effective_user.id
                 self._awaiting_feedback[user_id] = orig_msg_id
-                context.user_data['pending_weight'] = weight
+                context.user_data["pending_weight"] = weight
                 await self._retry_tg(query.message.reply_text,
                     "⌨️ **Please type your correction for this poll now:**",
                     parse_mode=ParseMode.MARKDOWN
@@ -626,12 +724,33 @@ class TelegramBot:
                 correction = mapping.get(vote, "VOTED")
                 
                 try:
+                    # Retrieve the saved poll data
+                    row = await self.db.get_poll_data(orig_msg_id)
+                    
+                    if vote == "yes" and row:
+                        p_data = PromoExtraction.model_validate_json(row['p_data_json'])
+                        # Save as a pending alert so it gets broadcasted
+                        await self.db.save_pending_alert(
+                            p_data.brand, row['p_data_json'], row['tg_link'], row['timestamp'], source='ai'
+                        )
+                        # Mark message as processed so it doesn't get picked up again
+                        await self.db.mark_batch_processed([orig_msg_id])
+                        
+                        # Trigger alert buffer flush if needed
+                        import shared
+                        from main import _flush_alert_buffer
+                        t = shared.get_buffer_flush_task()
+                        if t is None or t.done():
+                            shared.set_buffer_flush_task(asyncio.create_task(_flush_alert_buffer(delay=0.5)))
+                    
                     if vote in ("no", "spam"):
                         await self.db.conn.execute(
                             "INSERT INTO ai_corrections (original_msg_id, correction, weight) VALUES (?, ?, ?)",
                             (orig_msg_id, correction, weight)
                         )
                         await self.db.conn.commit()
+                        # Also mark as processed if we rejected it via poll
+                        await self.db.mark_batch_processed([orig_msg_id], skip_reason=f"poll_{vote}")
                     
                     status_emoji = "✅" if vote == "yes" else ("❌" if vote == "no" else "🚫")
                     await self._retry_tg(query.edit_message_text,
@@ -639,7 +758,7 @@ class TelegramBot:
                         parse_mode=ParseMode.MARKDOWN
                     )
                 except Exception as e:
-                    logger.error(f"Failed poll vote: {e}")
+                    logger.error(f"Failed poll vote: {e}", exc_info=True)
             return
 
         elif data.startswith("fix_"):
@@ -751,7 +870,7 @@ class TelegramBot:
         
         if user_id in self._awaiting_feedback:
             orig_msg_id = self._awaiting_feedback.pop(user_id)
-            weight = context.user_data.pop('pending_weight', 0.5)
+            weight = context.user_data.pop("pending_weight", 0.5)
             correction = update.message.text
             try:
                 await self.db.conn.execute(
@@ -766,8 +885,16 @@ class TelegramBot:
             return
 
         wait_msg = await self._retry_tg(update.message.reply_text,"🤔 **Thinking...**")
-        rows = await self.db.get_promos(hours=4)
-        context_text = "\n".join([f"- {r['brand']}: {r['summary']}" for r in rows])
+        
+        # CRITICAL FIX: Targeted RAG Search. 
+        # Only pull DB rows that match the user's specific keywords.
+        rows = await self.db.search_active_promos(update.message.text)
+        
+        if not rows:
+            context_text = "SYSTEM NOTE: TIDAK ADA PROMO YANG RELEVAN DI DATABASE SAAT INI."
+        else:
+            context_text = "\n".join([f"[{r['status'].upper()}] {r['brand']}: {r['summary']}" for r in rows])
+            
         answer = await self.gemini.answer_question(update.message.text, context_text)
         
         safe_text, entities = convert(answer)
@@ -777,13 +904,15 @@ class TelegramBot:
                          timestamp: str | None = None, 
                          corroborations: int = 0,
                          corroboration_texts: str = "[]",
-                         source: str = 'ai') -> None:
+                         source: str = 'ai',
+                         chat_id: int | None = None) -> None:
         """Broadcasts a single promotion alert to the owner."""
         keyboard = [[
             InlineKeyboardButton("🛒 Buka", url=tg_link),
             InlineKeyboardButton("🔧 Feedback", callback_data=f"feed_{p_data.original_msg_id}")
         ]]
-        brand_label = p_data.brand if p_data.brand.lower() not in ('unknown', 'sunknown', '') else "❓ Unknown"
+        brand_label = p_data.brand if p_data.brand.lower() not in (
+'unknown', 'sunknown', '') else "❓ Unknown"
 
         msg_wib = _to_wib(timestamp) if timestamp else "??"
         
@@ -792,13 +921,13 @@ class TelegramBot:
         brand_tag = f"**{brand_label}**"
         
         # Source & Latency breakdown
-        source_tag = "🤖 **AI Processed**" if source == 'ai' else "⚡ **Triggered Pythonly**"
-        
-        perf_tag = ""
         if source == 'ai':
+            model_info = f" ({p_data.model_name})" if p_data.model_name else ""
+            source_tag = f"🤖 **AI Processed{model_info}**"
             total_lat = (p_data.queue_time or 0) + (p_data.ai_time or 0)
             perf_tag = f"\n⏱ `Total: {total_lat:.1f}s | Q: {p_data.queue_time or 0:.0f}s | AI: {p_data.ai_time or 0:.1f}s`"
         else:
+            source_tag = "⚡ **Triggered Pythonly**"
             # Fast-path: queue_time was set to total latency in listener.py
             perf_tag = f"\n⏱ `Latency: {p_data.queue_time or 0:.2f}s`"
 
@@ -827,7 +956,7 @@ class TelegramBot:
         try:
             await self._retry_tg(
                 self.app.bot.send_message,
-                chat_id=Config.OWNER_ID,
+                chat_id=chat_id or Config.OWNER_ID,
                 text=safe_text,
                 entities=[e.to_dict() for e in entities],
                 reply_markup=InlineKeyboardMarkup(keyboard),
@@ -836,7 +965,7 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Failed to send alert: {e}")
 
-    async def send_grouped_alert(self, brand: str, items: list) -> None:
+    async def send_grouped_alert(self, brand: str, items: list, chat_id: int | None = None) -> None:
         """Broadcasts a grouped alert for multiple promos of the same brand."""
         if not items: return
         
@@ -851,11 +980,13 @@ class TelegramBot:
         lines = []
         for p, link, ts, corr, ctexts, src in items:
             msg_wib = _to_wib(ts)
-            source_icon = "🤖" if src == 'ai' else "⚡"
             if src == 'ai':
+                model_info = f" ({p.model_name})" if p.model_name else ""
                 total_lat = (p.queue_time or 0) + (p.ai_time or 0)
                 lat_info = f"`{total_lat:.1f}s (Q{p.queue_time or 0:.0f}/A{p.ai_time or 0:.1f})`"
+                source_icon = f"🤖{model_info}"
             else:
+                source_icon = "⚡"
                 lat_info = f"`{p.queue_time or 0:.2f}s`"
             
             lines.append(f"• {source_icon} {p.summary} (`{msg_wib}`) | {lat_info}")
@@ -865,7 +996,7 @@ class TelegramBot:
         try:
             await self._retry_tg(
                 self.app.bot.send_message,
-                chat_id=Config.OWNER_ID,
+                chat_id=chat_id or Config.OWNER_ID,
                 text=safe_text,
                 entities=[e.to_dict() for e in entities],
                 reply_markup=InlineKeyboardMarkup(keyboard),
@@ -874,28 +1005,30 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Failed to send grouped alert: {e}")
 
-    async def send_plain(self, text: str, parse_mode: Any = None) -> None:
+    async def send_plain(self, text: str, parse_mode: Any = None, chat_id: int | None = None, **kwargs) -> None:
         """Sends a plain text message to the owner using telegramify for auto-chunking."""
         try:
             results = await telegramify(text)
-            for item in results:
+            for i, item in enumerate(results):
+                chunk_kwargs = kwargs if i == len(results) - 1 else {}
                 if item.content_type == ContentType.TEXT:
                     await self._retry_tg(
                         self.app.bot.send_message,
-                        chat_id=Config.OWNER_ID,
+                        chat_id=chat_id or Config.OWNER_ID,
                         text=item.text,
                         entities=[e.to_dict() for e in item.entities],
-                        link_preview_options=LinkPreviewOptions(is_disabled=True)
+                        link_preview_options=LinkPreviewOptions(is_disabled=True),
+                        **chunk_kwargs
                     )
         except Exception as e:
             logger.error(f"Failed to send plain msg: {e}")
 
-    async def send_photo(self, photo: bytes, caption: str | None = None) -> None:
+    async def send_photo(self, photo: bytes, caption: str | None = None, chat_id: int | None = None) -> None:
         """Sends a photo to the owner."""
         try:
             await self._retry_tg(
                 self.app.bot.send_photo,
-                chat_id=Config.OWNER_ID,
+                chat_id=chat_id or Config.OWNER_ID,
                 photo=photo,
                 caption=caption,
                 parse_mode=ParseMode.HTML
@@ -903,8 +1036,11 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Failed to send photo: {e}")
 
-    async def send_verification_poll(self, p_data: PromoExtraction, tg_link: str) -> None:
+    async def send_verification_poll(self, p_data: PromoExtraction, tg_link: str, timestamp: str) -> None:
         """Sends a verification poll for low-confidence AI extractions."""
+        # Save to DB so we can retrieve it on callback
+        await self.db.save_poll_data(p_data.original_msg_id, p_data.model_dump_json(), tg_link, timestamp)
+
         keyboard = [
             [
                 InlineKeyboardButton("✅ Deal", callback_data=f"poll_{p_data.original_msg_id}_yes"),
@@ -923,25 +1059,24 @@ class TelegramBot:
         text = (
             f"🗳 **Deal or No Deal?**\n"
             f"AI is unsure about this extraction (Conf: `{p_data.confidence:.2f}`)\n\n"
-            f"🏪 **{p_data.brand}**\n"
-            f"📝 {p_data.summary}\n"
-            f"ℹ️ _{p_data.conditions or 'No conditions'}_"
+            f"📝 _{p_data.summary}_"
         )
         
         safe_text, entities = convert(text)
-        try:
-            await self._retry_tg(
-                self.app.bot.send_message,
-                chat_id=Config.OWNER_ID,
-                text=safe_text,
-                entities=[e.to_dict() for e in entities],
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        except Exception as e:
-            logger.error(f"Failed to send verification poll: {e}")
+        await self._retry_tg(
+            self.app.bot.send_message,
+            chat_id=Config.OWNER_ID,
+            text=safe_text,
+            entities=[e.to_dict() for e in entities],
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Global error handler for the bot."""
+        logger.error("Exception while handling an update:", exc_info=context.error)
 
     async def alert_error(self, component: str, error: Exception, source_msg_id: int | None = None) -> None:
-        """Alerts the owner about a system error (rate-limited)."""
+        """Sends a formatted error alert to the owner and logs it to the DB."""
         err_msg = str(error)
         
         # Save to DB first
@@ -951,10 +1086,6 @@ class TelegramBot:
 
         # Rate-limit notifications: 120s per component
         import time; now = time.monotonic()
-        if not hasattr(self, '_error_alert_cooldown'):
-            self._error_alert_cooldown = {}
-            self._ERROR_ALERT_COOLDOWN_SEC = 120.0
-
         if component in self._error_alert_cooldown and (now - self._error_alert_cooldown[component]) < self._ERROR_ALERT_COOLDOWN_SEC:
             return
         
@@ -964,66 +1095,21 @@ class TelegramBot:
             InlineKeyboardButton("🛠 Mark Fixed", callback_data=f"fix_{fid}"),
             InlineKeyboardButton("🔄 Retry Msg", callback_data=f"retry_{fid}")
         ]]
-        now_wib = datetime.now(pytz.timezone("Asia/Jakarta")).strftime('%H:%M:%S')
+        
         text = (
-            f"🚨 **Error in {component}**\n"
-            f"⏰ Time: `{now_wib}`\n\n"
-            f"`{err_msg[:300]}`"
+            f"🚨 **ERROR: `{component}`**\n\n"
+            f"`{html.escape(err_msg)}`\n\n"
+            f"Traceback available in logs. Failure ID: `{fid}`"
         )
-        safe_text, entities = convert(text)
-        try:
-            await self._retry_tg(
-                self.app.bot.send_message,
-                chat_id=Config.OWNER_ID,
-                text=safe_text,
-                entities=[e.to_dict() for e in entities],
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        except Exception as e:
-            logger.error(f"Failed to send error alert: {e}")
-
-    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Global error handler for the Telegram application."""
-        err = context.error
-        if isinstance(err, (NetworkError, TimedOut)):
-            logger.warning(f"Telegram Network Error (Bad Gateway/Timeout): {err}")
-            return
-        logger.error(f"Update {update} caused error: {err}", exc_info=context.error)
-
-    def _fmt_raw_list(self, rows: list, title: str) -> str:
-        """Formatting helper for lists of promotions."""
-        lines = [f"📅 **{title}**\n"]
-        for r in rows:
-            brand = r['brand'] if r['brand'] and r['brand'].lower() != 'unknown' else '❓'
-            lines.append(f"• **{brand}**: {r['summary']}")
-        return "\n".join(lines)
-
-    async def _send_long(self, update: Update, text: str) -> None:
-        """Sends potentially long messages by splitting into chunks safely using telegramify."""
-        try:
-            results = await telegramify(text)
-            for item in results:
-                if item.content_type == ContentType.TEXT:
-                    await self._retry_tg(
-                        update.message.reply_text,
-                        item.text,
-                        entities=[e.to_dict() for e in item.entities],
-                        link_preview_options=LinkPreviewOptions(is_disabled=True)
-                    )
-        except Exception as e:
-            logger.error(f"Failed to send long markdown msg: {e}")
+        await self.send_plain(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
-def _to_wib(ts_str: str) -> str:
-    """Helper to convert ISO timestamp string to WIB HH:MM:SS."""
+def _to_wib(ts_str: str | None) -> str:
+    """Converts a UTC timestamp string to a WIB time string (HH:MM)."""
     if not ts_str:
-        return "??:??:??"
+        return "??"
     try:
-        from shared import _parse_ts
-        dt = _parse_ts(ts_str)
-        WIB = pytz.timezone("Asia/Jakarta")
-        return dt.astimezone(WIB).strftime('%H:%M:%S')
-    except Exception:
-        return "??:??:??"
-
-import pytz
+        dt = shared._parse_ts(ts_str)
+        return dt.astimezone(pytz.timezone("Asia/Jakarta")).strftime("%H:%M")
+    except (ValueError, TypeError):
+        return "??"

@@ -14,8 +14,7 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Brand normalisation (single source of truth — shared by processor & main)
+# ── Brand normalisation (single source of truth — shared by processor & main)
 # ─────────────────────────────────────────────────────────────────────────────
 
 _BRAND_CANON: dict[str, str] = {
@@ -36,9 +35,11 @@ _BRAND_CANON: dict[str, str] = {
     'spx': 'SPX', 'spx express': 'SPX', 'shopee xpress': 'SPX', 's+p+x': 'SPX',
     'chatime': 'Chatime', 'chtm': 'Chatime',
     'c+h+t+m': 'Chatime', 'ctm': 'Chatime', 'c+t+m': 'Chatime',
+    'starbucks': 'Starbucks', 's+t+a+r+b+u+c+k+s': 'Starbucks',
     "the people's cafe": 'The Peoples Cafe',
     'the peoples cafe': 'The Peoples Cafe', 'tpc': 'The Peoples Cafe', 't+p+c': 'The Peoples Cafe',
-    'ismaya+': 'Ismaya', 'ismaya+ delivery': 'Ismaya', 'i+s+m+a+y+a': 'Ismaya',
+    'ismaya+': 'Ismaya', 'ismaya+ delivery': 'Ismaya', 'i+s+m+a+y+a': 'Ismaya', 'ismaya': 'Ismaya',
+    'gindaco': 'Gindaco', 'g+i+n+d+a+c+o': 'Gindaco', 'g+n+d+c': 'Gindaco',
     'cupbob': 'Cupbop', 'c+u+p+b+o+p': 'Cupbop',
     'pubg': 'PUBG', 'pugb': 'PUBG', 'p+u+b+g': 'PUBG',
     'tokopedia': 'Tokopedia', 'tokped': 'Tokopedia',
@@ -51,8 +52,22 @@ _BRAND_CANON: dict[str, str] = {
     'tsel': 'Telkomsel', 'mytsel': 'Telkomsel', 'mytelkomsel': 'Telkomsel', 't+s+e+l': 'Telkomsel',
     'dilan': 'Dilan', 'bandung': 'Bandung',
     'goco': 'GoPay Coins', 'g+o+c+o': 'GoPay Coins',
-    'gindaco': 'Gindaco', 'g+n+d+c': 'Gindaco',
     'kawanlama': 'Kawan Lama', 'kawan lama': 'Kawan Lama', 'k+w+n+l+m': 'Kawan Lama',
+    'cgv': 'CGV', 'xxi': 'XXI', 'c+g+v': 'CGV', 'x+x+i': 'XXI',
+    'mcd': 'McD', 'kfc': 'KFC', 'm+c+d': 'McD', 'k+f+c': 'KFC',
+    'spay': 'ShopeePay', 'shopeepay': 'ShopeePay', 's+p+a+y': 'ShopeePay', 's+h+o+p+e+e+p+a+y': 'ShopeePay',
+    'ovo': 'OVO', 'o+v+o': 'OVO',
+    'grab': 'Grab', 'gojek': 'Gojek', 'g+r+a+b': 'Grab', 'g+o+j+e+k': 'Gojek',
+    'pln': 'PLN', 'pulsa': 'Pulsa',
+    'cetem': 'Cetem', 'cetam': 'Cetem',
+    'rotio': 'Roti O', 'roti o': 'Roti O', 'roti-o': 'Roti O',
+    'tomoro': 'Tomoro Coffee', 'tomoro coffee': 'Tomoro Coffee',
+    'jago': 'Bank Jago', 'saqu': 'Bank Saqu', 'seabank': 'SeaBank', 'aladin': 'Bank Aladin',
+    'g+b+s': 'GaBisa',
+    'r+s+t+k': 'Restock', 'r+s+t+c+k': 'Restock', 'r+st+ck': 'Restock',
+    'cb': 'Cashback', 'kesbek': 'Cashback', 'c+s+h+b+c+k': 'Cashback', 'cash back': 'Cashback',
+    'pchematapril': 'PC HematApril',
+    'tukpo': 'Tukar Poin',
     # Brands discovered from raw data analysis (2026-04-24)
     'sopi': 'Shopee', 'sopie': 'Shopee',
     'solaria': 'Solaria',
@@ -67,11 +82,16 @@ _BRAND_CANON: dict[str, str] = {
     'point coffee': 'Point Coffee', 'poin coffee': 'Point Coffee',
     'svip': 'ShopeeFood',
     'spud': 'SPUD',
+    'skin1004': 'SKIN1004', 'skin': 'SKIN1004', 'skinenjel': 'SKIN1004',
     # junk sentinels → Unknown
     'brand': 'Unknown', 'tidak diketahui': 'Unknown',
     'tidak disebutkan': 'Unknown', 'sunknown': 'Unknown',
     'bunknown': 'Unknown', 'n/a': 'Unknown',
 }
+
+def get_brand_canon() -> dict[str, str]:
+    """Returns the single source of truth for brand normalization."""
+    return _BRAND_CANON
 
 @functools.lru_cache(maxsize=1024)
 def normalize_brand(brand: str | None) -> str:
@@ -259,6 +279,29 @@ class Database:
             )
         """)
 
+        # ── poll_data (Temporary storage for verification polls) ──────────────
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS poll_data (
+                original_msg_id INTEGER PRIMARY KEY,
+                p_data_json     TEXT NOT NULL,
+                tg_link         TEXT,
+                timestamp       TEXT,
+                created_at      TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S+00:00','now'))
+            )
+        """)
+
+        # ── system_logs (Persistent Error/Warning Tracking) ──────────────────
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS system_logs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                level       TEXT NOT NULL,
+                logger_name TEXT,
+                message     TEXT NOT NULL,
+                traceback   TEXT,
+                created_at  TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S+00:00','now'))
+            )
+        """)
+
         await self.conn.commit()
 
         # ── Safe migrations (idempotent) ──────────────────────────────────────
@@ -337,6 +380,13 @@ class Database:
         await self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pending_conf_brand "
             "ON pending_confirmations(brand)"
+        )
+        # CRITICAL FIX: idx_promos_source speeds up prune_old_messages which does
+        # a subquery: id NOT IN (SELECT source_msg_id FROM promos ...).
+        # Without this index the subquery scans the entire promos table.
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_promos_source "
+            "ON promos(source_msg_id) WHERE source_msg_id IS NOT NULL"
         )
         await self.conn.commit()
 
@@ -615,17 +665,23 @@ class Database:
         """
         if not self.conn or not ids:
             return
+        
+        # Guard against malformed input that could produce dangerous SQL
+        ids_list = list(ids)
+        if not all(isinstance(i, int) for i in ids_list):
+            logger.error(f"mark_batch_processed received non-integer IDs: {ids_list}")
+            return
             
-        ph = ','.join('?' * len(ids))
+        ph = ','.join('?' * len(ids_list))
         try:
             if skip_reason:
                 await self.conn.execute(
                     f"UPDATE messages SET processed=1, skip_reason=? WHERE id IN ({ph})",
-                    [skip_reason, *list(ids)]
+                    [skip_reason, *ids_list]
                 )
             else:
                 await self.conn.execute(
-                    f"UPDATE messages SET processed=1 WHERE id IN ({ph})", list(ids)
+                    f"UPDATE messages SET processed=1 WHERE id IN ({ph})", ids_list
                 )
             await self.conn.commit()
         except Exception as e:
@@ -663,17 +719,21 @@ class Database:
         """
         if not self.conn or not ids:
             return
-        ph = ','.join('?' * len(ids))
+        ids_list = list(ids)
+        if not all(isinstance(i, int) for i in ids_list):
+            logger.error(f"increment_ai_failure_count received non-integer IDs: {ids_list}")
+            return
+        ph = ','.join('?' * len(ids_list))
         try:
             # Increment count
             await self.conn.execute(
                 f"UPDATE messages SET ai_failure_count = ai_failure_count + 1 WHERE id IN ({ph})",
-                list(ids)
+                ids_list
             )
             # Mark those that reached 2 failures as processed so they don't block the queue forever
             await self.conn.execute(
                 f"UPDATE messages SET processed=1 WHERE id IN ({ph}) AND ai_failure_count >= 2",
-                list(ids)
+                ids_list
             )
             await self.conn.commit()
         except Exception as e:
@@ -745,6 +805,9 @@ class Database:
                     "INSERT INTO pending_confirmations (brand, p_data_json, tg_link, timestamp, confidence, corroboration_texts, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     to_insert
                 )
+            await self.conn.commit()
+            
+            await self.conn.commit()
                 
         except Exception as e:
             logger.error(f"Error in bulk_upsert_pending_confirmations: {e}")
@@ -847,11 +910,15 @@ class Database:
                 """, promo_data)
 
             if processed_msg_ids:
-                ph = ','.join('?' * len(processed_msg_ids))
-                await self.conn.execute(
-                    f"UPDATE messages SET processed=1 WHERE id IN ({ph})",
-                    list(processed_msg_ids)
-                )
+                pm_ids = list(processed_msg_ids)
+                if not all(isinstance(i, int) for i in pm_ids):
+                    logger.error(f"save_promos_batch received non-integer IDs: {pm_ids}")
+                else:
+                    ph = ','.join('?' * len(pm_ids))
+                    await self.conn.execute(
+                        f"UPDATE messages SET processed=1 WHERE id IN ({ph})",
+                        pm_ids
+                    )
             await self.conn.commit()
             return True
         except Exception as e:
@@ -957,7 +1024,73 @@ class Database:
             rows = await cur.fetchall()
             return list(rows)
 
+    async def search_active_promos(self, query: str, hours: int = 12) -> list[aiosqlite.Row]:
+        """RAG Tool: Keyword search to prevent context overflow in AI Q&A."""
+        if not self.conn: return []
+        
+        # Simple split for keyword matching (ignoring short words)
+        keywords = [k for k in query.lower().split() if len(k) > 3]
+        
+        if not keywords:
+            # Fallback to general recent promos if query is too generic
+            return await self.get_promos(hours=4, limit=15)
+            
+        conditions = " OR ".join(["(LOWER(brand) LIKE ? OR LOWER(summary) LIKE ?)"] * len(keywords))
+        params = []
+        for k in keywords:
+            params.extend([f"%{k}%", f"%{k}%"])
+            
+        sql = f"""
+            SELECT brand, summary, status FROM promos 
+            WHERE created_at >= strftime('%Y-%m-%d %H:%M:%S+00:00','now','-{hours} hours')
+            AND ({conditions})
+            LIMIT 20
+        """
+        async with self.conn.execute(sql, params) as cur:
+            return await cur.fetchall()
+
     # ── Pending alerts ────────────────────────────────────────────────────────
+
+    async def save_system_log(self, level: str, logger_name: str, message: str, traceback: str = None) -> None:
+        """Saves a system log entry to the database."""
+        if not self.conn: return
+        try:
+            await self.conn.execute("""
+                INSERT INTO system_logs (level, logger_name, message, traceback)
+                VALUES (?, ?, ?, ?)
+            """, (level, logger_name, message, traceback))
+            await self.conn.commit()
+        except Exception:
+            pass # Avoid infinite recursion if logging fails
+
+    async def get_recent_logs(self, limit: int = 20) -> Sequence[aiosqlite.Row]:
+        """Retrieves recent system logs."""
+        if not self.conn: return []
+        async with self.conn.execute(
+            "SELECT * FROM system_logs ORDER BY id DESC LIMIT ?", (limit,)
+        ) as cur:
+            return await cur.fetchall()
+
+    async def save_poll_data(self, msg_id: int, p_data_json: str, tg_link: str, timestamp: str) -> None:
+        """Temporarily saves promo data for a verification poll."""
+        if not self.conn: return
+        try:
+            await self.conn.execute("""
+                INSERT OR REPLACE INTO poll_data (original_msg_id, p_data_json, tg_link, timestamp)
+                VALUES (?, ?, ?, ?)
+            """, (msg_id, p_data_json, tg_link, timestamp))
+            await self.conn.commit()
+        except Exception as e:
+            logger.error(f"DB save_poll_data error: {e}")
+
+    async def get_poll_data(self, msg_id: int) -> aiosqlite.Row | None:
+        """Retrieves temporarily saved promo data for a verification poll."""
+        if not self.conn: return None
+        async with self.conn.execute(
+            "SELECT p_data_json, tg_link, timestamp FROM poll_data WHERE original_msg_id = ?",
+            (msg_id,)
+        ) as cur:
+            return await cur.fetchone()
 
     async def save_pending_alert(self, brand: str, p_data_json: str,
                                   tg_link: str, timestamp: str | datetime,
@@ -997,22 +1130,23 @@ class Database:
     # ── Velocity ──────────────────────────────────────────────────────────────
 
     async def get_brand_velocity(self, brand: str, minutes: int = 5) -> int:
-        """Counts total messages in a time window as an activity proxy.
+        """Counts messages mentioning a brand in a time window as an activity proxy.
 
         Args:
-            brand: Brand name (unused in current optimized implementation).
+            brand: Brand name to filter by.
             minutes: Lookback window in minutes.
 
         Returns:
-            Total message count in the window.
+            Total message count in the window for that brand.
         """
         if not self.conn:
             return 0
             
         cutoff = _ts_str(datetime.now(timezone.utc) - timedelta(minutes=minutes))
+        brand_like = f"%{brand}%"
         async with self.conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE timestamp >= ?",
-            (cutoff,)
+            "SELECT COUNT(*) FROM messages WHERE timestamp >= ? AND text LIKE ?",
+            (cutoff, brand_like)
         ) as cur:
             row = await cur.fetchone()
             return cast(int, row[0]) if row else 0
@@ -1127,8 +1261,11 @@ class Database:
         if not self.conn or not reply_msg_ids:
             return {}
             
-        unique_ids = list({i for i in reply_msg_ids if i})
+        unique_ids = [i for i in {i for i in reply_msg_ids if i} if isinstance(i, int)]
         if not unique_ids:
+            return {}
+        if not all(isinstance(i, int) for i in unique_ids):
+            logger.error(f"get_reply_sources_bulk received non-integer IDs: {unique_ids}")
             return {}
             
         ph = ','.join('?' * len(unique_ids))
@@ -1151,7 +1288,10 @@ class Database:
         if not self.conn or not reply_ids:
             return {}
 
-        current_to_fetch = list(set(reply_ids))
+        current_to_fetch = [i for i in set(reply_ids) if isinstance(i, int)]
+        if not all(isinstance(i, int) for i in current_to_fetch):
+            logger.error(f"get_deep_context_bulk received non-integer IDs: {current_to_fetch}")
+            return {}
         
         # Mapping for current level lookup: child_tg_id -> parent_tg_id
         # We need to know which parent belongs to which original child.
@@ -1380,22 +1520,32 @@ class Database:
 
     # ── Maintenance ───────────────────────────────────────────────────────────
 
-    async def prune_old_messages(self, ignore_vacuum: bool = False) -> None:
-        """Deletes processed messages older than 1 day that are not backing a promo."""
+    async def prune_old_messages(self, retention_days: int = 7, ignore_vacuum: bool = False) -> None:
+        """Deletes processed messages older than retention_days that are not backing a promo."""
         if not self.conn:
             return
 
         try:
-            await self.conn.execute("""
-                DELETE FROM messages
-                WHERE processed=1
-                AND timestamp < strftime('%Y-%m-%d %H:%M:%S+00:00','now','-1 day')
-                AND id NOT IN (
-                    SELECT source_msg_id FROM promos
-                    WHERE source_msg_id IS NOT NULL
-                )
-            """)
-            await self.conn.commit()
+            # Chunked delete to avoid holding the write lock for too long
+            total_deleted = 0
+            while True:
+                cursor = await self.conn.execute(f"""
+                    DELETE FROM messages
+                    WHERE id IN (
+                        SELECT id FROM messages
+                        WHERE timestamp < strftime(\'%Y-%m-%d %H:%M:%S+00:00\', \'now\', ?)
+                        AND processed = 1
+                        AND id NOT IN (SELECT DISTINCT source_msg_id FROM promos WHERE source_msg_id IS NOT NULL)
+                        LIMIT 1000
+                    )
+                """, (f"-{retention_days} days",))
+                await self.conn.commit()
+                if cursor.rowcount == 0:
+                    break
+                total_deleted += cursor.rowcount
+                await asyncio.sleep(0.1) # Yield to other tasks
+            if total_deleted:
+                logger.info(f"Pruned {total_deleted} old messages in chunks.")
 
             # Checkpoint after commit. Use PASSIVE to avoid 'database is locked' errors
             # if other tasks are reading/writing.

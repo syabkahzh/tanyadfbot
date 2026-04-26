@@ -2,7 +2,7 @@
 # Auto-cleanup script for TanyaDFBot
 # Runs via cron to remove images and media older than 24 hours
 
-BOT_DIR="$HOME/tanyadfbot"
+BOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Find and delete image and media files older than 1 day
 # Limits search to 1 level to avoid touching subdirectories

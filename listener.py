@@ -11,9 +11,13 @@ Bulletproof rewrite:
 import re
 import time
 import asyncio
+import logging
 from telethon import TelegramClient, events
 from config import Config
 from datetime import datetime, timedelta, timezone
+import shared
+
+logger = logging.getLogger(__name__)
 
 # ── Pre-compiled Patterns (Performance Optimization) ─────────────────────────
 TIME_PATTERN = re.compile(
@@ -48,6 +52,10 @@ NEG_PATTERN = re.compile(
 )
 # All-caps: has at least one uppercase, zero lowercase letters
 FAST_ALLCAPS = re.compile(r'^[^a-z]*[A-Z][^a-z]*$')
+
+# Matches strings 6-25 chars long containing ONLY uppercase letters and numbers.
+# The `(?=.*[A-Z])` ensures it doesn't accidentally trigger on pure numbers (like "100000").
+_PROMO_CODE_PATTERN = re.compile(r'\b(?=.*[A-Z])[A-Z0-9]{6,25}\b')
 
 def check_fast_path(text: str) -> bool:
     """Synchronous logic check for fast-path eligibility."""
@@ -97,6 +105,15 @@ class TelethonListener:
             connection_retries=10,
             retry_delay=1,
         )
+        
+        # CRITICAL FIX: Register handler ONCE during initialization
+        @self.client.on(events.NewMessage(chats=Config.TARGET_GROUP))
+        async def _master_handler(event):
+            if not event.text:
+                return
+            shared.mark_message_ingested()
+            # Use a single task to handle both fast-path and DB save to avoid race conditions
+            asyncio.create_task(self._handle_message(event))
 
     # ── Fast-path ─────────────────────────────────────────────────────────────
 
@@ -108,6 +125,17 @@ class TelethonListener:
         BUG 4 FIX: DB lookup wrapped in asyncio.timeout(0.5) — never stalls the 
         event loop at high message volume.
         """
+        import time as _time
+        _fp_start = _time.monotonic()
+        _fp_step = _fp_start
+        _fp_log: list[str] = []
+
+        def _fp_mark(step: str) -> None:
+            nonlocal _fp_step
+            now = _time.monotonic()
+            _fp_log.append(f"{step}={now - _fp_step:.3f}s")
+            _fp_step = now
+
         from shared import (
             _make_tg_link, _guess_brand, _flush_alert_buffer,
             db, _alerted_aman_parents, _alerted_aman_parents_deque, _aman_lock,
@@ -119,10 +147,10 @@ class TelethonListener:
         )
         from db import normalize_brand
         from processor import PromoExtraction
-        import shared
 
         text       = (message_data.get('text') or '').strip()
         text_lower = text.lower()
+        _fp_mark("imports")
 
         is_instant  = bool(INSTANT_PATTERN.search(text)) and '?' not in text
         is_allcaps  = (bool(FAST_ALLCAPS.match(text))
@@ -133,12 +161,15 @@ class TelethonListener:
         # brand-level dedup below.
         is_aman_standalone = text_lower == 'aman' and '?' not in text
 
+        # Explicit uppercase promo codes (e.g. PLNDEALAPR5KPY825YYS, GRABFOODJSM)
+        has_promo_code = bool(_PROMO_CODE_PATTERN.search(text))
+
         # 1.5 Gate: Social Filler
         from processor import _SOCIAL_FILLER
         if _SOCIAL_FILLER.match(text):
             return False
 
-        if not (is_instant or is_aman_standalone or is_allcaps):
+        if not (is_instant or is_aman_standalone or is_allcaps or has_promo_code):
             return False
         if NEG_PATTERN.search(text_lower):
             return False
@@ -172,7 +203,10 @@ class TelethonListener:
 
         # If brand found explicitly, update temporal context for future messages
         if brand != "Unknown":
-            await context_tracker.update_brand(chat_id, brand)
+            try:
+                async with asyncio.timeout(0.5):
+                    await context_tracker.update_brand(chat_id, brand)
+            except Exception: pass
 
         if brand == "Unknown" and message_data.get('reply_to_msg_id'):
             try:
@@ -186,25 +220,31 @@ class TelethonListener:
                             parent_text = row['text']
                 brand = normalize_brand(_guess_brand(parent_text or text))
                 if brand != "Unknown":
-                    await context_tracker.update_brand(chat_id, brand)
+                    try:
+                        async with asyncio.timeout(0.5):
+                            await context_tracker.update_brand(chat_id, brand)
+                    except Exception: pass
             except (asyncio.TimeoutError, Exception):
                 pass   # stay Unknown — fast-path may skip, that's fine
 
         # Temporal context fallback: inherit brand from recent conversation
         if brand == "Unknown":
-            brand = await context_tracker.get_context(chat_id)
+            try:
+                async with asyncio.timeout(0.5):
+                    brand = await context_tracker.get_context(chat_id)
+            except Exception: pass
 
-        # Strict: ambiguous signals require a known brand (unless ALL-CAPS shout)
+        # Strict: ambiguous signals require a known brand (unless ALL-CAPS shout or promo code)
         AMBIGUOUS = {
             'on', 'ready', 'aktif', 'restock', 'ristok', 'cek', 'info',
             'makasih', 'thx', 'thanks', 'makasi', 'mks', 'terimakasih',
             'luber', 'pecah'
         }
         found_sigs = set(INSTANT_PATTERN.findall(text_lower))
-        if (not is_allcaps and brand == "Unknown"
+        if (not is_allcaps and not has_promo_code and brand == "Unknown"
                 and (found_sigs & AMBIGUOUS) and len(text) > 15):
             return False
-        if not is_allcaps and brand == "Unknown" and (is_aman_standalone or is_instant):
+        if not is_allcaps and not has_promo_code and brand == "Unknown" and (is_aman_standalone or is_instant):
             return False
 
         # Brand-level dedup for burst traffic: suppress repeat fast-path alerts
@@ -225,6 +265,8 @@ class TelethonListener:
             summary = f"aman ✅ — {parent_text[:120]}"
         elif is_aman_standalone:
             return False   # aman with no parent context = useless
+        elif has_promo_code:
+            summary = f"Kode Promo: {_PROMO_CODE_PATTERN.search(text).group(0)}"
         else:
             summary = text[:120]
 
@@ -240,9 +282,10 @@ class TelethonListener:
 
         # Velocity tag — flag viral promos without an extra AI call
         try:
-            velocity = await self.db.get_brand_velocity(brand, minutes=5)
-            if velocity >= 100: # NEW: raised to 100/5m (20/min)
-                summary = f"🔥 RAMAI ({velocity} msg/5m) — {summary}"
+            async with asyncio.timeout(0.5):
+                velocity = await self.db.get_brand_velocity(brand, minutes=5)
+                if velocity >= 100: # NEW: raised to 100/5m (20/min)
+                    summary = f"🔥 RAMAI ({velocity} msg/5m) — {summary}"
         except Exception:
             pass
 
@@ -270,7 +313,7 @@ class TelethonListener:
             tg_link=tg_link,
             timestamp=message_data['timestamp'],
             source='python',
-            commit=False
+            commit=True
         )
 
         # BUG A FIX: also write to promos so digest/recap can see this alert
@@ -297,21 +340,28 @@ class TelethonListener:
                 asyncio.create_task(_flush_alert_buffer(delay=0.3))
             )
 
-        print(f"⚡ FAST-PATH: {brand} — {summary[:50]}  ({fast_promo.queue_time:.3f}s)")
+        _fp_mark("flush")
+        _fp_total = _time.monotonic() - _fp_start
+        if _fp_total > 1.0:
+            print(f"⚡ FAST-PATH: {brand} — {summary[:50]}  (TOTAL={_fp_total:.2f}s | {' | '.join(_fp_log)})")
+        else:
+            print(f"⚡ FAST-PATH: {brand} — {summary[:50]}  ({fast_promo.queue_time:.3f}s)")
         return True
 
     # ── Message ingestion ─────────────────────────────────────────────────────
 
-    async def _handle_fast_path_standalone(self, event):
-        """Pure fast-path: pattern match → alert. Zero DB reads except parent lookup.
+    async def _handle_message(self, event):
+        """Handles both fast-path and DB saving for a new message."""
+        try:
+            await self._save_to_db(event)
+            await self._handle_fast_path_standalone(event)
+        except Exception as e:
+            logger.error(f"Error in _handle_message: {e}", exc_info=True)
+            if shared.bot:
+                await shared.bot.alert_error("handle_message", e)
 
-        When the fast-path fires (returns True), we also mark the source message
-        as processed=1 so the AI processing loop does not re-waste a batch slot
-        on it. The mark is tolerant of the race with `_save_to_db`: if the row
-        isn't present yet the UPDATE affects 0 rows and the row will be caught
-        by the AI path later (where `filter_duplicates` catches it via the
-        already-appended history entry).
-        """
+    async def _handle_fast_path_standalone(self, event):
+        """Pure fast-path: pattern match → alert. Zero DB reads except parent lookup."""
         message_data = {
             'tg_msg_id':       event.id,
             'chat_id':         event.chat_id,
@@ -327,13 +377,13 @@ class TelethonListener:
                     self.db.mark_processed_by_tg_id(event.id, event.chat_id)
                 )
         except Exception as e:
+            logger.error(f"fast_path error: {e}", exc_info=True)
             if shared.bot:
                 await shared.bot.alert_error("fast_path", e)
-            print(f"❌ fast_path error: {e}")
 
     async def _save_to_db(self, event):
         """Pure DB persistence. No fast-path, no locks beyond aiosqlite's own queue."""
-        text_preview = (event.text or '')[:50].replace('\n', ' ')
+        text_preview = (event.text or "")[:50].replace("\n", " ")
         print(f"📩 [{event.id}] {text_preview}")
         try:
             has_time = bool(TIME_PATTERN.search(event.text or ""))
@@ -348,31 +398,18 @@ class TelethonListener:
                 processed=0,
                 has_photo=1 if event.photo else 0,
                 has_time_mention=1 if has_time else 0,
-                commit=False
+                commit=True
             )
             if internal_id:
                 print(f"   📥 Queued (ID={internal_id})")
         except Exception as e:
             if shared.bot:
                 await shared.bot.alert_error("listener_save_db", e)
-            print(f"❌ _save_to_db error: {e}")
+            logger.error(f"❌ _save_to_db error: {e}")
 
     # ── Start / history sync ──────────────────────────────────────────────────
 
     async def start(self):
-        @self.client.on(events.NewMessage(chats=Config.TARGET_GROUP))
-        async def handler(event):
-            if not event.text:
-                return
-            # Record ingest timestamp BEFORE dispatch so /diag has an accurate
-            # "time since last message" signal even if downstream tasks error.
-            import shared as _shared
-            _shared.mark_message_ingested()
-            # Fast-path as its OWN task - never waits for DB save
-            asyncio.create_task(self._handle_fast_path_standalone(event))
-            # DB save as separate task - never blocks fast-path
-            asyncio.create_task(self._save_to_db(event))
-
         # BUG FIX: Retry loop for Telethon start to handle 'database is locked'
         # which happens if a previous instance is still cleaning up or if
         # multiple startup tasks conflict.

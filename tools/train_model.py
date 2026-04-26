@@ -50,7 +50,7 @@ def train(data_path: str, out_path: str) -> None:
         loss="softmax",
         minn=3,         # subword min — catches "sopi"/"sfood"/"sopie"
         maxn=6,         # subword max
-        thread=4,       # utilization of multiple cores
+        thread=2,       # reduced from 4 to avoid pegging VPS CPU
     )
 
     # Evaluate before quantizing

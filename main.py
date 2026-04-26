@@ -51,13 +51,11 @@ _queue_emergency_mode: bool  = False
 
 _in_progress_ids: dict[int, float] = {}
 _in_progress_lock: asyncio.Lock = asyncio.Lock()
+# CRITICAL FIX: Must exceed (max_attempts * timeout) + overhead = (3 * 60) + 20
 _IN_PROGRESS_MAX_AGE_SEC: float = 130.0
 
 _alerted_hot_threads: dict[int, tuple[int, datetime]] = {}
 _triage_cycle_counter: int   = 0
-
-_AI_MAX_INFLIGHT: int = 8
-_AI_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(_AI_MAX_INFLIGHT)
 
 _active_spawn_tasks: set[asyncio.Task] = set()
 
@@ -77,7 +75,8 @@ _PROTECTED_SIGNALS = re.compile(
     r'yang butuh aja|ymma|neo|'
     r'iklan|klaim|goco|ultravoucher|uv|fitbar|watsons|cinepolis|bogo|'
     r'nyantol|cibu|cibal|burek|gratong|kompen|klem|getok|gosok|spin|'
-    r'1,2jt|1\.2jt|120jt|120k|600k|popup|pop up|upgrade|md|mnt|selfre|selfree)\b', 
+    r'1,2jt|1\.2jt|120jt|120k|600k|popup|pop up|upgrade|md|mnt|selfre|selfree|'
+    r'garap|serbabu|goib|blibli|famima|supin|flip|emados|tts|ndog|superbank|sei|azko|pc|gacoan|voc genz|genz|dom\s+\w+|periode|last day|reset)\b', 
     re.IGNORECASE
 )
 
@@ -91,15 +90,16 @@ async def _auto_triage_queue() -> None:
     global _queue_emergency_mode
 
     queue = await db.get_queue_size()
-    if queue < 20:
+    # CRITICAL FIX: Do not block the fleet loop unless the queue is legitimately backed up.
+    if queue < 150:
         if _queue_emergency_mode:
             _queue_emergency_mode = False
             logger.info("Queue Surgeon: pressure normalized.")
         return
 
-    _queue_emergency_mode = queue > 100
+    _queue_emergency_mode = queue > 250
     triage_limit = min(queue, 2000)
-    logger.warning(f"Queue Surgeon: {queue} unprocessed — triaging up to {triage_limit}...")
+    logger.warning(f"🧹 [Triage] {queue} unprocessed — clearing up to {triage_limit} noise messages...")
 
     if not db.conn:
         return
@@ -176,30 +176,27 @@ async def processing_loop() -> None:
         promos: list[Any] | None = None
         ai_failed = False
         try:
+            # NO SEMAPHORE: Fleet-level rate limiters are the only throttle
             try:
-                async with _AI_SEMAPHORE:
-                    try:
-                        promos = await gemini.process_batch(msgs, db)
-                    except TimeoutError:
-                        logger.warning(f"AI rate limits exhausted — requeuing {len(msgs)} msgs for later.")
-                        ai_failed = True
-                    except Exception as e:
-                        if str(e) == "TEMP_500_INTERNAL":
-                            logger.warning(f"AI internal 500 error — requeuing {len(msgs)} msgs for later.")
-                            ai_failed = True
-                        else:
-                            logger.error(f"AI processing error: {e}", exc_info=True)
-                            await db.increment_ai_failure_count(msg_ids)
-                            ai_failed = True
-            finally:
-                shared._active_ai_tasks -= 1
+                promos = await gemini.process_batch(msgs, db)
+            except TimeoutError:
+                logger.warning(f"⏳ [AI] Fleet saturated — requeuing {len(msgs)} messages.")
+                ai_failed = True
+            except Exception as e:
+                logger.error(f"AI processing error: {e}", exc_info=True)
+                await db.increment_ai_failure_count(msg_ids)
+                ai_failed = True
+            
+            shared._active_ai_tasks -= 1
         except BaseException:
-            await _release_claims()
+            shared._active_ai_tasks -= 1
             raise
+        finally:
+            await _release_claims()
+
 
         if ai_failed:
             shared.record_ai_outcome(success=False)
-            await _release_claims()
             return
 
         ai_duration = time.monotonic() - ai_start
@@ -208,7 +205,6 @@ async def processing_loop() -> None:
             logger.warning(f"AI returned None — incrementing failure count for {len(msgs)} msgs.")
             await db.increment_ai_failure_count(msg_ids)
             shared.record_ai_outcome(success=False)
-            await _release_claims()
             return
 
         shared.record_ai_outcome(success=True)
@@ -246,7 +242,7 @@ async def processing_loop() -> None:
                     if brand_norm != "Unknown":
                         await shared.context_tracker.update_brand(m['chat_id'], brand_norm)
 
-                    if brand_norm == "Unknown" and len(summary_stripped) < 30:
+                    if brand_norm == "Unknown" and len(summary_stripped) < 30 and p.confidence < 0.85:
                         logic_skip_ids.append(m['id'])
                         continue
 
@@ -277,7 +273,7 @@ async def processing_loop() -> None:
 
                         # Trigger verification poll for low-confidence extractions (< 0.70)
                         if p.confidence < 0.70 and bot:
-                            await bot.send_verification_poll(p, tg_link)
+                            await bot.send_verification_poll(p, tg_link, m['timestamp'])
                             continue
 
                         if confidence >= 45:
@@ -290,8 +286,10 @@ async def processing_loop() -> None:
                             t = shared.get_buffer_flush_task()
                             if t is None or t.done():
                                 shared.set_buffer_flush_task(asyncio.create_task(_flush_alert_buffer(delay=0.8)))
+                            
                             async with _recent_alerts_lock:
                                 _recent_alerts_history.append({"brand": brand_key, "summary": p.summary})
+                                    
                             recently_alerted_brands.add(brand_key.lower())
                         else:
                             if brand_norm == "Unknown": continue
@@ -327,7 +325,7 @@ async def processing_loop() -> None:
             logger.error(f"Post-AI processing error: {e}", exc_info=True)
             await db.mark_batch_processed(msg_ids)
         finally:
-            await _release_claims()
+            pass # Claims are now released in the outer finally block
 
     logger.info("Processing Loop started.")
     while True:
@@ -336,19 +334,22 @@ async def processing_loop() -> None:
             await db.ensure_connection()
 
             queue_size = await db.get_queue_size()
-            if queue_size > 20:
+            # CRITICAL FIX: Match the threshold to prevent unnecessary DB polling.
+            if queue_size > 150:
                 await _auto_triage_queue()
                 queue_size = await db.get_queue_size()
 
             current_tasks = shared._active_ai_tasks
-            if current_tasks >= _AI_MAX_INFLIGHT:
-                await asyncio.sleep(0.2)
-                continue
+            in_progress_count = len(_in_progress_ids)
+            
+            if queue_size > 0:
+                logger.info(f"📊 [Fleet] Active Tasks: {current_tasks} | In-Progress: {in_progress_count} | Queue: {queue_size}")
 
-            circuit_wait = shared.ai_circuit_open_remaining()
-            if circuit_wait > 0:
-                await asyncio.sleep(min(circuit_wait, 2.0))
-                continue
+            # Circuit breaker disabled: Rely on processor.py's fleet fallback instead
+            # circuit_wait = shared.ai_circuit_open_remaining()
+            # if circuit_wait > 0:
+            #     await asyncio.sleep(min(circuit_wait, 2.0))
+            #     continue
 
             now_m = time.monotonic()
             total_used = sum(len([t for t in slot._calls if now_m - t < 60]) for slot in gemini._slots.values())
@@ -356,46 +357,52 @@ async def processing_loop() -> None:
             headroom_pct = max(0.0, 1.0 - (total_used / max(total_cap, 1)))
 
             if _queue_emergency_mode:
-                batch_size = int(40 + 20 * headroom_pct)
+                batch_size = 20 # Still keep it somewhat small
             else:
-                batch_size = int(25 + 15 * headroom_pct)
+                batch_size = 12 # Ideal for fast parallel extraction
 
             # Optimization: Fetch candidates OUTSIDE of the lock to minimize contention
-            ancient_reserve = int(batch_size * 0.3)
-            if queue_size > 200: backlog_reserve = int(batch_size * 0.3)
-            elif queue_size > 50: backlog_reserve = int(batch_size * 0.2)
+            ancient_reserve = int(batch_size * 0.4)
+            if queue_size > 100: backlog_reserve = int(batch_size * 0.4)
             else: backlog_reserve = 0
-            priority_cap = max(1, batch_size - ancient_reserve - backlog_reserve)
+            priority_cap = max(2, batch_size - ancient_reserve - backlog_reserve)
 
             # Query DB (can be slow under load)
-            ancient_raw = await db.get_unprocessed_ancient(min_age_minutes=15, batch_size=ancient_reserve + 100)
+            ancient_raw = await db.get_unprocessed_ancient(min_age_minutes=10, batch_size=ancient_reserve + 100)
             priority_raw = await db.get_unprocessed_recent(minutes=10, batch_size=priority_cap + 50)
 
-            combined: list[Any] = []
             async with _in_progress_lock:
                 ancient = [r for r in ancient_raw if r['id'] not in _in_progress_ids][:ancient_reserve]
                 seen_ids = {r['id'] for r in ancient}
                 priority = [r for r in priority_raw if r['id'] not in _in_progress_ids and r['id'] not in seen_ids][:priority_cap]
-
-                filled = len(ancient) + len(priority)
-                backlog_needed = batch_size - filled
-                if backlog_needed > 0:
-                    old_raw = await db.get_unprocessed_batch(batch_size=backlog_needed + 200)
-                    seen_ids.update(r['id'] for r in priority)
-                    old_batch = [r for r in old_raw if r['id'] not in seen_ids and r['id'] not in _in_progress_ids][:backlog_needed]
-                else: old_batch = []
-
-                combined = ancient + priority + old_batch
-
-                if combined:
-                    claim_ts = time.monotonic()
-                    for r in combined: _in_progress_ids[r['id']] = claim_ts
 
                 if ancient:
                     try:
                         oldest_age = max((datetime.now(timezone.utc) - _parse_ts(r['timestamp'])).total_seconds() for r in ancient)
                         shared._last_observed_ancient_age = oldest_age
                     except Exception: pass
+
+            filled = len(ancient) + len(priority)
+            backlog_needed = batch_size - filled
+
+            # CRITICAL FIX: DB query performed OUTSIDE the lock
+            if backlog_needed > 0:
+                old_raw = await db.get_unprocessed_batch(batch_size=backlog_needed + 200)
+            else:
+                old_raw = []
+
+            # Re-acquire lock only for fast memory operations
+            combined: list[Any] = []
+            async with _in_progress_lock:
+                seen_ids.update(r['id'] for r in priority)
+                old_batch = [r for r in old_raw if r['id'] not in seen_ids and r['id'] not in _in_progress_ids][:backlog_needed]
+
+                combined = ancient + priority + old_batch
+
+                if combined:
+                    claim_ts = time.monotonic()
+                    for r in combined:
+                        _in_progress_ids[r['id']] = claim_ts
 
             if not combined:
                 await asyncio.sleep(2)
@@ -436,8 +443,12 @@ async def processing_loop() -> None:
                 texts = [c['text'] or "" for c in candidates]
                 results = await shared.classify_batch(texts)
                 
+                # CRITICAL FIX: Only let FastText drop messages if the queue is backing up.
+                # Otherwise, let the LLM do its job.
+                dynamic_threshold = 0.88 if _queue_emergency_mode else 0.98
+                
                 for r, (label, confidence) in zip(candidates, results):
-                    if label == "__label__JUNK" and confidence >= 0.88:
+                    if label == "__label__JUNK" and confidence >= dynamic_threshold:
                         fasttext_noise_ids.append(r['id'])
                     else:
                         to_ai.append({
@@ -465,12 +476,24 @@ async def processing_loop() -> None:
                 await asyncio.sleep(0.5)
                 continue
 
-            logger.info(f"🧬 Spawning batch: {len(to_ai)} msgs (tasks={shared._active_ai_tasks}, headroom={headroom_pct:.0%}, queue={queue_size})")
+            logger.info(f"🧬 [Spawn] Processing {len(to_ai)} messages | Tasks: {shared._active_ai_tasks} | Q: {queue_size}")
             shared.mark_batch_spawned()
             _spawned_task = asyncio.create_task(process_one_batch(to_ai))
             _active_spawn_tasks.add(_spawned_task)
-            _spawned_task.add_done_callback(_active_spawn_tasks.discard)
-            await asyncio.sleep(0.05)
+            def _cleanup_spawn_task(t: asyncio.Task) -> None:
+                _active_spawn_tasks.discard(t)
+                if t.cancelled():
+                    return
+                exc = t.exception()
+                if exc:
+                    logger.error(f"Spawned batch task failed: {exc}", exc_info=exc)
+            _spawned_task.add_done_callback(_cleanup_spawn_task)
+            
+            # If the queue is still large, don't sleep — go right back for another batch!
+            if queue_size > 20:
+                await asyncio.sleep(0.05)
+            else:
+                await asyncio.sleep(0.2)
         except Exception as e:
             logger.error(f"processing_loop error: {e}", exc_info=True)
             try: await bot.alert_error("processing_loop", e)
@@ -479,18 +502,20 @@ async def processing_loop() -> None:
 
 # ── Runtime self-heal watchdogs ────────────────────────────────────────────────
 
-async def _alert_watchdog():
+async def health_monitor_job():
+    """Consolidated health check: alert recovery, task reconciliation, and heartbeat monitoring."""
+    # 1. Recover stuck alerts
     await db.recover_stuck_alerts()
 
-async def _active_ai_tasks_reconciler() -> None:
+    # 2. Reconcile active AI tasks counter
     live_tasks = sum(1 for t in _active_spawn_tasks if not t.done())
     counter = shared._active_ai_tasks
     if counter > live_tasks:
         drift = counter - live_tasks
-        logger.warning(f"⚠️ _active_ai_tasks counter drift: counter={counter} live_tasks={live_tasks} — reconciling down by {drift}")
+        logger.warning(f"⚠️ health_monitor: reconciling AI counter down by {drift} (counter={counter}, live={live_tasks})")
         shared._active_ai_tasks = max(0, shared._active_ai_tasks - drift)
 
-async def _in_progress_reaper() -> None:
+    # 3. Prune stale in-progress claims
     now_m = time.monotonic()
     evicted: list[int] = []
     async with _in_progress_lock:
@@ -498,23 +523,22 @@ async def _in_progress_reaper() -> None:
             if now_m - claim_ts > _IN_PROGRESS_MAX_AGE_SEC:
                 evicted.append(mid)
                 _in_progress_ids.pop(mid, None)
-    if evicted: logger.warning(f"⚠️ In-progress reaper freed {len(evicted)} stuck claims. Messages will be retried.")
+    if evicted: logger.warning(f"⚠️ health_monitor: freed {len(evicted)} stuck claims.")
+
+    # 4. Check processing_loop heartbeat
+    global _last_loop_alert_ts
+    last_tick = shared.get_loop_tick()
+    if last_tick:
+        age = time.monotonic() - last_tick
+        if age >= 90.0:
+            if time.monotonic() - _last_loop_alert_ts >= _LOOP_ALERT_COOLDOWN_SEC:
+                _last_loop_alert_ts = time.monotonic()
+                logger.error(f"💔 processing_loop heartbeat stale: {age:.0f}s ago")
+                try: await bot.alert_error("processing_loop_heartbeat", RuntimeError(f"processing_loop stalled: {age:.0f}s"))
+                except Exception: pass
 
 _last_loop_alert_ts: float = 0.0
 _LOOP_ALERT_COOLDOWN_SEC: float = 600.0
-
-async def _loop_heartbeat_watchdog() -> None:
-    global _last_loop_alert_ts
-    last_tick = shared.get_loop_tick()
-    if last_tick is None: return
-    age = time.monotonic() - last_tick
-    if age < 90.0: return
-    now_m = time.monotonic()
-    if now_m - _last_loop_alert_ts < _LOOP_ALERT_COOLDOWN_SEC: return
-    _last_loop_alert_ts = now_m
-    logger.error(f"💔 processing_loop heartbeat stale: last tick {age:.0f}s ago")
-    try: await bot.alert_error("processing_loop_heartbeat", RuntimeError(f"processing_loop stalled: no tick for {age:.0f}s"))
-    except Exception: pass
 
 _LISTENER_WATCHDOG_QUIET_SEC: float = 60.0
 _last_listener_reconnect_ts: float = 0.0
@@ -557,6 +581,12 @@ async def main() -> None:
     await db.init()
     await shared.load_classifier("model.ftz")
 
+    # ── Register DB Logging Handler ──
+    from utils import AsyncDBHandler
+    db_handler = AsyncDBHandler(db, asyncio.get_running_loop())
+    db_handler.setLevel(logging.WARNING)
+    logging.getLogger().addHandler(db_handler)
+
     global BOOT_CATCHUP_WINDOW
     if not db.conn:
         logger.critical("Database connection failed.")
@@ -576,8 +606,8 @@ async def main() -> None:
     fixed_pending = [f for f in pending if f['fixed'] and not f['retried']]
     if fixed_pending:
         count = len(fixed_pending)
-        msg = (f"🔄 <b>Startup Recovery</b>\n\nFound {count} errors marked as fixed.")
-        await bot.send_plain(msg, parse_mode='HTML')
+        msg = (f"🔄 **Startup Recovery**\n\nFound {count} errors marked as fixed.")
+        await bot.send_plain(msg)
 
     await bot.app.updater.start_polling()
     asyncio.create_task(processing_loop())
@@ -585,7 +615,7 @@ async def main() -> None:
     asyncio.create_task(_reconnect_listener(BOOT_CATCHUP_WINDOW / 60))
 
     # ── Scheduled jobs ─────────────────────────────────────────────────────────
-    scheduler.add_job(jobs.image_processing_job, "interval", minutes=5, id="images", args=[db, gemini, listener], jitter=30)
+    scheduler.add_job(jobs.image_processing_job, "interval", seconds=30, id="images", args=[db, gemini, listener], jitter=5, max_instances=3)
     scheduler.add_job(jobs.brewing_digest_job, "cron", minute=0, hour="0,1,5-23", id="brewing_digest", args=[bot])
     scheduler.add_job(jobs.hourly_digest_job, "cron", minute=1, hour="0,1,5-23", id="digest", args=[db, gemini, bot, WIB], jitter=60)
     scheduler.add_job(jobs.midnight_digest_job, "cron", hour=5, minute=0, id="midnight_digest", args=[db, gemini, bot], jitter=300)
@@ -599,11 +629,8 @@ async def main() -> None:
     scheduler.add_job(jobs.dead_promo_reaper_job, "interval", minutes=20, id="reaper", args=[db, bot])
     scheduler.add_job(jobs.confirmation_gate_job, "interval", minutes=1, id="confirm_gate", args=[db])
     scheduler.add_job(jobs.db_maintenance_job, "cron", hour="*/4", minute=5, id="db_maint", args=[db, bot])
-    scheduler.add_job(jobs.fasttext_retrain_job, "cron", hour="*/6", minute=15, id="ft_retrain", args=[db, bot], jitter=300)
-    scheduler.add_job(_alert_watchdog, "interval", minutes=1, id="alert_watchdog")
-    scheduler.add_job(_in_progress_reaper, "interval", minutes=1, id="in_progress_reaper")
-    scheduler.add_job(_active_ai_tasks_reconciler, "interval", minutes=1, id="ai_tasks_reconciler")
-    scheduler.add_job(_loop_heartbeat_watchdog, "interval", seconds=30, id="loop_heartbeat")
+    # scheduler.add_job(jobs.fasttext_retrain_job, "cron", hour="*/6", minute=15, id="ft_retrain", args=[db, bot], jitter=300)
+    scheduler.add_job(health_monitor_job, "interval", minutes=1, id="health_monitor")
     scheduler.add_job(_listener_health_watchdog, "interval", seconds=30, id="listener_health")
     scheduler.add_job(jobs.time_reminder_job, "interval", minutes=1, id="time_reminder", args=[db, bot, WIB])
 
@@ -623,5 +650,10 @@ async def main() -> None:
         logger.info("👋 Shutdown complete.")
 
 if __name__ == "__main__":
-    try: asyncio.run(main())
-    except KeyboardInterrupt: pass
+    try: 
+        asyncio.run(main())
+    except KeyboardInterrupt: 
+        sys.exit(0) # Clean exit on CTRL+C
+    except Exception as e:
+        logger.critical(f"Fatal crash escaping event loop: {e}", exc_info=True)
+        sys.exit(1) # Error exit - triggers the auto-restart!
