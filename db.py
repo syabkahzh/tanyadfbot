@@ -82,6 +82,7 @@ _BRAND_CANON: dict[str, str] = {
     'point coffee': 'Point Coffee', 'poin coffee': 'Point Coffee',
     'svip': 'ShopeeFood',
     'spud': 'SPUD',
+    'skin1004': 'SKIN1004', 'skin': 'SKIN1004', 'skinenjel': 'SKIN1004',
     # junk sentinels → Unknown
     'brand': 'Unknown', 'tidak diketahui': 'Unknown',
     'tidak disebutkan': 'Unknown', 'sunknown': 'Unknown',

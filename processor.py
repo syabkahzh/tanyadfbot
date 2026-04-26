@@ -102,7 +102,7 @@ _EXTRACT_SYSTEM = """Kamu adalah TanyaDFBot, sistem ekstraksi intelijen promo un
 DILARANG KERAS MENGGUNAKAN TABEL ATAU MARKDOWN SELAIN JSON.
 
 INSTRUKSI ANALISIS (LAKUKAN DALAM URUTAN INI):
-1. IDENTIFIKASI SUBJEK: Periksa C: (Konteks) dan MSG: (Pesan). Apakah mereka membahas spesifik suatu brand/toko/layanan? Jika obrolan oot/random/tanya jawab biasa, set brand="SKIP".
+1. IDENTIFIKASI SUBJEK: Periksa C: (Konteks) dan MSG: (Pesan). Apakah mereka membahas spesifik suatu brand/toko/layanan? Jika obrolan oot/random/tanya jawab biasa, set brand="Unknown" dan summary="Unknown".
 2. EVALUASI STATUS: Gunakan terminologi slang ini:
    - ACTIVE: "jp", "aman", "on", "work", "nyala", "makasih", "dapet", "alhamdulillah", "nyantol".
    - EXPIRED: "abis", "nt", "sold", "gabisa", "limit", "koid", "gaib", "goib", "badut", "zonk".
@@ -118,8 +118,9 @@ Output: {"promos": [{"original_msg_id": 2, "brand": "GoPay", "summary": "Promo G
 
 ATURAN WAJIB:
 - Jika MSG hanya kata pendek (e.g., "aman"), WAJIB baca C: untuk mengetahui brand yang dimaksud.
+- Jika pesan bukan promo, set brand="Unknown" dan summary="Unknown". JANGAN PERNAH MENGGUNAKAN "SKIP" SEBAGAI NAMA BRAND.
 - Output HARUS valid JSON yang sesuai dengan skema. Tidak ada teks pembuka/penutup.
-- Brand harus konsisten (e.g. sfood -> ShopeeFood, tsel -> Telkomsel).
+- Brand harus konsisten (e.g. sfood -> ShopeeFood, tsel -> Telkomsel, skin1004/skinenjel -> SKIN1004).
 """
 
 _DEDUP_SYSTEM = "Kamu agen deteksi duplikasi. Output HANYA angka indeks dipisah koma."
@@ -391,13 +392,21 @@ class OpenAICompatibleClient(BaseAIClient):
             try:
                 clean_text = re.sub(r'^```json\s*|\s*```$', '', text.strip(), flags=re.MULTILINE)
                 import json
-                try: parsed = response_schema.model_validate_json(clean_text)
+                try: 
+                    parsed = response_schema.model_validate_json(clean_text)
                 except:
                     raw = json.loads(clean_text)
+                    
+                    # Resilience: Handle list-wrapped responses for single-object schemas
+                    if isinstance(raw, list) and len(raw) > 0:
+                        if response_schema.__name__ == "PromoExtraction":
+                            raw = raw[0]
+                        elif response_schema.__name__ == "BatchResponse":
+                            raw = {"promos": raw}
+
                     if response_schema.__name__ == "BatchResponse":
                         if isinstance(raw, dict) and "promos" not in raw:
                             if "summary" in raw: raw = {"promos": [raw]}
-                        elif isinstance(raw, list): raw = {"promos": raw}
                     
                     def clean_nulls(obj):
                         if isinstance(obj, list): return [clean_nulls(x) for x in obj]
@@ -1046,6 +1055,8 @@ class GeminiProcessor:
                     continue
                 
                 verified_brand = normalize_brand(p.brand)
+                if verified_brand == "Unknown":
+                    continue
                 p.brand = verified_brand
                 p.model_name = response.model_name
                 valid.append(p)
@@ -1208,11 +1219,16 @@ class GeminiProcessor:
             return None
         res = response.parsed
         res.model_name = target
+
+        verified_brand = normalize_brand(res.brand)
+        if verified_brand == "Unknown":
+            return None
+        res.brand = verified_brand
+
         JUNK = {'tidak ada','none','n/a','tidak ada promo','no promo','tidak ditemukan','-'}
-        if (res.brand == "SKIP" or res.summary == "SKIP"
-                or not res.summary or len(res.summary) < 10
+        if (not res.summary or len(res.summary) < 10
                 or res.summary.lower().strip() in JUNK
-                or res.brand.lower().strip() in JUNK):
+                or res.summary == "Unknown"):
             return None
         res.original_msg_id = original_msg_id
         return res
