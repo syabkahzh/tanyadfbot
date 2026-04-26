@@ -289,6 +289,18 @@ class Database:
             )
         """)
 
+        # ── system_logs (Persistent Error/Warning Tracking) ──────────────────
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS system_logs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                level       TEXT NOT NULL,
+                logger_name TEXT,
+                message     TEXT NOT NULL,
+                traceback   TEXT,
+                created_at  TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S+00:00','now'))
+            )
+        """)
+
         await self.conn.commit()
 
         # ── Safe migrations (idempotent) ──────────────────────────────────────
@@ -1037,6 +1049,26 @@ class Database:
             return await cur.fetchall()
 
     # ── Pending alerts ────────────────────────────────────────────────────────
+
+    async def save_system_log(self, level: str, logger_name: str, message: str, traceback: str = None) -> None:
+        """Saves a system log entry to the database."""
+        if not self.conn: return
+        try:
+            await self.conn.execute("""
+                INSERT INTO system_logs (level, logger_name, message, traceback)
+                VALUES (?, ?, ?, ?)
+            """, (level, logger_name, message, traceback))
+            await self.conn.commit()
+        except Exception:
+            pass # Avoid infinite recursion if logging fails
+
+    async def get_recent_logs(self, limit: int = 20) -> Sequence[aiosqlite.Row]:
+        """Retrieves recent system logs."""
+        if not self.conn: return []
+        async with self.conn.execute(
+            "SELECT * FROM system_logs ORDER BY id DESC LIMIT ?", (limit,)
+        ) as cur:
+            return await cur.fetchall()
 
     async def save_poll_data(self, msg_id: int, p_data_json: str, tg_link: str, timestamp: str) -> None:
         """Temporarily saves promo data for a verification poll."""

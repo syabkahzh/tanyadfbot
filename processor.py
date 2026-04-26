@@ -98,63 +98,58 @@ class TrendResponse(BaseModel):
 
 # ── Prompt constants ──────────────────────────────────────────────────────────
 
-_EXTRACT_SYSTEM = """Kamu sistem ekstraksi data promo dari grup deal-hunter Indonesia (Discountfess).
-Fokus utama: deteksi apakah pesan menginformasikan keberhasilan/kegagalan promo, atau membagikan promo baru.
+_EXTRACT_SYSTEM = """Kamu adalah TanyaDFBot, sistem ekstraksi promo paling cerdas untuk grup Discountfess.
+Tugasmu: Deteksi apakah pesan membahas promo (aktif/habis) atau sekadar obrolan biasa.
 
-INPUT FORMAT:
-ID:<id> C:<konteks pesan yang dibalas jika ada> MSG:<pesan utama user>
+FORMAT OUTPUT:
+Output WAJIB valid JSON. DILARANG KERAS menggunakan TABEL.
+Gunakan Bold (**) untuk nama brand dan bullet points jika diperlukan.
 
 ATURAN KONTEKS (C: vs MSG:):
-- `MSG:` adalah pesan dari user saat ini. Ini adalah penentu utama.
-- `C:` adalah pesan sebelumnya yang dibalas oleh user.
-- Gunakan `C:` HANYA untuk mencari tahu brand apa yang sedang dibahas jika `MSG:` berupa konfirmasi pendek, misalnya `MSG: aman kak` dan `C: sfood 50%`.
-- JANGAN mengekstrak promo dari `C:` jika `MSG:` hanyalah pertanyaan murni, misalnya `MSG: ini gimana caranya?` dengan `C: promo gopay`. Output wajib = SKIP.
-- Jika `MSG:` berisi validasi seperti `jp`, `nyala`, atau `udah habis`, maka ekstrak promo dengan memakai brand/info dari `C:`.
+- MSG: adalah pesan utama. C: adalah konteks (pesan yang dibalas).
+- Jika MSG cuma satu kata (misal "aman"), lihat C: untuk mencari tau brand apa yang dimaksud.
 
-ISTILAH KUNCI SLANG:
-- ACTIVE: aman, on, jp, work, nyala, cair, masuk, luber, pecah, nyantol, dapet.
-- EXPIRED: abis, habis, nt, sold out, zonk, gabisa, limit, koid.
-- BRAND: sfood/spud=ShopeeFood, gfood=GoFood, tukpo/toped=Tokopedia, sopi=Shopee, tsel=Telkomsel, idm=Indomaret, afm/jsm/psm=Alfamart.
+PEMETAAN SLANG KE STATUS:
+- ACTIVE: jp, aman, on, work, nyala, cair, masuk, luber, pecah, nyantol, dapet, berhasil.
+- EXPIRED: abis, habis, nt, sold out, zonk, gabisa, limit, koid, mati, klem, badut.
 
-ATURAN EKSTRAKSI (WAJIB DIIKUTI):
-1. Brand harus konsisten. Metode bayar (ShopeePay, OVO, DANA) = `conditions`, bukan brand, kecuali promo aplikasi murni tanpa merchant spesifik.
-2. Status: `active` (berhasil/ada), `expired` (habis/gagal), `unknown` (ambigu).
-3. Summary: 1 kalimat padat, misalnya `ShopeeFood diskon 50k aktif.` Jangan berisi meta-deskripsi seperti `User menanyakan promo`.
-4. Jika bukan promo, wajib isi `brand="SKIP"` dan `summary="SKIP"`.
+CONTOH:
+Input: ID:1 C:sfood diskon 50k MSG:nyala bang
+Output: {"promos": [{"original_msg_id": 1, "brand": "ShopeeFood", "summary": "ShopeeFood diskon 50k aktif.", "status": "active", "confidence": 0.95}]}
 
-WAJIB SKIP JIKA `MSG:` ADALAH:
-- Pertanyaan murni, misalnya `masih bisa?` atau `caranya gimana?`
-- OOT / curhat, misalnya `lagi di jalan`, `wkwk`, `iya makasih`
-- Tidak jelas membahas promo apa sama sekali.
+Input: ID:2 C:gopay coins 100% MSG:nt
+Output: {"promos": [{"original_msg_id": 2, "brand": "GoPay", "summary": "Promo GoPay Coins 100% sudah habis.", "status": "expired", "confidence": 0.90}]}
+
+Input: ID:3 C: MSG:ada yang tau cara pake voc tsel?
+Output: {"promos": [{"original_msg_id": 3, "brand": "SKIP", "summary": "SKIP", "status": "unknown", "confidence": 0.0}]}
+
+ATURAN EKSTRAKSI:
+1. Brand harus konsisten (e.g. sfood -> ShopeeFood).
+2. Jika bukan promo atau pertanyaan murni -> brand="SKIP", summary="SKIP".
+3. DILARANG memberikan penjelasan. Output HANYA JSON.
 """
 
 _DEDUP_SYSTEM = "Kamu agen deteksi duplikasi. Output HANYA angka indeks dipisah koma."
 
-_DIGEST_SYSTEM = "Kamu asisten ringkasan promo Indonesia. Jawab singkat dan informatif dalam bahasa Indonesia santai."
+_DIGEST_SYSTEM = """Kamu adalah TanyaDFBot, admin paling gercep di grup Discountfess. 
+Tugasmu merangkum promo terbaru dengan gaya bahasa santai, informatif, dan pake slang dikit (gais, mantul, sikat). 
 
-_VISION_SYSTEM = """Kamu analis visual grup promo Indonesia (Discountfess).
+ATURAN:
+- DILARANG KERAS PAKAI TABEL. 
+- Gunakan Bullet points dan Bold untuk nama Brand.
+- Jawab singkat padat, jangan bertele-tele.
+"""
 
-TUGASMU: Ekstrak detail promo hanya dari gambar yang diberikan.
+_VISION_SYSTEM = """Kamu analis visual TanyaDFBot untuk grup Discountfess. 
 
-ATURAN CAPTION & GAMBAR:
-- Jika caption berupa pertanyaan, misalnya `ini promo bukan?` atau `cara makenya gimana?`, abaikan caption tersebut. Jangan langsung di-skip, lihat isi gambarnya.
-- Jika gambar berisi poster diskon, voucher aktif, atau struk keberhasilan, ekstrak data tersebut meskipun captionnya bertanya.
-- Jika gambar berupa meme, foto pribadi, atau screenshot OOT, barulah output SKIP.
+TUGASMU: Ekstrak detail promo dari gambar/screenshot.
 
-PROMO VALID - ekstrak jika gambar berisi:
-- Poster/banner promo brand (diskon, cashback, voucher, harga spesial)
-- Screenshot aplikasi yang menampilkan harga/voucher/deal aktif
-- Bukti transaksi (struk, order confirmation)
+ATURAN VERIFIKASI:
+1. Jika gambar adalah STRUK PEMBAYARAN atau BUKTI SUKSES (ada nominal terbayar, centang hijau, atau "Pesanan Selesai") -> set status='active' dan confidence=1.0.
+2. Jika gambar adalah POSTER PROMO atau BANNER -> set status='active' dan confidence=0.85.
+3. Jika gambar adalah meme, foto oot, atau UI settings -> set summary='SKIP', brand='SKIP'.
 
-TOLAK (isi summary="SKIP", brand="SKIP") jika gambar adalah:
-- Screenshot settings/UI aplikasi tanpa info promo
-- Foto produk fisik tanpa harga promo, misalnya foto kopi biasa
-- Screenshot chat/grup tanpa bukti promo konkret
-
-ATURAN OUTPUT:
-- Jika SKIP: {"summary": "SKIP", "brand": "SKIP", "conditions": "", "valid_until": "", "status": "unknown", "original_msg_id": 0, "confidence": 0.0}
-- Jika valid: summary 1 kalimat padat, berisi brand + diskon/harga + syarat.
-- Confidence: 0.9+ untuk poster resmi/struk jelas, <0.7 untuk gambar samar.
+DILARANG KERAS MENGGUNAKAN TABEL. Gunakan bold untuk brand.
 """
 
 
@@ -221,7 +216,7 @@ _JUNK_SUMMARIES: set[str] = {'summary','none','n/a','-','tidak ada','tidak ditem
 
 class BaseAIClient:
     """Abstract base class for all AI providers."""
-    async def generate_content(self, model: str, contents: Any, config: dict[str, Any]) -> Any:
+    async def generate_content(self, model: str, contents: Any, config: dict[str, Any], capabilities: dict[str, Any]) -> Any:
         raise NotImplementedError
 
 class WrappedResponse:
@@ -243,33 +238,28 @@ class GoogleClient(BaseAIClient):
     def __init__(self, api_key: str):
         self.client = genai.Client(api_key=api_key)
 
-    async def generate_content(self, model: str, contents: Any, config: dict[str, Any]) -> Any:
-        # Defensive copy: never mutate the caller's dict (fixes retry/fallback bugs)
+    async def generate_content(self, model: str, contents: Any, config: dict[str, Any], capabilities: dict[str, Any]) -> Any:
         config = config.copy()
-        # Defensive copy: never mutate the caller's dict (fixes retry/fallback bugs)
-        config = config.copy()
-        # Some models (like gemma-3/4) might not support system_instruction or JSON mode as separate fields
-        is_gemma = "gemma-" in model
-        if is_gemma:
+        
+        # Adaptive JSON handling based on capabilities
+        if not capabilities.get("native_json", True):
+            schema = config.pop("response_schema", None)
+            config.pop("response_mime_type", None)
+            if schema:
+                schema_text = f"\n\nOUTPUT MUST BE VALID JSON matching this schema:\n{schema.model_json_schema()}"
+                if isinstance(contents, str): contents += schema_text
+                elif isinstance(contents, list):
+                    if isinstance(contents[0], str): contents[0] += schema_text
+                    else: contents.append(schema_text)
+
+        # Adaptive system instruction handling
+        if not capabilities.get("system_instruction", True):
             system = config.pop("system_instruction", None)
             if system:
                 sys_text = system
                 if hasattr(system, 'parts'): sys_text = system.parts[0].text
-                elif isinstance(system, dict) and 'parts' in system: sys_text = system['parts'][0].get('text', '')
-                
-                if isinstance(contents, str): contents = f"INSTRUCTION: {sys_text}\n\n{contents}"
-                elif isinstance(contents, list): contents.insert(0, f"INSTRUCTION: {sys_text}")
-
-            if config.get("response_mime_type") == "application/json":
-                # CRITICAL FIX: Do NOT pop response_schema. Let the SDK enforce the schema.
-                # Only inject the prompt helper if the schema is missing.
-                if "response_schema" not in config:
-                    json_msg = "OUTPUT MUST BE VALID JSON."
-                    if isinstance(contents, str): contents += f"\n\n{json_msg}"
-                    elif isinstance(contents, list): contents.append(json_msg)
-
-        # Safety settings can be problematic on some models, omitting to use defaults
-        # if you need to override them, use the correct HARM_CATEGORY_ prefix.
+                if isinstance(contents, str): contents = f"SYSTEM: {sys_text}\n\n{contents}"
+                elif isinstance(contents, list): contents.insert(0, f"SYSTEM: {sys_text}")
 
         res = await self.client.aio.models.generate_content(
             model=model, contents=contents, config=config
@@ -277,117 +267,80 @@ class GoogleClient(BaseAIClient):
         return WrappedResponse(res)
 
 class OpenAICompatibleClient(BaseAIClient):
-    """Generic client for OpenAI-compatible providers like Groq and GLM."""
+    """Generic client for OpenAI-compatible providers."""
     def __init__(self, api_key: str, base_url: Optional[str] = None, provider: str = "openai"):
         from openai import AsyncOpenAI
-        if not api_key:
-            logger.error(f"OpenAICompatibleClient initialized with EMPTY API KEY for {base_url}")
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.provider = provider
 
-    async def generate_content(self, model: str, contents: Any, config: dict[str, Any]) -> Any:
-        # Map Google-style config to OpenAI-style
+    async def generate_content(self, model: str, contents: Any, config: dict[str, Any], capabilities: dict[str, Any]) -> Any:
         system = config.get("system_instruction", "")
         response_schema = config.get("response_schema")
         
         messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
+        if system: messages.append({"role": "system", "content": system})
         
-        if isinstance(contents, str):
-            messages.append({"role": "user", "content": contents})
+        if isinstance(contents, str): messages.append({"role": "user", "content": contents})
         elif isinstance(contents, list):
             for item in contents:
-                if isinstance(item, str):
-                    messages.append({"role": "user", "content": item})
+                if isinstance(item, str): messages.append({"role": "user", "content": item})
         
         kwargs = {}
-        if self.provider == "groq" and any(m in model.lower() for m in ("qwen", "deepseek", "r1")):
-            # For Qwen/DeepSeek reasoning models on Groq, hide reasoning tokens in content
-            # "hidden" ensures it doesn't show up in 'content' but allows model to think.
-            kwargs["reasoning_format"] = "hidden"
+        # Adaptive reasoning format handling (e.g., Groq's hidden reasoning)
+        reasoning_mode = capabilities.get("reasoning")
+        if reasoning_mode:
+            kwargs["extra_body"] = {"reasoning_format": reasoning_mode}
 
-        if response_schema:
+        if response_schema and capabilities.get("native_json", True):
             kwargs["response_format"] = {"type": "json_object"}
             schema_str = response_schema.model_json_schema()
             messages[0]["content"] += (
-                f"\n\nYou MUST respond with ONLY valid JSON. No explanation, no markdown, no preamble."
-                f"\nThe JSON must match this exact schema:\n{schema_str}"
-                f"\nFor promo extraction: if not a promo, set summary='SKIP' and brand='SKIP'."
-                f"\nNever write descriptions of messages. Extract or SKIP."
+                f"\n\nYou MUST respond with ONLY valid JSON. No preamble.\nSchema:\n{schema_str}"
             )
 
-        res = await self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            **kwargs
-        )
-        
+        res = await self.client.chat.completions.create(model=model, messages=messages, **kwargs)
         text = res.choices[0].message.content
-        # CRITICAL: Always strip reasoning tags for Qwen/DeepSeek if they leak into content
-        if text:
-            text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+        if text: text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
 
         parsed = None
         if response_schema and text:
             try:
                 clean_text = re.sub(r'^```json\s*|\s*```$', '', text.strip(), flags=re.MULTILINE)
                 import json
-                try:
-                    # Attempt standard validation
-                    parsed = response_schema.model_validate_json(clean_text)
-                except Exception:
-                    # Fallback: manually parse and clean
-                    try:
-                        raw = json.loads(clean_text)
-                        # Case 1: Model returned a single object or list instead of {"promos": [...]}
-                        if response_schema.__name__ == "BatchResponse":
-                            if isinstance(raw, dict) and "promos" not in raw:
-                                if "summary" in raw:
-                                    raw = {"promos": [raw]}
-                            elif isinstance(raw, list):
-                                raw = {"promos": raw}
-                        
-                        # Case 2: Deeply clean nulls into proper default types
-                        def clean_nulls(obj):
-                            if isinstance(obj, list): return [clean_nulls(x) for x in obj]
-                            if isinstance(obj, dict):
-                                # Use list() to avoid dictionary changed size during iteration errors
-                                for k, v in list(obj.items()):
-                                    if v is None:
-                                        if k in ('queue_time', 'ai_time'):
-                                            pass # These are Optional[float] in the schema
-                                        elif k == 'confidence':
-                                            obj[k] = 1.0
-                                        elif k == 'original_msg_id':
-                                            obj[k] = 0
-                                        else:
-                                            obj[k] = ""
-                                    else:
-                                        obj[k] = clean_nulls(v)
-                            return obj
-                        
-                        raw = clean_nulls(raw)
-                        parsed = response_schema.model_validate(raw)
-                    except Exception as e2:
-                        logger.warning(f"OpenAI client deep parse failed: {e2}")
-                        raise
+                try: parsed = response_schema.model_validate_json(clean_text)
+                except:
+                    raw = json.loads(clean_text)
+                    if response_schema.__name__ == "BatchResponse":
+                        if isinstance(raw, dict) and "promos" not in raw:
+                            if "summary" in raw: raw = {"promos": [raw]}
+                        elif isinstance(raw, list): raw = {"promos": raw}
+                    
+                    def clean_nulls(obj):
+                        if isinstance(obj, list): return [clean_nulls(x) for x in obj]
+                        if isinstance(obj, dict):
+                            for k, v in list(obj.items()):
+                                if v is None:
+                                    if k in ('queue_time', 'ai_time'): pass
+                                    elif k == 'confidence': obj[k] = 1.0
+                                    elif k == 'original_msg_id': obj[k] = 0
+                                    else: obj[k] = ""
+                                else: obj[k] = clean_nulls(v)
+                        return obj
+                    parsed = response_schema.model_validate(clean_nulls(raw))
             except Exception as e:
-                logger.warning(f"OpenAI client failed to parse JSON: {e}")
-                logger.debug(f"Raw text that failed: {text}")
+                logger.warning(f"AI client failed to parse JSON: {e}")
         
         return WrappedResponse(res, text=text, parsed=parsed)
 
 class OllamaClient(BaseAIClient):
-    """Client for Ollama models via ollamafreeapi."""
+    """Client for Ollama models."""
     def __init__(self):
         try:
             from ollamafreeapi import Ollama
             self.client = Ollama()
-        except ImportError:
-            self.client = None
+        except: self.client = None
 
-    async def generate_content(self, model: str, contents: Any, config: dict[str, Any]) -> Any:
+    async def generate_content(self, model: str, contents: Any, config: dict[str, Any], capabilities: dict[str, Any]) -> Any:
         if not self.client: return None
         text_content = str(contents)
         response = self.client.chat(model=model, messages=[{'role': 'user', 'content': text_content}])
@@ -396,12 +349,12 @@ class OllamaClient(BaseAIClient):
 # ── Rate limiter ──────────────────────────────────────────────────────────────
 
 class _ModelSlot:
-    """Sliding-window RPM + daily RPD limiter with provider awareness and TPM/TPD support."""
+    """Sliding-window RPM + daily RPD limiter with capability awareness."""
 
     def __init__(self, name: str, provider: str, model_id: str, client: BaseAIClient, 
                  limit: int, daily_limit: int = 0, 
                  tpm_limit: int = 0, tpd_limit: int = 0,
-                 priority: int = 3) -> None:
+                 priority: int = 3, capabilities: dict = None) -> None:
         self.name = name
         self.provider = provider
         self.model_id = model_id
@@ -411,6 +364,7 @@ class _ModelSlot:
         self.tpm_limit = tpm_limit
         self.tpd_limit = tpd_limit
         self.priority = priority
+        self.capabilities = capabilities or {}
         
         self._calls: list[float] = []
         self._daily_calls: list[float] = []
@@ -549,14 +503,15 @@ class GeminiProcessor:
                     daily_limit=p.get('rpd', 0),
                     tpm_limit=p.get('tpm', 0),
                     tpd_limit=p.get('tpd', 0),
-                    priority=p.get('priority', 3)
+                    priority=p.get('priority', 3),
+                    capabilities=p.get('capabilities', {})
                 )
                 self._slots[p['name']] = slot
 
         self._priority_list = [
             s.name for s in sorted(self._slots.values(), key=lambda x: x.priority)
         ]
-        logger.info(f"AI Army (re)initialized with {len(self._slots)} units. Priority: {self._priority_list}")
+        logger.info(f"AI Army (re)initialized with {len(self._slots)} units.")
 
     def update_model_priority(self, name: str, priority: int) -> bool:
         """Updates a model's priority in models_config.json and reloads the fleet."""
@@ -586,7 +541,7 @@ class GeminiProcessor:
             return False
 
     async def _pick_model(self, exclude: Optional[str | list[str]] = None, provider: Optional[str] = None, estimated_tokens: int = 0) -> str:
-        """Picks a model using Least-Utilized Load Balancing to utilize the whole AI Army simultaneously."""
+        """Picks a model using Multi-Dimensional Load Balancing (RPM, TPM, TPD)."""
         excludes = [exclude] if isinstance(exclude, str) else (exclude or [])
         
         valid_candidates = [n for n in self._priority_list if n not in excludes]
@@ -594,64 +549,70 @@ class GeminiProcessor:
             valid_candidates = [n for n in valid_candidates if self._slots[n].provider == provider]
             
         if not valid_candidates:
-            # If everything was excluded, reset to all valid provider models
             valid_candidates = [n for n in self._priority_list if not provider or self._slots[n].provider == provider]
 
-        def get_utilization(name: str) -> float:
+        def get_max_utilization(name: str) -> float:
             slot = self._slots[name]
-            # Calculate load percentage (e.g., 5/15 RPM = 0.33)
-            return slot.current_usage() / max(1, slot.limit)
+            now = time.monotonic()
+            
+            # RPM Util
+            rpm_active = sum(1 for t in slot._calls if now - t < 60)
+            rpm_util = rpm_active / max(1, slot.limit)
+            
+            # TPM Util
+            tpm_util = 0.0
+            if slot.tpm_limit > 0:
+                current_tpm = sum(t[1] for t in slot._tokens if now - t[0] < 60)
+                tpm_util = current_tpm / slot.tpm_limit
+                
+            # TPD Util
+            tpd_util = 0.0
+            if slot.tpd_limit > 0:
+                current_tpd = sum(t[1] for t in slot._daily_tokens if now - t[0] < 86400)
+                tpd_util = current_tpd / slot.tpd_limit
+                
+            return max(rpm_util, tpm_util, tpd_util)
 
-        # 1. Sort by lowest utilization %, then highest priority
-        candidates_by_load = sorted(valid_candidates, key=lambda n: (get_utilization(n), self._slots[n].priority))
+        # 1. Sort by:
+        #    a) Priority (1 to 5) -> QUALITY FIRST. Use the best models until they are saturated.
+        #    b) Max Utilization (0.0 to 1.0) -> Balance load within the same quality tier.
+        #    c) -Daily Capacity (TPD) -> Tie-breaker: use model with more daily runway.
+        candidates_by_load = sorted(valid_candidates, key=lambda n: (
+            self._slots[n].priority,
+            get_max_utilization(n), 
+            -self._slots[n].tpd_limit
+        ))
 
-        # 2. Distribute load: try to acquire from the least loaded API first
+        # 2. Try least-loaded first
         for name in candidates_by_load:
             if await self._slots[name].try_acquire_nowait(estimated_tokens):
                 return name
         
-        # 3. If ALL models are fully saturated, poll until ANY model frees up.
-        # (The previous code hard-blocked on valid_candidates[0] and ignored the rest)
+        # 3. Block until any model frees up
         timeout = 90.0
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            # Re-sort to grab whoever freed up first and has the lowest relative load
-            candidates_by_load = sorted(valid_candidates, key=lambda n: (get_utilization(n), self._slots[n].priority))
+            candidates_by_load = sorted(valid_candidates, key=lambda n: (get_max_utilization(n), self._slots[n].priority))
             for name in candidates_by_load:
                 if await self._slots[name].try_acquire_nowait(estimated_tokens):
                     return name
             await asyncio.sleep(1.0)
             
-        # 4. Fallback if timeout expires
-        if not valid_candidates:
-            # Fallback to the absolute highest priority model if everything is exhausted
-            best_name = self._priority_list[0]
-        else:
-            best_name = valid_candidates[0]
+        best_name = self._priority_list[0]
         await self._slots[best_name].acquire(estimated_tokens, timeout=0.1)
         return best_name
 
     def _estimate_tokens(self, content: Any) -> int:
-        """Rough token estimation for rate limiting purposes.
-        
-        Uses simple heuristic: ~4 chars ≈ 1 token (standard GPT approximation).
-        """
-        # Account for ~600 token system prompt AND ~300 tokens for output generation.
-        # Groq limits based on Total Tokens (Input + Output).
-        base_overhead = 900
+        """Conservative token estimation (~3 chars per token for Indonesian)."""
+        # Base overhead for system prompt and generated response
+        base_overhead = 1000
 
-        if isinstance(content, str):
-            return max(1, (len(content) // 4) + base_overhead)
-        elif isinstance(content, list):
-            total = base_overhead
-            for item in content:
-                if isinstance(item, str):
-                    total += len(item) // 4
-                elif hasattr(item, '__str__'):
-                    total += len(str(item)) // 4
-            return max(1, total)
-        else:
-            return max(1, (len(str(content)) // 4) + base_overhead)
+        def _count(obj):
+            if isinstance(obj, str): return len(obj) // 3
+            if isinstance(obj, list): return sum(_count(x) for x in obj)
+            return len(str(obj)) // 3
+
+        return max(1, _count(content) + base_overhead)
 
 
     async def _call(self, contents: Any, config: dict, slot_name: str, 
@@ -664,65 +625,61 @@ class GeminiProcessor:
         try:
             logger.info(f"🛰️ [AI] Requesting {slot.model_id} ({slot.provider}) | Attempt {attempt}...")
             
-            # CRITICAL FIX: Cut timeout to 18s to prevent internal SDK retries from hanging the fleet.
             response = await asyncio.wait_for(
                 slot.client.generate_content(
                     model=slot.model_id,
                     contents=contents,
-                    config=config.copy()
+                    config=config.copy(),
+                    capabilities=slot.capabilities
                 ),
-                timeout=18.0
+                timeout=40.0
             )
             
             if response is None:
                 raise Exception("Provider returned empty response")
                 
-            # CRITICAL FIX: Attach the name of the slot that actually succeeded
             response.model_name = slot_name 
             return response
 
         except Exception as e:
             err_str = str(e).lower()
             logger.warning(f"🔄 AI ({slot.model_id}) Failure | Attempt {attempt} | {type(e).__name__}: {repr(e)}")
-            slot.release_last() # Don't count failed calls against RPM
+            slot.release_last() 
 
             # Dynamic 429 Rate Limit Handling
-            if "429" in err_str or "rate limit" in err_str:
-                sleep_sec = 60.0 # Fallback default
-                
-                # CRITICAL FIX: Parse Groq's exact reset timer (e.g., "try again in 17m16.8s")
+            is_rate_limit = "429" in err_str or "rate limit" in err_str
+            if is_rate_limit:
+                sleep_sec = 60.0 
                 wait_match = re.search(r'try again in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)', err_str)
                 if wait_match:
                     h = int(wait_match.group(1) or 0)
                     m = int(wait_match.group(2) or 0)
                     s = float(wait_match.group(3) or 0)
-                    sleep_sec = (h * 3600) + (m * 60) + s + 2.0 # Add 2s buffer
+                    sleep_sec = (h * 3600) + (m * 60) + s + 1.0 
                 elif "per day" in err_str or "tpd" in err_str or "rpd" in err_str:
-                    sleep_sec = 3600 * 6
+                    sleep_sec = 3600 * 4 # Back off for 4 hours on daily limit
                     
-                logger.warning(f"⏳ [{slot.name}] Rate Limited by provider. Sleeping exactly {sleep_sec:.1f}s.")
+                logger.warning(f"⏳ [{slot.name}] Rate Limited. Sleeping {sleep_sec:.1f}s.")
                 slot.exhausted_until = time.monotonic() + sleep_sec
 
             if attempt < max_attempts:
-                # Determine if vision is needed
                 is_vision = False
                 if isinstance(contents, list):
                     is_vision = any(hasattr(item, 'data') or (isinstance(item, dict) and 'image' in str(item).lower()) for item in contents)
                 
                 provider_filter = "google" if is_vision else None
                 
-                # CRITICAL FIX: Provider-Level Banning
-                # If the server timed out, threw a 50x error, or a 400 bad request (like a dead model), ban the ENTIRE provider
+                # Cross-provider ban ONLY on severe server errors (50x) or Timeouts.
+                # Do NOT ban the whole provider for a 429 (rate limit) or 400 (bad request).
                 exclude_list = list(tried)
-                err_str = str(e).lower()
-                is_server_death = isinstance(e, (asyncio.TimeoutError, TimeoutError)) or "timeout" in err_str or any(s in err_str for s in ["500", "502", "503", "504", "408", "429"])
+                is_server_death = isinstance(e, (asyncio.TimeoutError, TimeoutError)) or "timeout" in err_str or any(s in err_str for s in ["500", "502", "503", "504", "408"])
                 
                 if is_server_death and not (is_vision and slot.provider == "google"):
                     for n, s in self._slots.items():
                         if s.provider == slot.provider and n not in exclude_list:
                             exclude_list.append(n)
                             
-                next_slot = await self._pick_model(exclude=exclude_list, provider=provider_filter)
+                next_slot = await self._pick_model(exclude=exclude_list, provider=provider_filter, estimated_tokens=self._estimate_tokens(contents))
                 return await self._call(contents, config, next_slot, attempt + 1, max_attempts, tried)
             
             logger.error(f"AI call failed after {attempt} attempts.")
@@ -1053,14 +1010,14 @@ class GeminiProcessor:
         tokens = self._estimate_tokens(context)
         target  = await self._pick_model(estimated_tokens=tokens)
         
-        slang_desc = "\n".join([f"- `{k}` = {v}" for k, v in _SLANG_KAMUS.items()])
         config = {
             "response_mime_type": "application/json",
             "response_schema": TrendResponse,
             "system_instruction": (
-                "Kamu analis sentimen deal-hunter Indonesia. Simpulkan 1-3 tren utama dengan link ID pesan.\n"
-                "Gunakan konteks kamus slang berikut agar tidak salah paham:\n"
-                f"{slang_desc}"
+                "Kamu adalah TanyaDFBot, analis tren grup Discountfess. "
+                "Simpulkan 1-3 tren utama dengan link ID pesan. "
+                "KATEGORI: [PROMO_BARU], [SYSTEM_EROR], [DISKUSI_HANGAT], atau [RESTOCK]. "
+                "DILARANG KERAS MENGGUNAKAN TABEL. Gunakan bold untuk brand."
             ),
         }
         response = await self._call(contents=f"Pesan grup:\n{context}", config=config, slot_name=target)
@@ -1090,14 +1047,11 @@ class GeminiProcessor:
         
         counts_str = ", ".join([f"'{w}' ({c}x)" for w, c in word_counts.items()])
         
-        slang_desc = "\n".join([f"- `{k}` = {v}" for k, v in _SLANG_KAMUS.items()])
         system = (
-            "Kamu analis sentimen real-time. Ada lonjakan aktivitas di grup.\n"
-            f"Kata kunci dominan dlm {window} menit terakhir: {counts_str}.\n"
-            "Gunakan konteks kamus slang berikut agar tidak salah paham:\n"
-            f"{slang_desc}\n\n"
+            "Kamu adalah TanyaDFBot, analis sentimen real-time. Ada lonjakan aktivitas di grup.\n"
+            f"Kata kunci dominan dlm {window} menit terakhir: {counts_str}.\n\n"
             "TUGASMU: Jelaskan APA yang sedang dibahas berdasarkan pesan-pesan berikut.\n"
-            "JANGAN menebak jika tidak ada informasi. Jawab dalam 1-2 kalimat padat."
+            "DILARANG KERAS PAKAI TABEL. Jawab singkat padat dalam 1-2 kalimat."
         )
         
         context_block = "\n".join([f"- {msg[:150]}" for msg in context_msgs[-40:]])

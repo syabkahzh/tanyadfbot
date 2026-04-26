@@ -5,7 +5,11 @@
         "model_id": "gemma-4-31b-it",
         "api_key_env": "GEMINI_API_KEY",
         "rpm": 12,
-        "priority": 1
+        "priority": 1,
+        "capabilities": {
+            "native_json": false,
+            "system_instruction": false
+        }
     },
     {
         "name": "gemma-4-26b-a4b-it",
@@ -13,7 +17,42 @@
         "model_id": "gemma-4-26b-a4b-it",
         "api_key_env": "GEMINI_API_KEY",
         "rpm": 12,
-        "priority": 2
+        "priority": 1,
+        "capabilities": {
+            "native_json": false,
+            "system_instruction": false
+        }
+    },
+    {
+        "name": "groq-qwen-32b",
+        "provider": "groq",
+        "model_id": "qwen/qwen3-32b",
+        "api_key_env": "GROQ_API_KEY",
+        "rpm": 60,
+        "rpd": 1000,
+        "tpm": 6000,
+        "tpd": 500000,
+        "priority": 2,
+        "base_url": "https://api.groq.com/openai/v1",
+        "capabilities": {
+            "native_json": true,
+            "reasoning": "hidden"
+        }
+    },
+    {
+        "name": "groq-gpt-oss-120b",
+        "provider": "groq",
+        "model_id": "openai/gpt-oss-120b",
+        "api_key_env": "GROQ_API_KEY",
+        "rpm": 30,
+        "rpd": 1000,
+        "tpm": 6000,
+        "tpd": 100000,
+        "priority": 2,
+        "base_url": "https://api.groq.com/openai/v1",
+        "capabilities": {
+            "native_json": true
+        }
     },
     {
         "name": "groq-llama-70b",
@@ -25,7 +64,10 @@
         "tpm": 12000,
         "tpd": 100000,
         "priority": 3,
-        "base_url": "https://api.groq.com/openai/v1"
+        "base_url": "https://api.groq.com/openai/v1",
+        "capabilities": {
+            "native_json": true
+        }
     },
     {
         "name": "groq-llama-8b",
@@ -37,18 +79,9 @@
         "tpm": 6000,
         "tpd": 500000,
         "priority": 4,
-        "base_url": "https://api.groq.com/openai/v1"
-    },
-    {
-        "name": "groq-qwen-32b",
-        "provider": "groq",
-        "model_id": "qwen/qwen3-32b",
-        "api_key_env": "GROQ_API_KEY",
-        "rpm": 60,
-        "rpd": 1000,
-        "tpm": 6000,
-        "tpd": 500000,
-        "priority": 4,
-        "base_url": "https://api.groq.com/openai/v1"
+        "base_url": "https://api.groq.com/openai/v1",
+        "capabilities": {
+            "native_json": true
+        }
     }
 ]

@@ -95,6 +95,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("ping", self.cmd_ping))
         self.app.add_handler(CommandHandler("status", self.cmd_status))
         self.app.add_handler(CommandHandler("diag", self.cmd_diag))
+        self.app.add_handler(CommandHandler("logs", self.cmd_logs))
         self.app.add_handler(CommandHandler("today", self.cmd_today))
         self.app.add_handler(CommandHandler("chart", self.cmd_chart))
         self.app.add_handler(CommandHandler("review", self.cmd_review))
@@ -271,7 +272,6 @@ class TelegramBot:
 
         import time as _time
         import main as _main
-
         now_m = _time.monotonic()
         loop_tick = shared.get_loop_tick()
         loop_age = (now_m - loop_tick) if loop_tick else -1
@@ -336,6 +336,38 @@ class TelegramBot:
             f"**Verdict:** {verdict}"
         )
         await self._send_markdown(update, text)
+
+    @_owner_only
+    async def cmd_logs(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handler for /logs command — shows recent system logs."""
+        if not update.message: return
+        
+        try:
+            limit = 10
+            if context.args:
+                try: limit = int(context.args[0])
+                except: pass
+                
+            logs = await self.db.get_recent_logs(limit=limit)
+            if not logs:
+                await update.message.reply_text("📭 No logs found in database.")
+                return
+                
+            lines = []
+            for l in logs:
+                icon = "⚠️" if l['level'] == 'WARNING' else "🚨"
+                # Extraction time part only
+                ts = l['created_at'].split()[1].split('+')[0] if ' ' in l['created_at'] else l['created_at']
+                
+                # We use raw strings here because _send_markdown handles escaping
+                msg = l['message'][:150] + "..." if len(l['message']) > 150 else l['message']
+                lines.append(f"{icon} `{ts}` **{l['level']}** [{l['logger_name']}]\n`{msg}`")
+            
+            text = "📜 **Recent System Logs**\n\n" + "\n\n".join(lines)
+            await self._send_markdown(update, text)
+        except Exception as e:
+            logger.error(f"Failed to fetch logs: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Failed to fetch logs: {e}")
 
     @_owner_only
     async def cmd_fleet(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

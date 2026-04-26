@@ -57,9 +57,6 @@ _IN_PROGRESS_MAX_AGE_SEC: float = 130.0
 _alerted_hot_threads: dict[int, tuple[int, datetime]] = {}
 _triage_cycle_counter: int   = 0
 
-_AI_MAX_INFLIGHT: int = 40
-_AI_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(_AI_MAX_INFLIGHT)
-
 _active_spawn_tasks: set[asyncio.Task] = set()
 
 _META_PATTERNS = re.compile(
@@ -179,24 +176,20 @@ async def processing_loop() -> None:
         promos: list[Any] | None = None
         ai_failed = False
         try:
-            async with _AI_SEMAPHORE:
-                try:
-                    promos = await gemini.process_batch(msgs, db)
-                except TimeoutError:
-                    logger.warning(f"⏳ [AI] Rate limits exhausted — requeuing {len(msgs)} messages for later.")
-                    ai_failed = True
-                except Exception as e:
-                    if str(e) == "TEMP_500_INTERNAL":
-                        logger.warning(f"AI internal 500 error — requeuing {len(msgs)} msgs for later.")
-                        ai_failed = True
-                    else:
-                        logger.error(f"AI processing error: {e}", exc_info=True)
-                        await db.increment_ai_failure_count(msg_ids)
-                        ai_failed = True
+            # NO SEMAPHORE: Fleet-level rate limiters are the only throttle
+            try:
+                promos = await gemini.process_batch(msgs, db)
+            except TimeoutError:
+                logger.warning(f"⏳ [AI] Fleet saturated — requeuing {len(msgs)} messages.")
+                ai_failed = True
+            except Exception as e:
+                logger.error(f"AI processing error: {e}", exc_info=True)
+                await db.increment_ai_failure_count(msg_ids)
+                ai_failed = True
+            
             shared._active_ai_tasks -= 1
         except BaseException:
             shared._active_ai_tasks -= 1
-            # No need to release claims here, finally block will do it.
             raise
         finally:
             await _release_claims()
@@ -349,13 +342,8 @@ async def processing_loop() -> None:
             current_tasks = shared._active_ai_tasks
             in_progress_count = len(_in_progress_ids)
             
-            # Detailed status log for monitoring
             if queue_size > 0:
                 logger.info(f"📊 [Fleet] Active Tasks: {current_tasks} | In-Progress: {in_progress_count} | Queue: {queue_size}")
-
-            if current_tasks >= _AI_MAX_INFLIGHT:
-                await asyncio.sleep(0.2)
-                continue
 
             # Circuit breaker disabled: Rely on processor.py's fleet fallback instead
             # circuit_wait = shared.ai_circuit_open_remaining()
@@ -501,7 +489,7 @@ async def processing_loop() -> None:
                 if exc:
                     logger.error(f"Spawned batch task failed: {exc}", exc_info=exc)
             _spawned_task.add_done_callback(_cleanup_spawn_task)
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.01)
         except Exception as e:
             logger.error(f"processing_loop error: {e}", exc_info=True)
             try: await bot.alert_error("processing_loop", e)
@@ -588,6 +576,12 @@ async def main() -> None:
     logger.info("--- TanyaDFBot Booting ---")
     await db.init()
     await shared.load_classifier("model.ftz")
+
+    # ── Register DB Logging Handler ──
+    from utils import AsyncDBHandler
+    db_handler = AsyncDBHandler(db, asyncio.get_running_loop())
+    db_handler.setLevel(logging.WARNING)
+    logging.getLogger().addHandler(db_handler)
 
     global BOOT_CATCHUP_WINDOW
     if not db.conn:
