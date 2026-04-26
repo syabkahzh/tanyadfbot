@@ -446,6 +446,8 @@ async def _reconnect_listener(gap_minutes: float) -> None:
 
 _ELONGATION_RE = re.compile(r'([a-zA-Z])\1{2,}')
 
+_BRAND_PATTERNS = {}
+
 def _guess_brand(text: str | None) -> str:
     """Fast, pattern-based brand identification with strict short-word matching."""
     if not text:
@@ -455,14 +457,18 @@ def _guess_brand(text: str | None) -> str:
     t_norm = _ELONGATION_RE.sub(r'\1', t_raw)
 
     brand_canon = get_brand_canon()
+    global _BRAND_PATTERNS
+    if not _BRAND_PATTERNS:
+        for kw in brand_canon.keys():
+            if len(kw) <= 5 or "+" in kw:
+                _BRAND_PATTERNS[kw] = re.compile(
+                    rf"(^|[^a-zA-Z0-9]){re.escape(kw)}($|[^a-zA-Z0-9])"
+                )
+
     for kw, brand in brand_canon.items():
-        if len(kw) <= 3 or '+' in kw:
-            pattern = rf'(^|[^a-zA-Z0-9]){re.escape(kw)}($|[^a-zA-Z0-9])'
-            if re.search(pattern, t_raw) or re.search(pattern, t_norm):
-                return brand
-        elif len(kw) <= 5:
-            pattern = rf'(^|[^a-zA-Z0-9]){re.escape(kw)}($|[^a-zA-Z0-9])'
-            if re.search(pattern, t_raw) or re.search(pattern, t_norm):
+        if len(kw) <= 5 or "+" in kw:
+            pattern = _BRAND_PATTERNS[kw]
+            if pattern.search(t_raw) or pattern.search(t_norm):
                 return brand
         elif kw in t_raw or kw in t_norm:
             return brand
