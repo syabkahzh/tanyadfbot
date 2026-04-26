@@ -14,8 +14,7 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Brand normalisation (single source of truth — shared by processor & main)
+# ── Brand normalisation (single source of truth — shared by processor & main)
 # ─────────────────────────────────────────────────────────────────────────────
 
 _BRAND_CANON: dict[str, str] = {
@@ -36,9 +35,11 @@ _BRAND_CANON: dict[str, str] = {
     'spx': 'SPX', 'spx express': 'SPX', 'shopee xpress': 'SPX', 's+p+x': 'SPX',
     'chatime': 'Chatime', 'chtm': 'Chatime',
     'c+h+t+m': 'Chatime', 'ctm': 'Chatime', 'c+t+m': 'Chatime',
+    'starbucks': 'Starbucks', 's+t+a+r+b+u+c+k+s': 'Starbucks',
     "the people's cafe": 'The Peoples Cafe',
     'the peoples cafe': 'The Peoples Cafe', 'tpc': 'The Peoples Cafe', 't+p+c': 'The Peoples Cafe',
-    'ismaya+': 'Ismaya', 'ismaya+ delivery': 'Ismaya', 'i+s+m+a+y+a': 'Ismaya',
+    'ismaya+': 'Ismaya', 'ismaya+ delivery': 'Ismaya', 'i+s+m+a+y+a': 'Ismaya', 'ismaya': 'Ismaya',
+    'gindaco': 'Gindaco', 'g+i+n+d+a+c+o': 'Gindaco', 'g+n+d+c': 'Gindaco',
     'cupbob': 'Cupbop', 'c+u+p+b+o+p': 'Cupbop',
     'pubg': 'PUBG', 'pugb': 'PUBG', 'p+u+b+g': 'PUBG',
     'tokopedia': 'Tokopedia', 'tokped': 'Tokopedia',
@@ -51,8 +52,22 @@ _BRAND_CANON: dict[str, str] = {
     'tsel': 'Telkomsel', 'mytsel': 'Telkomsel', 'mytelkomsel': 'Telkomsel', 't+s+e+l': 'Telkomsel',
     'dilan': 'Dilan', 'bandung': 'Bandung',
     'goco': 'GoPay Coins', 'g+o+c+o': 'GoPay Coins',
-    'gindaco': 'Gindaco', 'g+n+d+c': 'Gindaco',
     'kawanlama': 'Kawan Lama', 'kawan lama': 'Kawan Lama', 'k+w+n+l+m': 'Kawan Lama',
+    'cgv': 'CGV', 'xxi': 'XXI', 'c+g+v': 'CGV', 'x+x+i': 'XXI',
+    'mcd': 'McD', 'kfc': 'KFC', 'm+c+d': 'McD', 'k+f+c': 'KFC',
+    'spay': 'ShopeePay', 'shopeepay': 'ShopeePay', 's+p+a+y': 'ShopeePay', 's+h+o+p+e+e+p+a+y': 'ShopeePay',
+    'ovo': 'OVO', 'o+v+o': 'OVO',
+    'grab': 'Grab', 'gojek': 'Gojek', 'g+r+a+b': 'Grab', 'g+o+j+e+k': 'Gojek',
+    'pln': 'PLN', 'pulsa': 'Pulsa',
+    'cetem': 'Cetem', 'cetam': 'Cetem',
+    'rotio': 'Roti O', 'roti o': 'Roti O', 'roti-o': 'Roti O',
+    'tomoro': 'Tomoro Coffee', 'tomoro coffee': 'Tomoro Coffee',
+    'jago': 'Bank Jago', 'saqu': 'Bank Saqu', 'seabank': 'SeaBank', 'aladin': 'Bank Aladin',
+    'g+b+s': 'GaBisa',
+    'r+s+t+k': 'Restock', 'r+s+t+c+k': 'Restock', 'r+st+ck': 'Restock',
+    'cb': 'Cashback', 'kesbek': 'Cashback', 'c+s+h+b+c+k': 'Cashback', 'cash back': 'Cashback',
+    'pchematapril': 'PC HematApril',
+    'tukpo': 'Tukar Poin',
     # Brands discovered from raw data analysis (2026-04-24)
     'sopi': 'Shopee', 'sopie': 'Shopee',
     'solaria': 'Solaria',
@@ -72,6 +87,10 @@ _BRAND_CANON: dict[str, str] = {
     'tidak disebutkan': 'Unknown', 'sunknown': 'Unknown',
     'bunknown': 'Unknown', 'n/a': 'Unknown',
 }
+
+def get_brand_canon() -> dict[str, str]:
+    """Returns the single source of truth for brand normalization."""
+    return _BRAND_CANON
 
 @functools.lru_cache(maxsize=1024)
 def normalize_brand(brand: str | None) -> str:
@@ -256,6 +275,17 @@ class Database:
                 summary          TEXT,
                 correction       TEXT NOT NULL,
                 created_at       TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S+00:00','now'))
+            )
+        """)
+
+        # ── poll_data (Temporary storage for verification polls) ──────────────
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS poll_data (
+                original_msg_id INTEGER PRIMARY KEY,
+                p_data_json     TEXT NOT NULL,
+                tg_link         TEXT,
+                timestamp       TEXT,
+                created_at      TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S+00:00','now'))
             )
         """)
 
@@ -1008,6 +1038,27 @@ class Database:
 
     # ── Pending alerts ────────────────────────────────────────────────────────
 
+    async def save_poll_data(self, msg_id: int, p_data_json: str, tg_link: str, timestamp: str) -> None:
+        """Temporarily saves promo data for a verification poll."""
+        if not self.conn: return
+        try:
+            await self.conn.execute("""
+                INSERT OR REPLACE INTO poll_data (original_msg_id, p_data_json, tg_link, timestamp)
+                VALUES (?, ?, ?, ?)
+            """, (msg_id, p_data_json, tg_link, timestamp))
+            await self.conn.commit()
+        except Exception as e:
+            logger.error(f"DB save_poll_data error: {e}")
+
+    async def get_poll_data(self, msg_id: int) -> aiosqlite.Row | None:
+        """Retrieves temporarily saved promo data for a verification poll."""
+        if not self.conn: return None
+        async with self.conn.execute(
+            "SELECT p_data_json, tg_link, timestamp FROM poll_data WHERE original_msg_id = ?",
+            (msg_id,)
+        ) as cur:
+            return await cur.fetchone()
+
     async def save_pending_alert(self, brand: str, p_data_json: str,
                                   tg_link: str, timestamp: str | datetime,
                                   corroborations: int = 0,
@@ -1436,7 +1487,7 @@ class Database:
 
     # ── Maintenance ───────────────────────────────────────────────────────────
 
-    async def prune_old_messages(self, retention_days: int = 1, ignore_vacuum: bool = False) -> None:
+    async def prune_old_messages(self, retention_days: int = 7, ignore_vacuum: bool = False) -> None:
         """Deletes processed messages older than retention_days that are not backing a promo."""
         if not self.conn:
             return

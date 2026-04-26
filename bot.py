@@ -692,12 +692,33 @@ class TelegramBot:
                 correction = mapping.get(vote, "VOTED")
                 
                 try:
+                    # Retrieve the saved poll data
+                    row = await self.db.get_poll_data(orig_msg_id)
+                    
+                    if vote == "yes" and row:
+                        p_data = PromoExtraction.model_validate_json(row['p_data_json'])
+                        # Save as a pending alert so it gets broadcasted
+                        await self.db.save_pending_alert(
+                            p_data.brand, row['p_data_json'], row['tg_link'], row['timestamp'], source='ai'
+                        )
+                        # Mark message as processed so it doesn't get picked up again
+                        await self.db.mark_batch_processed([orig_msg_id])
+                        
+                        # Trigger alert buffer flush if needed
+                        import shared
+                        from main import _flush_alert_buffer
+                        t = shared.get_buffer_flush_task()
+                        if t is None or t.done():
+                            shared.set_buffer_flush_task(asyncio.create_task(_flush_alert_buffer(delay=0.5)))
+                    
                     if vote in ("no", "spam"):
                         await self.db.conn.execute(
                             "INSERT INTO ai_corrections (original_msg_id, correction, weight) VALUES (?, ?, ?)",
                             (orig_msg_id, correction, weight)
                         )
                         await self.db.conn.commit()
+                        # Also mark as processed if we rejected it via poll
+                        await self.db.mark_batch_processed([orig_msg_id], skip_reason=f"poll_{vote}")
                     
                     status_emoji = "✅" if vote == "yes" else ("❌" if vote == "no" else "🚫")
                     await self._retry_tg(query.edit_message_text,
@@ -705,7 +726,7 @@ class TelegramBot:
                         parse_mode=ParseMode.MARKDOWN
                     )
                 except Exception as e:
-                    logger.error(f"Failed poll vote: {e}")
+                    logger.error(f"Failed poll vote: {e}", exc_info=True)
             return
 
         elif data.startswith("fix_"):
@@ -952,18 +973,20 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Failed to send grouped alert: {e}")
 
-    async def send_plain(self, text: str, parse_mode: Any = None, chat_id: int | None = None) -> None:
+    async def send_plain(self, text: str, parse_mode: Any = None, chat_id: int | None = None, **kwargs) -> None:
         """Sends a plain text message to the owner using telegramify for auto-chunking."""
         try:
             results = await telegramify(text)
-            for item in results:
+            for i, item in enumerate(results):
+                chunk_kwargs = kwargs if i == len(results) - 1 else {}
                 if item.content_type == ContentType.TEXT:
                     await self._retry_tg(
                         self.app.bot.send_message,
                         chat_id=chat_id or Config.OWNER_ID,
                         text=item.text,
                         entities=[e.to_dict() for e in item.entities],
-                        link_preview_options=LinkPreviewOptions(is_disabled=True)
+                        link_preview_options=LinkPreviewOptions(is_disabled=True),
+                        **chunk_kwargs
                     )
         except Exception as e:
             logger.error(f"Failed to send plain msg: {e}")
@@ -981,8 +1004,11 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Failed to send photo: {e}")
 
-    async def send_verification_poll(self, p_data: PromoExtraction, tg_link: str) -> None:
+    async def send_verification_poll(self, p_data: PromoExtraction, tg_link: str, timestamp: str) -> None:
         """Sends a verification poll for low-confidence AI extractions."""
+        # Save to DB so we can retrieve it on callback
+        await self.db.save_poll_data(p_data.original_msg_id, p_data.model_dump_json(), tg_link, timestamp)
+
         keyboard = [
             [
                 InlineKeyboardButton("✅ Deal", callback_data=f"poll_{p_data.original_msg_id}_yes"),
@@ -1051,7 +1077,7 @@ def _to_wib(ts_str: str | None) -> str:
     if not ts_str:
         return "??"
     try:
-        dt = _parse_ts(ts_str)
+        dt = shared._parse_ts(ts_str)
         return dt.astimezone(pytz.timezone("Asia/Jakarta")).strftime("%H:%M")
     except (ValueError, TypeError):
         return "??"

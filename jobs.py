@@ -36,33 +36,35 @@ def _read_file_bytes(path: str) -> bytes:
 # and fires a T-2min reminder so users don't miss a time-bounded promo window.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# HH:MM / HH.MM / HH:MM WIB — anchored to word boundaries to avoid price numbers.
+# HH:MM / HH.MM / HH:MM WIB — anchored to word boundaries.
 _TIME_OF_DAY_RE = re.compile(
-    r'\b(?:jam|pukul|pkl|pk|s[./]?d|sampai|sebelum)?\s*'
-    r'(\d{1,2})[:.](\d{2})\s*(wib)?\b',
+    r'\b(?:jam|pukul|pkl|pk|s[./]?d|sampai|sebelum|pada)?\s*'
+    r'(\d{1,2})[:.](\d{2})\s*(?:wib|wit|wita)?\b',
     re.IGNORECASE,
 )
 # "jam 10" / "pukul 14" without minutes (interpreted as :00).
 _TIME_HOUR_RE = re.compile(
-    r'\b(?:jam|pukul|pkl|pk|s[./]?d|sampai|sebelum)\s+(\d{1,2})(?:\s*(wib|pagi|siang|sore|malem|malam))?\b',
+    r'\b(?:jam|pukul|pkl|pk|s[./]?d|sampai|sebelum|pukul|pada)\s+(\d{1,2})(?:\s*(wib|wit|wita|pagi|siang|sore|malem|malam))?\b',
     re.IGNORECASE,
 )
 
 
 def _extract_time_of_day(text: str) -> tuple[int, int] | None:
-    """Return (hour, minute) if text explicitly names a time of day in WIB.
+    """Return (hour, minute) if text explicitly names a time of day.
 
-    Conservative: only returns when we're confident the number is a clock
-    time, not a price or date. Prefers the HH:MM form; falls back to
-    "jam/pukul N" (minute=0) only when anchored by a time preposition.
+    Improved to handle more variations and common typos.
     """
     if not text:
         return None
+    # Pre-clean: "jam 10.00wib" -> "jam 10.00 wib"
+    text = re.sub(r'(\d{2})(wib|wit|wita)', r'\1 \2', text, flags=re.IGNORECASE)
+    
     m = _TIME_OF_DAY_RE.search(text)
     if m:
         hh, mm = int(m.group(1)), int(m.group(2))
         if 0 <= hh <= 23 and 0 <= mm <= 59:
             return (hh, mm)
+            
     m = _TIME_HOUR_RE.search(text)
     if m:
         hh = int(m.group(1))
@@ -73,7 +75,16 @@ def _extract_time_of_day(text: str) -> tuple[int, int] | None:
                 hh += 12
             elif tod in ('malem', 'malam') and hh < 12:
                 hh += 12
+            elif tod in ('pagi',) and hh == 12:
+                hh = 0
             return (hh, 0)
+    
+    # Special case: "tengah malam" -> 00:00
+    if "tengah malam" in text.lower() or "jam 12 malam" in text.lower():
+        return (0, 0)
+    if "nanti siang" in text.lower() or "jam 12 siang" in text.lower():
+        return (12, 0)
+        
     return None
 
 
@@ -1005,11 +1016,15 @@ async def spike_detection_job(db: Database, gemini: GeminiProcessor, bot: Telegr
 
 async def dead_promo_reaper_job(db: Database, bot: TelegramBot) -> None:
     """Closes expired promotions based on subsequent community chat signals."""
-    logger.info("⏰ [Job] Starting dead_promo_reaper_job...")
+    logger.info("💀 [Job] Starting dead_promo_reaper_job...")
     try:
         if not db.conn:
             return
             
+        # More robust keywords for expiry and active status
+        # expiry: nt, abis, habis, zonk, limit, sold out, koid, mati, gabisa, ga bisa, koin, koid, telat, ketinggalan, hangus, off
+        # active: aman, on, work, jp, cair, nyala, masih, bisa, dapet, dapat, pecah, luber
+        
         async with db.conn.execute("""
             WITH ActivePromos AS (
                 SELECT p.id, m.tg_msg_id, m.chat_id
@@ -1021,8 +1036,24 @@ async def dead_promo_reaper_job(db: Database, bot: TelegramBot) -> None:
             ReplySignals AS (
                 SELECT
                     ap.id AS promo_id,
-                    SUM(CASE WHEN mrt.text LIKE '%nt%' OR mrt.text LIKE '%abis%' OR mrt.text LIKE '%habis%' OR mrt.text LIKE '%sold out%' OR mrt.text LIKE '%expired%' OR mrt.text LIKE '%kehabisan%' OR mrt.text LIKE '%ga bisa%' OR mrt.text LIKE '%gabisa%' OR mrt.text LIKE '%mati%' OR mrt.text LIKE '%hangus%' OR mrt.text LIKE '%ga work%' OR mrt.text LIKE '%off%' THEN 1 ELSE 0 END) AS expiry_votes,
-                    SUM(CASE WHEN mrt.text LIKE '%aman%' OR mrt.text LIKE '%on%' OR mrt.text LIKE '%work%' OR mrt.text LIKE '%jp%' OR mrt.text LIKE '%masih%' OR mrt.text LIKE '%bisa%' THEN 1 ELSE 0 END) AS active_votes
+                    SUM(CASE WHEN 
+                        mrt.text LIKE '% nt%' OR mrt.text LIKE 'nt %' OR mrt.text = 'nt' OR
+                        mrt.text LIKE '%abis%' OR mrt.text LIKE '%habis%' OR 
+                        mrt.text LIKE '%sold out%' OR mrt.text LIKE '%expired%' OR 
+                        mrt.text LIKE '%kehabisan%' OR mrt.text LIKE '%ga bisa%' OR 
+                        mrt.text LIKE '%gabisa%' OR mrt.text LIKE '%mati%' OR 
+                        mrt.text LIKE '%hangus%' OR mrt.text LIKE '%ga work%' OR 
+                        mrt.text LIKE '%zonk%' OR mrt.text LIKE '%limit%' OR
+                        mrt.text LIKE '%off%' OR mrt.text LIKE '%koid%' OR
+                        mrt.text LIKE '%telat%' OR mrt.text LIKE '%ketinggalan%'
+                        THEN 1 ELSE 0 END) AS expiry_votes,
+                    SUM(CASE WHEN 
+                        mrt.text LIKE '%aman%' OR mrt.text LIKE '% on%' OR mrt.text LIKE 'on %' OR
+                        mrt.text LIKE '%work%' OR mrt.text LIKE '%jp%' OR 
+                        mrt.text LIKE '%masih%' OR mrt.text LIKE '%bisa%' OR
+                        mrt.text LIKE '%cair%' OR mrt.text LIKE '%nyala%' OR
+                        mrt.text LIKE '%pecah%' OR mrt.text LIKE '%luber%'
+                        THEN 1 ELSE 0 END) AS active_votes
                 FROM ActivePromos ap
                 JOIN messages mrt ON mrt.reply_to_msg_id = ap.tg_msg_id AND mrt.chat_id = ap.chat_id
                 GROUP BY ap.id

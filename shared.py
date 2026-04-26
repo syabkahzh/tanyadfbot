@@ -23,7 +23,7 @@ try:
 except ImportError:
     pass
 
-from db import Database, normalize_brand
+from db import Database, normalize_brand, get_brand_canon
 from processor import GeminiProcessor, PromoExtraction, _CURRENCY_DISCOUNT_PATTERN
 
 logger = logging.getLogger(__name__)
@@ -454,8 +454,8 @@ def _guess_brand(text: str | None) -> str:
     t_raw = text.lower()
     t_norm = _ELONGATION_RE.sub(r'\1', t_raw)
 
-    from shared import _BRAND_KEYWORDS
-    for kw, brand in _BRAND_KEYWORDS.items():
+    brand_canon = get_brand_canon()
+    for kw, brand in brand_canon.items():
         if len(kw) <= 3 or '+' in kw:
             pattern = rf'(^|[^a-zA-Z0-9]){re.escape(kw)}($|[^a-zA-Z0-9])'
             if re.search(pattern, t_raw) or re.search(pattern, t_norm):
@@ -507,8 +507,6 @@ async def _flush_alert_buffer(delay: float = 0.5) -> None:
                 )
             except Exception as e:
                 logger.error(f"Failed to parse p_data_json in flush: {e}")
-
-
 
     try:
         tasks = []
@@ -565,63 +563,3 @@ async def _flush_alert_buffer(delay: float = 0.5) -> None:
             "UPDATE pending_alerts SET flush_id=NULL WHERE flush_id=?", (flush_id,)
         )
         await db.conn.commit()
-
-_BRAND_KEYWORDS: dict[str, str] = {
-    'kopken': 'Kopi Kenangan', 'kopi kenangan': 'Kopi Kenangan',
-    'kenangan': 'Kopi Kenangan', 'k+p+k+n': 'Kopi Kenangan',
-    'hokben': 'HokBen', 'hoka ben': 'HokBen', 'h+k+b+n': 'HokBen', 'h+o+k+b+e+n': 'HokBen',
-    'hophop': 'HopHop', 'hop hop': 'HopHop', 'h+p+h+p': 'HopHop',
-    'sfood': 'ShopeeFood', 'shopeefood': 'ShopeeFood',
-    's+f+d': 'ShopeeFood', 'sfud': 'ShopeeFood',
-    'sopifut': 'ShopeeFood', 'sopifud': 'ShopeeFood', 's+p+f+d': 'ShopeeFood',
-    'gfood': 'GoFood', 'gofood': 'GoFood', 'g+f+d': 'GoFood', 'g+o+f+o+o+d': 'GoFood',
-    'spx': 'SPX', 'shopee xpress': 'SPX', 's+p+x': 'SPX',
-    'alfamart': 'Alfamart', 'alfa': 'Alfamart', 'a+l+f+a': 'Alfamart', 'a+l+f+a+m+a+r+t': 'Alfamart',
-    'jsm': 'Alfamart', 'j+s+m': 'Alfamart',
-    'psm': 'Alfamart', 'p+s+m': 'Alfamart',
-    'afm': 'Alfamart', 'a+f+m': 'Alfamart',
-    'indomaret': 'Indomaret', 'idm': 'Indomaret', 'i+d+m': 'Indomaret', 'i+n+d+o': 'Indomaret',
-    'chatime': 'Chatime', 'chtm': 'Chatime',
-    'c+h+t+m': 'Chatime', 'ctm': 'Chatime', 'c+t+m': 'Chatime',
-    'starbucks': 'Starbucks', 's+t+a+r+b+u+c+k+s': 'Starbucks',
-    'ismaya': 'Ismaya', 'gindaco': 'Gindaco', 'g+i+n+d+a+c+o': 'Gindaco',
-    'g+n+d+c': 'Gindaco',
-    'kawanlama': 'Kawan Lama', 'kawan lama': 'Kawan Lama', 'k+w+n+l+m': 'Kawan Lama',
-    'cgv': 'CGV', 'xxi': 'XXI', 'c+g+v': 'CGV', 'x+x+i': 'XXI',
-    'mcd': 'McD', 'kfc': 'KFC', 'm+c+d': 'McD', 'k+f+c': 'KFC',
-    'gopay': 'GoPay', 'gpy': 'GoPay', 'g+p+y': 'GoPay', 'g+o+p+a+y': 'GoPay',
-    'spay': 'ShopeePay', 'shopeepay': 'ShopeePay', 's+p+a+y': 'ShopeePay', 's+h+o+p+e+e+p+a+y': 'ShopeePay',
-    'ovo': 'OVO', 'o+v+o': 'OVO',
-    'goco': 'GoPay Coins', 'g+o+c+o': 'GoPay Coins',
-    'grab': 'Grab', 'gojek': 'Gojek', 'g+r+a+b': 'Grab', 'g+o+j+e+k': 'Gojek',
-    'goride': 'GoRide', 'grd': 'GoRide', 'g+r+d': 'GoRide', 'gored': 'GoRide',
-    'pln': 'PLN', 'pulsa': 'Pulsa', 'ag': 'Alfagift', 'alfagift': 'Alfagift', 'a+g': 'Alfagift', 'a+l+f+a+g+i+f+t': 'Alfagift',
-    'astrapay': 'AstraPay', 'alt': 'Astra', 'a+s+t+r+a+p+a+y': 'AstraPay', 'a+l+t': 'Astra',
-    'tsel': 'Telkomsel', 'mytsel': 'Telkomsel', 'mytelkomsel': 'Telkomsel', 't+s+e+l': 'Telkomsel',
-    'tokopedia': 'Tokopedia', 'tokped': 'Tokopedia',
-    'toped': 'Tokopedia', 'tkpd': 'Tokopedia', 't+k+p+d': 'Tokopedia',
-    'lazada': 'Lazada', 'lzd': 'Lazada', 'l+z+d': 'Lazada', 'l+a+z+a+d+a': 'Lazada',
-    'dilan': 'Dilan', 'bandung': 'Bandung',
-    'cetem': 'Cetem', 'cetam': 'Cetem', 'pubg': 'PUBG', 'pugb': 'PUBG', 'p+u+b+g': 'PUBG',
-    'rotio': 'Roti O', 'roti o': 'Roti O', 'roti-o': 'Roti O',
-    'tomoro': 'Tomoro Coffee', 'tomoro coffee': 'Tomoro Coffee',
-    'jago': 'Bank Jago', 'saqu': 'Bank Saqu', 'seabank': 'SeaBank', 'aladin': 'Bank Aladin',
-    'g+b+s': 'GaBisa',
-    'r+s+t+k': 'Restock', 'r+s+t+c+k': 'Restock', 'r+st+ck': 'Restock',
-    'cb': 'Cashback', 'kesbek': 'Cashback', 'c+s+h+b+c+k': 'Cashback', 'cash back': 'Cashback',
-    'pchematapril': 'PC HematApril',
-    'sopi': 'Shopee', 'sopie': 'Shopee',
-    'solaria': 'Solaria',
-    'neo': 'Bank Neo Commerce', 'bank neo': 'Bank Neo Commerce',
-    'tmrw': 'TMRW', 'tmrw by uob': 'TMRW',
-    'hero': 'Hero', 'hero supermarket': 'Hero',
-    'bsya': 'Bank Syariah',
-    'fortklass': 'Fortklass',
-    'g2g': 'G2G',
-    'burek': 'Burek',
-    'aice': 'Aice', 'a+i+c+e': 'Aice',
-    'point coffee': 'Point Coffee', 'poin coffee': 'Point Coffee',
-    'tukpo': 'Tukar Poin',
-    'svip': 'ShopeeFood',
-    'spud': 'SPUD',
-}

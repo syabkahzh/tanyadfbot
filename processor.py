@@ -22,8 +22,7 @@ _WORD_BOUNDARY_KEYWORDS = re.compile(
     r'\b(off|on|aman|work|bs|jp|mm)\b', re.IGNORECASE
 )
 _SOCIAL_FILLER = re.compile(
-    r'^((wkwk|haha|hehe|iya|noted|oke|ok|makasih|thanks|thx|mantap|gas|bos|guys|gais|bang|kak|siap|sip|lol|anjir|anjay|btw|oot|gws|semangat|ya allah|nangis|sedih|beneran|kah|'
-    r'ywwa|bau|goib|zonk|cuan|nt|jp|aman)[!.\s]*)+$',
+    r'^((wkwk|haha|hehe|iya|noted|oke|ok|makasih|thanks|thx|mantap|gas|bos|guys|gais|bang|kak|siap|sip|lol|anjir|anjay|btw|oot|gws|semangat|ya allah|nangis|sedih|beneran|kah)[!.\s]*)+$',
     re.IGNORECASE
 )
 _NON_PROMO = re.compile(
@@ -279,11 +278,12 @@ class GoogleClient(BaseAIClient):
 
 class OpenAICompatibleClient(BaseAIClient):
     """Generic client for OpenAI-compatible providers like Groq and GLM."""
-    def __init__(self, api_key: str, base_url: Optional[str] = None):
+    def __init__(self, api_key: str, base_url: Optional[str] = None, provider: str = "openai"):
         from openai import AsyncOpenAI
         if not api_key:
             logger.error(f"OpenAICompatibleClient initialized with EMPTY API KEY for {base_url}")
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self.provider = provider
 
     async def generate_content(self, model: str, contents: Any, config: dict[str, Any]) -> Any:
         # Map Google-style config to OpenAI-style
@@ -302,6 +302,11 @@ class OpenAICompatibleClient(BaseAIClient):
                     messages.append({"role": "user", "content": item})
         
         kwargs = {}
+        if self.provider == "groq" and any(m in model.lower() for m in ("qwen", "deepseek", "r1")):
+            # For Qwen/DeepSeek reasoning models on Groq, hide reasoning tokens in content
+            # "hidden" ensures it doesn't show up in 'content' but allows model to think.
+            kwargs["reasoning_format"] = "hidden"
+
         if response_schema:
             kwargs["response_format"] = {"type": "json_object"}
             schema_str = response_schema.model_json_schema()
@@ -319,11 +324,13 @@ class OpenAICompatibleClient(BaseAIClient):
         )
         
         text = res.choices[0].message.content
+        # CRITICAL: Always strip reasoning tags for Qwen/DeepSeek if they leak into content
+        if text:
+            text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+
         parsed = None
         if response_schema and text:
             try:
-                # CRITICAL FIX: Strip Qwen/DeepSeek reasoning tags before parsing
-                text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
                 clean_text = re.sub(r'^```json\s*|\s*```$', '', text.strip(), flags=re.MULTILINE)
                 import json
                 try:
@@ -503,7 +510,7 @@ class _ModelSlot:
 class GeminiProcessor:
     """Orchestrates AI analysis using the AI Army (multiple free providers)."""
 
-    
+    _AI_CALL_TIMEOUT_SEC = 30.0
 
     def __init__(self) -> None:
         """Initializes the AI Army fleet from configuration."""
@@ -526,7 +533,8 @@ class GeminiProcessor:
             elif p['provider'] in ('groq', 'glm'):
                 client = OpenAICompatibleClient(
                     api_key=api_key, 
-                    base_url=p.get('base_url')
+                    base_url=p.get('base_url'),
+                    provider=p['provider']
                 )
             elif p['provider'] == 'ollama':
                 client = OllamaClient()

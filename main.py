@@ -52,7 +52,7 @@ _queue_emergency_mode: bool  = False
 _in_progress_ids: dict[int, float] = {}
 _in_progress_lock: asyncio.Lock = asyncio.Lock()
 # CRITICAL FIX: Must exceed (max_attempts * timeout) + overhead = (3 * 60) + 20
-_IN_PROGRESS_MAX_AGE_SEC: float = 200.0
+_IN_PROGRESS_MAX_AGE_SEC: float = 130.0
 
 _alerted_hot_threads: dict[int, tuple[int, datetime]] = {}
 _triage_cycle_counter: int   = 0
@@ -280,7 +280,7 @@ async def processing_loop() -> None:
 
                         # Trigger verification poll for low-confidence extractions (< 0.70)
                         if p.confidence < 0.70 and bot:
-                            await bot.send_verification_poll(p, tg_link)
+                            await bot.send_verification_poll(p, tg_link, m['timestamp'])
                             continue
 
                         if confidence >= 45:
@@ -294,11 +294,8 @@ async def processing_loop() -> None:
                             if t is None or t.done():
                                 shared.set_buffer_flush_task(asyncio.create_task(_flush_alert_buffer(delay=0.8)))
                             
-                            # CRITICAL FIX: Truncate history to prevent RAM exhaustion
                             async with _recent_alerts_lock:
                                 _recent_alerts_history.append({"brand": brand_key, "summary": p.summary})
-                                if len(_recent_alerts_history) > 300:
-                                    del _recent_alerts_history[:-300]
                                     
                             recently_alerted_brands.add(brand_key.lower())
                         else:
@@ -513,18 +510,20 @@ async def processing_loop() -> None:
 
 # ── Runtime self-heal watchdogs ────────────────────────────────────────────────
 
-async def _alert_watchdog():
+async def health_monitor_job():
+    """Consolidated health check: alert recovery, task reconciliation, and heartbeat monitoring."""
+    # 1. Recover stuck alerts
     await db.recover_stuck_alerts()
 
-async def _active_ai_tasks_reconciler() -> None:
+    # 2. Reconcile active AI tasks counter
     live_tasks = sum(1 for t in _active_spawn_tasks if not t.done())
     counter = shared._active_ai_tasks
     if counter > live_tasks:
         drift = counter - live_tasks
-        logger.warning(f"⚠️ _active_ai_tasks counter drift: counter={counter} live_tasks={live_tasks} — reconciling down by {drift}")
+        logger.warning(f"⚠️ health_monitor: reconciling AI counter down by {drift} (counter={counter}, live={live_tasks})")
         shared._active_ai_tasks = max(0, shared._active_ai_tasks - drift)
 
-async def _in_progress_reaper() -> None:
+    # 3. Prune stale in-progress claims
     now_m = time.monotonic()
     evicted: list[int] = []
     async with _in_progress_lock:
@@ -532,23 +531,22 @@ async def _in_progress_reaper() -> None:
             if now_m - claim_ts > _IN_PROGRESS_MAX_AGE_SEC:
                 evicted.append(mid)
                 _in_progress_ids.pop(mid, None)
-    if evicted: logger.warning(f"⚠️ In-progress reaper freed {len(evicted)} stuck claims. Messages will be retried.")
+    if evicted: logger.warning(f"⚠️ health_monitor: freed {len(evicted)} stuck claims.")
+
+    # 4. Check processing_loop heartbeat
+    global _last_loop_alert_ts
+    last_tick = shared.get_loop_tick()
+    if last_tick:
+        age = time.monotonic() - last_tick
+        if age >= 90.0:
+            if time.monotonic() - _last_loop_alert_ts >= _LOOP_ALERT_COOLDOWN_SEC:
+                _last_loop_alert_ts = time.monotonic()
+                logger.error(f"💔 processing_loop heartbeat stale: {age:.0f}s ago")
+                try: await bot.alert_error("processing_loop_heartbeat", RuntimeError(f"processing_loop stalled: {age:.0f}s"))
+                except Exception: pass
 
 _last_loop_alert_ts: float = 0.0
 _LOOP_ALERT_COOLDOWN_SEC: float = 600.0
-
-async def _loop_heartbeat_watchdog() -> None:
-    global _last_loop_alert_ts
-    last_tick = shared.get_loop_tick()
-    if last_tick is None: return
-    age = time.monotonic() - last_tick
-    if age < 90.0: return
-    now_m = time.monotonic()
-    if now_m - _last_loop_alert_ts < _LOOP_ALERT_COOLDOWN_SEC: return
-    _last_loop_alert_ts = now_m
-    logger.error(f"💔 processing_loop heartbeat stale: last tick {age:.0f}s ago")
-    try: await bot.alert_error("processing_loop_heartbeat", RuntimeError(f"processing_loop stalled: no tick for {age:.0f}s"))
-    except Exception: pass
 
 _LISTENER_WATCHDOG_QUIET_SEC: float = 60.0
 _last_listener_reconnect_ts: float = 0.0
@@ -634,10 +632,7 @@ async def main() -> None:
     scheduler.add_job(jobs.confirmation_gate_job, "interval", minutes=1, id="confirm_gate", args=[db])
     scheduler.add_job(jobs.db_maintenance_job, "cron", hour="*/4", minute=5, id="db_maint", args=[db, bot])
     # scheduler.add_job(jobs.fasttext_retrain_job, "cron", hour="*/6", minute=15, id="ft_retrain", args=[db, bot], jitter=300)
-    scheduler.add_job(_alert_watchdog, "interval", minutes=1, id="alert_watchdog")
-    scheduler.add_job(_in_progress_reaper, "interval", minutes=1, id="in_progress_reaper")
-    scheduler.add_job(_active_ai_tasks_reconciler, "interval", minutes=1, id="ai_tasks_reconciler")
-    scheduler.add_job(_loop_heartbeat_watchdog, "interval", seconds=30, id="loop_heartbeat")
+    scheduler.add_job(health_monitor_job, "interval", minutes=1, id="health_monitor")
     scheduler.add_job(_listener_health_watchdog, "interval", seconds=30, id="listener_health")
     scheduler.add_job(jobs.time_reminder_job, "interval", minutes=1, id="time_reminder", args=[db, bot, WIB])
 
