@@ -210,14 +210,20 @@ class TelethonListener:
 
         if brand == "Unknown" and message_data.get('reply_to_msg_id'):
             try:
-                async with asyncio.timeout(0.5):   # BUG 4 FIX
-                    async with self.db.conn.execute(
-                        "SELECT text FROM messages WHERE tg_msg_id=? AND chat_id=?",
-                        (message_data['reply_to_msg_id'], chat_id)
-                    ) as cur:
-                        row = await cur.fetchone()
-                        if row:
-                            parent_text = row['text']
+                # RACE FIX: Try twice with a small delay to allow DB commit from _save_to_db task
+                for attempt in range(2):
+                    async with asyncio.timeout(0.5):
+                        async with self.db.conn.execute(
+                            "SELECT text FROM messages WHERE tg_msg_id=? AND chat_id=?",
+                            (message_data['reply_to_msg_id'], chat_id)
+                        ) as cur:
+                            row = await cur.fetchone()
+                            if row:
+                                parent_text = row['text']
+                                break
+                    if attempt == 0:
+                        await asyncio.sleep(0.2)
+                
                 brand = normalize_brand(_guess_brand(parent_text or text))
                 if brand != "Unknown":
                     try:

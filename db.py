@@ -140,6 +140,7 @@ class Database:
         """Initializes the Database instance."""
         self.db_path: str = Config.DB_PATH
         self.conn: aiosqlite.Connection | None = None
+        self.lock: asyncio.Lock = asyncio.Lock()
 
     async def ensure_connection(self) -> bool:
         """Checks connection health and attempts reconnection if dropped.
@@ -754,64 +755,63 @@ class Database:
         import json
         from datetime import datetime, timedelta, timezone
 
-        try:
-            # 1. Fetch all existing records for these brands in one go
-            brands = [item['brand'] for item in batch]
-            placeholders = ",".join("?" * len(brands))
-            
-            async with self.conn.execute(
-                f"SELECT id, brand, corroboration_texts FROM pending_confirmations WHERE brand IN ({placeholders})",
-                brands
-            ) as cur:
-                rows = await cur.fetchall()
-                existing_map = {row['brand']: row for row in rows}
-
-            # 2. Prepare data for updates and inserts
-            to_update = []
-            to_insert = []
-            
-            for item in batch:
-                brand = item['brand']
-                snippet = item['snippet']
+        async with self.lock:
+            try:
+                # 1. Fetch all existing records for these brands in one go
+                brands = [item['brand'] for item in batch]
+                placeholders = ",".join("?" * len(brands))
                 
-                if brand in existing_map:
-                    row = existing_map[brand]
-                    try:
-                        texts = json.loads(row['corroboration_texts'] or "[]")
-                    except:
-                        texts = []
-                    
-                    if snippet and snippet not in texts:
-                        texts.append(snippet)
-                    
-                    to_update.append((json.dumps(texts), row['id']))
-                else:
-                    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')
-                    texts = [snippet] if snippet else []
-                    to_insert.append((
-                        brand, item['p_data_json'], item['tg_link'], 
-                        item['timestamp'], item['confidence'], json.dumps(texts), expires_at
-                    ))
+                async with self.conn.execute(
+                    f"SELECT id, brand, corroboration_texts FROM pending_confirmations WHERE brand IN ({placeholders})",
+                    brands
+                ) as cur:
+                    rows = await cur.fetchall()
+                    existing_map = {row['brand']: row for row in rows}
 
-            # 3. Execute in transaction
-            if to_update:
-                await self.conn.executemany(
-                    "UPDATE pending_confirmations SET corroborations=corroborations+1, corroboration_texts=? WHERE id=?",
-                    to_update
-                )
-            
-            if to_insert:
-                await self.conn.executemany(
-                    "INSERT INTO pending_confirmations (brand, p_data_json, tg_link, timestamp, confidence, corroboration_texts, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    to_insert
-                )
-            await self.conn.commit()
-            
-            await self.conn.commit()
+                # 2. Prepare data for updates and inserts
+                to_update = []
+                to_insert = []
                 
-        except Exception as e:
-            logger.error(f"Error in bulk_upsert_pending_confirmations: {e}")
-            raise
+                for item in batch:
+                    brand = item['brand']
+                    snippet = item['snippet']
+                    
+                    if brand in existing_map:
+                        row = existing_map[brand]
+                        try:
+                            texts = json.loads(row['corroboration_texts'] or "[]")
+                        except:
+                            texts = []
+                        
+                        if snippet and snippet not in texts:
+                            texts.append(snippet)
+                        
+                        to_update.append((json.dumps(texts), row['id']))
+                    else:
+                        expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')
+                        texts = [snippet] if snippet else []
+                        to_insert.append((
+                            brand, item['p_data_json'], item['tg_link'], 
+                            item['timestamp'], item['confidence'], json.dumps(texts), expires_at
+                        ))
+
+                # 3. Execute in transaction
+                if to_update:
+                    await self.conn.executemany(
+                        "UPDATE pending_confirmations SET corroborations=corroborations+1, corroboration_texts=? WHERE id=?",
+                        to_update
+                    )
+                
+                if to_insert:
+                    await self.conn.executemany(
+                        "INSERT INTO pending_confirmations (brand, p_data_json, tg_link, timestamp, confidence, corroboration_texts, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        to_insert
+                    )
+                await self.conn.commit()
+                    
+            except Exception as e:
+                logger.error(f"Error in bulk_upsert_pending_confirmations: {e}")
+                raise
 
     async def get_last_msg_id(self, chat_id: int) -> int:
         """Retrieves the highest Telegram message ID seen in a chat.
@@ -876,56 +876,56 @@ class Database:
         """
         if not self.conn:
             return False
-            
-        try:
-            await self.conn.execute("BEGIN")
-            
-            # Prepare bulk data
-            promo_data = []
-            for source_id, p, link in promos_to_save:
-                clean_brand = normalize_brand(p.brand)
-                if clean_brand == "Unknown" and (not p.summary or len(p.summary) < 15):
-                    continue
-                status = p.status if p.status in ('active', 'expired', 'unknown') else 'unknown'
-                valid_until = (getattr(p, 'valid_until', '') or '').strip()
-                promo_data.append((source_id, p.summary, clean_brand, p.conditions or '',
-                                   link, status, valid_until))
 
-            if promo_data:
-                # Persist `valid_until` too so the time-reminder job can find
-                # promos with a time-of-day window (e.g. "s/d 12:00", "jam 14").
-                await self.conn.executemany("""
-                    INSERT INTO promos
-                        (source_msg_id, summary, brand, conditions, tg_link, status, via_fastpath, valid_until)
-                    VALUES (?, ?, ?, ?, ?, ?, 0, ?)
-                    ON CONFLICT(brand, summary) DO UPDATE SET
-                        status        = excluded.status,
-                        tg_link       = excluded.tg_link,
-                        source_msg_id = COALESCE(excluded.source_msg_id, source_msg_id),
-                        valid_until   = CASE
-                            WHEN excluded.valid_until != '' THEN excluded.valid_until
-                            ELSE valid_until
-                        END,
-                        created_at    = strftime('%Y-%m-%d %H:%M:%S+00:00','now')
-                """, promo_data)
+        async with self.lock:
+            try:
+                await self.conn.execute("BEGIN")
 
-            if processed_msg_ids:
-                pm_ids = list(processed_msg_ids)
-                if not all(isinstance(i, int) for i in pm_ids):
-                    logger.error(f"save_promos_batch received non-integer IDs: {pm_ids}")
-                else:
-                    ph = ','.join('?' * len(pm_ids))
-                    await self.conn.execute(
-                        f"UPDATE messages SET processed=1 WHERE id IN ({ph})",
-                        pm_ids
-                    )
-            await self.conn.commit()
-            return True
-        except Exception as e:
-            await self.conn.rollback()
-            logger.error(f"DB save_promos_batch error: {e}")
-            return False
+                # Prepare bulk data
+                promo_data = []
+                for source_id, p, link in promos_to_save:
+                    clean_brand = normalize_brand(p.brand)
+                    if clean_brand == "Unknown" and (not p.summary or len(p.summary) < 15):
+                        continue
+                    status = p.status if p.status in ('active', 'expired', 'unknown') else 'unknown'
+                    valid_until = (getattr(p, 'valid_until', '') or '').strip()
+                    promo_data.append((source_id, p.summary, clean_brand, p.conditions or '',
+                                       link, status, valid_until))
 
+                if promo_data:
+                    # Persist `valid_until` too so the time-reminder job can find
+                    # promos with a time-of-day window (e.g. "s/d 12:00", "jam 14").
+                    await self.conn.executemany("""
+                        INSERT INTO promos
+                            (source_msg_id, summary, brand, conditions, tg_link, status, via_fastpath, valid_until)
+                        VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+                        ON CONFLICT(brand, summary) DO UPDATE SET
+                            status        = excluded.status,
+                            tg_link       = excluded.tg_link,
+                            source_msg_id = COALESCE(excluded.source_msg_id, source_msg_id),
+                            valid_until   = CASE
+                                WHEN excluded.valid_until != '' THEN excluded.valid_until
+                                ELSE valid_until
+                            END,
+                            created_at    = strftime('%Y-%m-%d %H:%M:%S+00:00','now')
+                    """, promo_data)
+
+                if processed_msg_ids:
+                    pm_ids = list(processed_msg_ids)
+                    if not all(isinstance(i, int) for i in pm_ids):
+                        logger.error(f"save_promos_batch received non-integer IDs: {pm_ids}")
+                    else:
+                        ph = ','.join('?' * len(pm_ids))
+                        await self.conn.execute(
+                            f"UPDATE messages SET processed=1 WHERE id IN ({ph})",
+                            pm_ids
+                        )
+                await self.conn.commit()
+                return True
+            except Exception as e:
+                await self.conn.rollback()
+                logger.error(f"DB save_promos_batch error: {e}")
+                return False
     async def save_fastpath_promo(self, brand: str, summary: str, conditions: str,
                                   tg_link: str, status: str = 'active') -> None:
         """Persists a fast-path detected promo to the database.

@@ -445,24 +445,31 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
             return
 
         rows: list[Any] = []
+        skip_ids: list[int] = []
         for r in all_rows:
             caption = (r['text'] or '').strip()
             if not caption:
                 rows.append(r)
                 continue
             if _IMG_SKIP.search(caption) and not _IMG_KEEP.search(caption):
-                await db.conn.execute(
-                    "UPDATE messages SET image_processed=1 WHERE id=?", (r['id'],)
-                )
+                skip_ids.append(r['id'])
                 continue
             rows.append(r)
-        await db.conn.commit()
+            
+        if skip_ids:
+            ph = ','.join('?' * len(skip_ids))
+            await db.conn.execute(
+                f"UPDATE messages SET image_processed=1 WHERE id IN ({ph})", skip_ids
+            )
+            await db.conn.commit()
 
         if not rows:
             return
         rows = rows[:10]
         
         async def _process_single_image(r):
+            # Yield to other tasks
+            await asyncio.sleep(0.1)
             msg_id, tg_msg_id, chat_id, text, ts = (
                 r['id'], r['tg_msg_id'], r['chat_id'], r['text'], r['timestamp']
             )
@@ -524,10 +531,6 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                                 asyncio.create_task(_flush_alert_buffer(delay=0.5))
                             )
 
-                # Commit image_processed status immediately per item
-                await db.conn.execute(
-                    "UPDATE messages SET image_processed=1 WHERE id=?", (msg_id,)
-                )
                 return msg_id
             except Exception as e:
                 logger.error(f"image_processing_job item (msg {tg_msg_id}) error: {e}")
@@ -538,6 +541,10 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
         processed_ids = [res for res in results if res is not None]
         
         if processed_ids:
+            ph = ','.join('?' * len(processed_ids))
+            await db.conn.execute(
+                f"UPDATE messages SET image_processed=1 WHERE id IN ({ph})", processed_ids
+            )
             await db.conn.commit()
 
         logger.info(f"✅ [Job] Finished image_processing_job (processed {len(processed_ids)} imgs)")

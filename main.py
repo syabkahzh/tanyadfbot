@@ -641,6 +641,15 @@ async def main() -> None:
     except (KeyboardInterrupt, SystemExit): pass
     except Exception as e: logger.critical(f"🛑 Critical crash: {e}", exc_info=True)
     finally:
+        # Graceful shutdown: wait for active AI tasks to finish (max 10s)
+        if _active_spawn_tasks:
+            logger.info(f"⏳ Shutdown: waiting for {len(_active_spawn_tasks)} active AI tasks...")
+            try:
+                async with asyncio.timeout(10):
+                    await asyncio.gather(*_active_spawn_tasks, return_exceptions=True)
+            except asyncio.TimeoutError:
+                logger.warning("⚠️ Shutdown: some AI tasks timed out and will be abandoned.")
+        
         scheduler.shutdown()
         if bot.app.updater and bot.app.updater.running: await bot.app.updater.stop()
         await bot.app.stop()
