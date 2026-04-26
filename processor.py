@@ -221,11 +221,13 @@ class BaseAIClient:
 
 class WrappedResponse:
     """Compatibility wrapper for AI responses."""
-    def __init__(self, res=None, text=None, parsed=None, model_name=None):
+    def __init__(self, res=None, text=None, parsed=None, model_name=None, usage=None):
         self.res = res
         self._text = text
         self._parsed = parsed
         self.model_name = model_name
+        self.usage = usage  # Actual tokens (prompt, completion, total)
+
     @property
     def text(self):
         return self._text if self._text is not None else getattr(self.res, 'text', "")
@@ -264,7 +266,12 @@ class GoogleClient(BaseAIClient):
         res = await self.client.aio.models.generate_content(
             model=model, contents=contents, config=config
         )
-        return WrappedResponse(res)
+        usage = {
+            "prompt_tokens": getattr(res.usage_metadata, 'prompt_token_count', 0),
+            "completion_tokens": getattr(res.usage_metadata, 'candidates_token_count', 0),
+            "total_tokens": getattr(res.usage_metadata, 'total_token_count', 0),
+        }
+        return WrappedResponse(res, usage=usage)
 
 class OpenAICompatibleClient(BaseAIClient):
     """Generic client for OpenAI-compatible providers."""
@@ -302,6 +309,12 @@ class OpenAICompatibleClient(BaseAIClient):
         text = res.choices[0].message.content
         if text: text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
 
+        usage = {
+            "prompt_tokens": getattr(res.usage, 'prompt_tokens', 0),
+            "completion_tokens": getattr(res.usage, 'completion_tokens', 0),
+            "total_tokens": getattr(res.usage, 'total_tokens', 0),
+        }
+
         parsed = None
         if response_schema and text:
             try:
@@ -330,7 +343,7 @@ class OpenAICompatibleClient(BaseAIClient):
             except Exception as e:
                 logger.warning(f"AI client failed to parse JSON: {e}")
         
-        return WrappedResponse(res, text=text, parsed=parsed)
+        return WrappedResponse(res, text=text, parsed=parsed, usage=usage)
 
 class OllamaClient(BaseAIClient):
     """Client for Ollama models."""
@@ -458,6 +471,34 @@ class _ModelSlot:
         if self._daily_tokens:
             self._daily_tokens.pop()
 
+    def update_actual_usage(self, estimated: int, actual: int) -> None:
+        """Corrects the token bucket after a successful call with real usage data."""
+        if estimated == actual or actual <= 0:
+            return
+            
+        diff = actual - estimated
+        # We only correct the tokens, not the call counts.
+        # Find the entry and update it, or just add the diff to the current buckets.
+        # Simplest way: append a 'correction' entry.
+        now = time.monotonic()
+        self._tokens.append((now, diff))
+        if self.tpd_limit > 0:
+            self._daily_tokens.append((now, diff))
+        
+        logger.debug(f"📊 [{self.name}] Token Correction: Estimated {estimated} -> Actual {actual} (Diff: {diff})")
+
+    def saturate_locally(self, used: int, limit: int) -> None:
+        """Artificially fills the local bucket based on authoritative API data."""
+        if limit <= 0: return
+        
+        now = time.monotonic()
+        current_local = sum(t[1] for t in self._daily_tokens)
+        diff = used - current_local
+        
+        if diff > 0:
+            self._daily_tokens.append((now, diff))
+            logger.warning(f"🎯 [{self.name}] Syncing with API: Added {diff} tokens to local tracker. (API Used: {used}/{limit})")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -479,7 +520,7 @@ class GeminiProcessor:
             api_key = p.get('api_key')
             
             if p['provider'] != 'ollama' and not api_key:
-                logger.warning(f"Skipping unit {p['name']}: {p['api_key_env']} is not set.")
+                logger.warning(f"Skipping unit {p['name']}: {p.get('api_key_env', 'API_KEY')} is not set.")
                 continue
 
             if p['provider'] == 'google':
@@ -603,14 +644,14 @@ class GeminiProcessor:
         return best_name
 
     def _estimate_tokens(self, content: Any) -> int:
-        """Conservative token estimation (~3 chars per token for Indonesian)."""
+        """Conservative token estimation (~4 chars per token for Indonesian)."""
         # Base overhead for system prompt and generated response
-        base_overhead = 1000
+        base_overhead = 300
 
         def _count(obj):
-            if isinstance(obj, str): return len(obj) // 3
+            if isinstance(obj, str): return len(obj) // 4
             if isinstance(obj, list): return sum(_count(x) for x in obj)
-            return len(str(obj)) // 3
+            return len(str(obj)) // 4
 
         return max(1, _count(content) + base_overhead)
 
@@ -620,11 +661,11 @@ class GeminiProcessor:
         """Executes an AI call with automatic cross-provider fallback."""
         if tried is None: tried = []
         tried.append(slot_name)
-        
+
         slot = self._slots[slot_name]
+        estimated_tokens = self._estimate_tokens(contents)
         try:
             logger.info(f"🛰️ [AI] Requesting {slot.model_id} ({slot.provider}) | Attempt {attempt}...")
-            
             response = await asyncio.wait_for(
                 slot.client.generate_content(
                     model=slot.model_id,
@@ -638,38 +679,60 @@ class GeminiProcessor:
             if response is None:
                 raise Exception("Provider returned empty response")
                 
-            response.model_name = slot_name 
+            response.model_name = slot_name
+
+            # Correct token counts with actual data
+            actual_tokens = response.usage.get("total_tokens", 0) if response.usage else 0
+            if actual_tokens > 0:
+                slot.update_actual_usage(estimated_tokens, actual_tokens)
+
             return response
 
         except Exception as e:
             err_str = str(e).lower()
             logger.warning(f"🔄 AI ({slot.model_id}) Failure | Attempt {attempt} | {type(e).__name__}: {repr(e)}")
-            slot.release_last() 
+            slot.release_last()
 
             # Dynamic 429 Rate Limit Handling
             is_rate_limit = "429" in err_str or "rate limit" in err_str
             if is_rate_limit:
-                sleep_sec = 60.0 
+                sleep_sec = 60.0
+
+                # ADAPTIVE SYNC: Parse "Used X, Limit Y" from Groq error message
+                # Example: "Tokens per day (TPD): Limit 500000, Used 498659"
+                usage_match = re.search(r'limit (\d+), used (\d+)', err_str)
+                if usage_match:
+                    limit_val = int(usage_match.group(1))
+                    used_val  = int(usage_match.group(2))
+                    slot.saturate_locally(used_val, limit_val)
+
                 wait_match = re.search(r'try again in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)', err_str)
                 if wait_match:
                     h = int(wait_match.group(1) or 0)
                     m = int(wait_match.group(2) or 0)
                     s = float(wait_match.group(3) or 0)
-                    sleep_sec = (h * 3600) + (m * 60) + s + 1.0 
+                    sleep_sec = (h * 3600) + (m * 60) + s + 1.0
                 elif "per day" in err_str or "tpd" in err_str or "rpd" in err_str:
                     sleep_sec = 3600 * 4 # Back off for 4 hours on daily limit
-                    
+
                 logger.warning(f"⏳ [{slot.name}] Rate Limited. Sleeping {sleep_sec:.1f}s.")
                 slot.exhausted_until = time.monotonic() + sleep_sec
-
             if attempt < max_attempts:
                 is_vision = False
                 if isinstance(contents, list):
                     is_vision = any(hasattr(item, 'data') or (isinstance(item, dict) and 'image' in str(item).lower()) for item in contents)
-                
-                provider_filter = "google" if is_vision else None
-                
+
+                # Pick provider with vision capability if needed
+                provider_filter = None
+                if is_vision:
+                    # Find any slot with vision capability that isn't excluded
+                    vision_slots = [n for n, s in self._slots.items() if s.capabilities.get("vision") and n not in tried]
+                    if not vision_slots:
+                        logger.error("No alternative vision models available.")
+                        return None
+
                 # Cross-provider ban ONLY on severe server errors (50x) or Timeouts.
+
                 # Do NOT ban the whole provider for a 429 (rate limit) or 400 (bad request).
                 exclude_list = list(tried)
                 is_server_death = isinstance(e, (asyncio.TimeoutError, TimeoutError)) or "timeout" in err_str or any(s in err_str for s in ["500", "502", "503", "504", "408"])

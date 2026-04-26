@@ -24,19 +24,18 @@
         }
     },
     {
-        "name": "groq-qwen-32b",
+        "name": "groq-llama-70b",
         "provider": "groq",
-        "model_id": "qwen/qwen3-32b",
+        "model_id": "llama-3.3-70b-versatile",
         "api_key_env": "GROQ_API_KEY",
-        "rpm": 60,
+        "rpm": 30,
         "rpd": 1000,
-        "tpm": 6000,
-        "tpd": 500000,
+        "tpm": 12000,
+        "tpd": 100000,
         "priority": 2,
         "base_url": "https://api.groq.com/openai/v1",
         "capabilities": {
-            "native_json": true,
-            "reasoning": "hidden"
+            "native_json": true
         }
     },
     {
@@ -46,8 +45,8 @@
         "api_key_env": "GROQ_API_KEY",
         "rpm": 30,
         "rpd": 1000,
-        "tpm": 6000,
-        "tpd": 100000,
+        "tpm": 8000,
+        "tpd": 200000,
         "priority": 2,
         "base_url": "https://api.groq.com/openai/v1",
         "capabilities": {
@@ -55,14 +54,14 @@
         }
     },
     {
-        "name": "groq-llama-70b",
+        "name": "groq-qwen-32b",
         "provider": "groq",
-        "model_id": "llama-3.3-70b-versatile",
+        "model_id": "qwen/qwen3-32b",
         "api_key_env": "GROQ_API_KEY",
-        "rpm": 30,
+        "rpm": 60,
         "rpd": 1000,
-        "tpm": 12000,
-        "tpd": 100000,
+        "tpm": 6000,
+        "tpd": 500000,
         "priority": 3,
         "base_url": "https://api.groq.com/openai/v1",
         "capabilities": {
@@ -70,18 +69,19 @@
         }
     },
     {
-        "name": "groq-llama-8b",
+        "name": "groq-llama-scout",
         "provider": "groq",
-        "model_id": "llama-3.1-8b-instant",
+        "model_id": "meta-llama/llama-4-scout-17b-16e-instruct",
         "api_key_env": "GROQ_API_KEY",
         "rpm": 30,
-        "rpd": 14400,
-        "tpm": 6000,
+        "rpd": 1000,
+        "tpm": 30000,
         "tpd": 500000,
         "priority": 4,
         "base_url": "https://api.groq.com/openai/v1",
         "capabilities": {
-            "native_json": true
+            "native_json": true,
+            "vision": true
         }
     }
 ]
