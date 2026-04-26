@@ -398,6 +398,22 @@ async def halfhour_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
 # Image processing
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ⚡ Bolt: Performance Optimization
+# Moving these pre-compiled regular expressions to the module level prevents
+# the Python interpreter from attempting to recompile them (or look them up
+# in its internal cache) every time `image_processing_job` runs. This saves
+# micro-seconds per execution and reduces overhead on the event loop.
+_IMG_SKIP = re.compile(
+    r'\b(setting|pengaturan|config|tutorial|cara|gimana|help|tolong|'
+    r'oot|random|selfie|meme|lucu|haha|wkwk|ini kak|kak ini)\b',
+    re.IGNORECASE
+)
+_IMG_KEEP = re.compile(
+    r'(\b(promo|diskon|cashback|voucher|gratis|murah|hemat|sale|deal|'
+    r'sfood|gfood|grab|shopee|gojek|aman|jp|work|flash|limit)\b|%|rp\s?\d)',
+    re.IGNORECASE
+)
+
 async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: Any) -> None:
     """Processes unhandled photo messages with the vision model."""
     logger.info("⏰ [Job] Starting image_processing_job...")
@@ -414,17 +430,6 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
             all_rows = await cur.fetchall()
         if not all_rows:
             return
-
-        _IMG_SKIP = re.compile(
-            r'\b(setting|pengaturan|config|tutorial|cara|gimana|help|tolong|'
-            r'oot|random|selfie|meme|lucu|haha|wkwk|ini kak|kak ini)\b',
-            re.IGNORECASE
-        )
-        _IMG_KEEP = re.compile(
-            r'(\b(promo|diskon|cashback|voucher|gratis|murah|hemat|sale|deal|'
-            r'sfood|gfood|grab|shopee|gojek|aman|jp|work|flash|limit)\b|%|rp\s?\d)',
-            re.IGNORECASE
-        )
 
         rows: list[Any] = []
         for r in all_rows:
