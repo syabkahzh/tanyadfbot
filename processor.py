@@ -298,15 +298,37 @@ class OpenAICompatibleClient(BaseAIClient):
         if reasoning_mode:
             kwargs["extra_body"] = {"reasoning_format": reasoning_mode}
 
-        if response_schema and capabilities.get("native_json", True):
-            kwargs["response_format"] = {"type": "json_object"}
-            schema_str = response_schema.model_json_schema()
-            messages[0]["content"] += (
-                f"\n\nYou MUST respond with ONLY valid JSON. No preamble.\nSchema:\n{schema_str}"
-            )
+        if response_schema:
+            if capabilities.get("native_tools", False):
+                # Native Tool Calling (Function Calling)
+                schema_dict = response_schema.model_json_schema()
+                tool_name = "extract_data"
+                kwargs["tools"] = [{
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "description": f"Extract structured {response_schema.__name__} data",
+                        "parameters": schema_dict
+                    }
+                }]
+                kwargs["tool_choice"] = {"type": "function", "function": {"name": tool_name}}
+            elif capabilities.get("native_json", True):
+                # Fallback to JSON object mode
+                kwargs["response_format"] = {"type": "json_object"}
+                schema_str = response_schema.model_json_schema()
+                messages[0]["content"] += (
+                    f"\n\nYou MUST respond with ONLY valid JSON. No preamble.\nSchema:\n{schema_str}"
+                )
 
         res = await self.client.chat.completions.create(model=model, messages=messages, **kwargs)
-        text = res.choices[0].message.content
+        message = res.choices[0].message
+        
+        text = None
+        if message.tool_calls:
+            text = message.tool_calls[0].function.arguments
+        else:
+            text = message.content
+
         if text: text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
 
         usage = {

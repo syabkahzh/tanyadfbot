@@ -35,7 +35,7 @@
         "priority": 2,
         "base_url": "https://api.groq.com/openai/v1",
         "capabilities": {
-            "native_json": true
+            "native_tools": true
         }
     },
     {
@@ -50,7 +50,7 @@
         "priority": 2,
         "base_url": "https://api.groq.com/openai/v1",
         "capabilities": {
-            "native_json": true
+            "native_tools": true
         }
     },
     {
@@ -65,7 +65,7 @@
         "priority": 3,
         "base_url": "https://api.groq.com/openai/v1",
         "capabilities": {
-            "native_json": true
+            "native_tools": true
         }
     },
     {
@@ -80,7 +80,7 @@
         "priority": 4,
         "base_url": "https://api.groq.com/openai/v1",
         "capabilities": {
-            "native_json": true,
+            "native_tools": true,
             "vision": true
         }
     }
