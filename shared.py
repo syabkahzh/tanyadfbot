@@ -3,6 +3,7 @@ import difflib
 import logging
 import re
 import time as _time_mod
+import time as _time
 import uuid
 import os
 from collections import OrderedDict, deque
@@ -251,7 +252,6 @@ _last_loop_tick: float | None = None
 def set_loop_tick() -> None:
     """Record that the processing_loop just ticked (called at top of each iter)."""
     global _last_loop_tick
-    import time as _time
     _last_loop_tick = _time.monotonic()
 
 def get_loop_tick() -> float | None:
@@ -268,7 +268,6 @@ _last_batch_spawn_ts: float | None = None
 
 def mark_batch_spawned() -> None:
     global _last_batch_spawn_ts
-    import time as _time
     _last_batch_spawn_ts = _time.monotonic()
 
 # Wall-clock timestamp of the last message we ingested from the target group.
@@ -279,11 +278,9 @@ _last_message_ingest_ts: float | None = None
 
 def mark_message_ingested() -> None:
     global _last_message_ingest_ts
-    import time as _time
     _last_message_ingest_ts = _time.monotonic()
 
 def seconds_since_last_ingest() -> float | None:
-    import time as _time
     if _last_message_ingest_ts is None:
         return None
     return _time.monotonic() - _last_message_ingest_ts
@@ -308,7 +305,6 @@ def record_ai_outcome(success: bool) -> None:
     the breaker for _AI_CIRCUIT_COOLDOWN_SEC.
     """
     global _ai_consecutive_failures, _ai_circuit_open_until
-    import time as _time
     if success:
         _ai_consecutive_failures = 0
         _ai_circuit_open_until = 0.0
@@ -319,7 +315,6 @@ def record_ai_outcome(success: bool) -> None:
 
 def ai_circuit_open_remaining() -> float:
     """Seconds remaining in the current AI pause, or 0 if AI is available."""
-    import time as _time
     remaining = _ai_circuit_open_until - _time.monotonic()
     return remaining if remaining > 0 else 0.0
 
