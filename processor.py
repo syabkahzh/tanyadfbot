@@ -74,6 +74,7 @@ _META_SUMMARY_PATTERN = re.compile(
     r'meminta konfirmasi|menginformasikan bahwa)',
     re.IGNORECASE
 )
+_WORDS_PATTERN = re.compile(r'\w+')
 
 # ── Response schemas ──────────────────────────────────────────────────────────
 
@@ -1037,6 +1038,9 @@ class GeminiProcessor:
         }
         recent_brands_set = {normalize_brand(r['brand']).lower() for r in history_tail}
 
+        # ⚡ Bolt: Pre-calculate words for history items to prevent O(N*M) regex executions
+        history_words_cache: dict[str, set[str]] = {}
+
         unique: list[PromoExtraction] = []
         intra_batch_keys: set[str] = set()
         intra_batch_by_brand: dict[str, list[set[str]]] = {}
@@ -1048,13 +1052,16 @@ class GeminiProcessor:
             if key in recent_keys or key in intra_batch_keys:
                 continue
 
-            p_words = set(re.findall(r'\w+', p.summary.lower())[:8])
+            p_words = set(_WORDS_PATTERN.findall(p.summary.lower())[:8])
 
             if brand_key in recent_brands_set and brand_key != 'unknown' and p.status == 'active':
                 is_dupe = False
                 for r in reversed(history_tail):
                     if normalize_brand(r['brand']).lower() == brand_key:
-                        r_words = set(re.findall(r'\w+', r['summary'].lower())[:8])
+                        r_summary = r['summary'].lower()
+                        if r_summary not in history_words_cache:
+                            history_words_cache[r_summary] = set(_WORDS_PATTERN.findall(r_summary)[:8])
+                        r_words = history_words_cache[r_summary]
                         if len(p_words & r_words) >= 2:
                             is_dupe = True
                             break
@@ -1223,7 +1230,7 @@ class GeminiProcessor:
         unique_trends: list[TrendItem] = []
         if response and response.parsed:
             for t in response.parsed.trends:
-                words = set(re.findall(r'\w+', t.topic.lower()))
+                words = set(_WORDS_PATTERN.findall(t.topic.lower()))
                 if any(len(words & s) >= 3 for s in seen_topics):
                     continue
                 t.model_name = target
