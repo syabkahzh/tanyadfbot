@@ -346,7 +346,7 @@ class TelegramBot:
             limit = 10
             if context.args:
                 try: limit = int(context.args[0])
-                except: pass
+                except ValueError: pass
                 
             logs = await self.db.get_recent_logs(limit=limit)
             if not logs:
