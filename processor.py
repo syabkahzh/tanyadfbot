@@ -173,6 +173,14 @@ _WEAK_KEYWORDS: set[str] = {
 
 _JUNK_SUMMARIES: set[str] = {'summary','none','n/a','-','tidak ada','tidak ditemukan'}
 
+# ── Pre-compiled optimized keyword patterns ───────────────────────────────────
+_STRONG_PATTERN = re.compile('|'.join(map(re.escape, _STRONG_KEYWORDS)))
+_WEAK_PATTERN = re.compile('|'.join(map(re.escape, _WEAK_KEYWORDS)))
+_QUESTION_WORDS = frozenset({'ga', 'gak', 'nggak', 'apa', 'gimana', 'berapa', 'kapan', 'dimana', 'kenapa', 'ada', 'masih', 'ya'})
+_QUESTION_AMAN_PATTERN = re.compile(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b')
+_QUESTION_AMAN_NGGA_PATTERN = re.compile(r'\b(aman|work|on)\s+(ngga)\b')
+
+
 
 # ── AI Clients ────────────────────────────────────────────────────────────────
 
@@ -894,29 +902,28 @@ class GeminiProcessor:
         words = t.split()
         score = 0
 
-        if any(kw in t for kw in _STRONG_KEYWORDS):
+        has_strong = bool(_STRONG_PATTERN.search(t))
+        if has_strong:
             score += 10
-        if any(kw in t for kw in _WEAK_KEYWORDS):
+        if _WEAK_PATTERN.search(t):
             score += 3
         if _WORD_BOUNDARY_KEYWORDS.search(t):
             score += 5
-        if bool(_PROMO.search(t)):
+        if _PROMO.search(t):
             score += 2
-
-        question_words = {'ga', 'gak', 'nggak', 'apa', 'gimana', 'berapa', 'kapan', 'dimana', 'kenapa', 'ada', 'masih', 'ya'}
 
         if '?' in t:
             score -= 5
-        if re.search(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b', t):
+        if _QUESTION_AMAN_PATTERN.search(t):
             score -= 8
-        if t.endswith('?') and words and words[0] in question_words:
+        if t.endswith('?') and words and words[0] in _QUESTION_WORDS:
             score -= 5
-        if any(w in question_words for w in words) and ('aman' in t or 'work' in t or 'on' in t):
+        if any(w in _QUESTION_WORDS for w in words) and ('aman' in t or 'work' in t or 'on' in t):
             score -= 8
-        if re.search(r'\b(aman|work|on)\s+(ngga)\b', t):
+        if _QUESTION_AMAN_NGGA_PATTERN.search(t):
             score -= 15
 
-        if any(kw in t for kw in _STRONG_KEYWORDS) and score >= 0:
+        if has_strong and score >= 0:
             return True
         if len(words) <= 4 and score < 2:
             return False
