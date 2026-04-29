@@ -7,3 +7,7 @@
 **Learning:** Pre-compiling RegEx locally within a frequently called asynchronous job function forces the Python interpreter to look up or recompile the regular expression repeatedly, causing unnecessary overhead. While Python caches RegEx compilations, relying on module-level constants circumvents the lookup entirely.
 
 **Action:** Consistently elevate pre-compiled `re.compile` patterns to the module level instead of defining them locally within functions, especially inside asynchronous loops or frequent jobs.
+
+## 2025-03-09 - [Pre-processing arrays instead of O(N^2)]
+**Learning:** Python's `re` module caches recent regex patterns internally, so globalizing pre-compiled `re.compile()` variable patterns in a small codebase gives essentially 0 speedup. True performance impact can be gained by attacking algorithmic complexity (e.g. nested loops inside `processor.py` doing regex and function call operations).
+**Action:** Always check the internal workings of python standard libraries before doing surface-level optimizations. Look for actual $O(N \times M)$ bottlenecks to solve rather than just refactoring $O(1)$ constant operations.

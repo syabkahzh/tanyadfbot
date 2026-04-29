@@ -1041,6 +1041,15 @@ class GeminiProcessor:
         intra_batch_keys: set[str] = set()
         intra_batch_by_brand: dict[str, list[set[str]]] = {}
 
+        # Pre-process history_tail to avoid O(N^2) redundant regex calls
+        # We only care about entries that are in recent_brands_set.
+        processed_history: dict[str, list[set[str]]] = {}
+        for r in reversed(history_tail):
+            b_norm = normalize_brand(r['brand']).lower()
+            if b_norm in recent_brands_set and b_norm != 'unknown':
+                r_words = set(re.findall(r'\w+', r['summary'].lower())[:8])
+                processed_history.setdefault(b_norm, []).append(r_words)
+
         for p in new_promos:
             brand_key = normalize_brand(p.brand).lower()
             key = f"{brand_key}:{p.summary[:35].lower()}"
@@ -1052,12 +1061,10 @@ class GeminiProcessor:
 
             if brand_key in recent_brands_set and brand_key != 'unknown' and p.status == 'active':
                 is_dupe = False
-                for r in reversed(history_tail):
-                    if normalize_brand(r['brand']).lower() == brand_key:
-                        r_words = set(re.findall(r'\w+', r['summary'].lower())[:8])
-                        if len(p_words & r_words) >= 2:
-                            is_dupe = True
-                            break
+                for r_words in processed_history.get(brand_key, []):
+                    if len(p_words & r_words) >= 2:
+                        is_dupe = True
+                        break
                 if is_dupe:
                     continue
 
