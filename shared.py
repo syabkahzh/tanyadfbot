@@ -10,15 +10,19 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import fasttext
+
 # NumPy 2.0+ compatibility fix for FastText
 try:
     import numpy as np
+
     _orig_array = np.array
+
     def _fixed_array(obj, *args, **kwargs):
         if kwargs.get("copy") is False:
             kwargs.pop("copy")
             return np.asarray(obj, *args, **kwargs)
         return _orig_array(obj, *args, **kwargs)
+
     np.array = _fixed_array
 except ImportError:
     pass
@@ -37,13 +41,16 @@ bot: Any = None
 # ── Local NLP "Traffic Cop" ──────────────────────────────────────────────────
 _ft_model = None
 
+
 async def load_classifier(model_path: str = "model.ftz") -> bool:
     """Load FastText model at startup. Non-blocking."""
     global _ft_model
     if not os.path.exists(model_path):
-        logger.warning(f"⚠️  No {model_path} found — Tier 2 classifier disabled (regex only)")
+        logger.warning(
+            f"⚠️  No {model_path} found — Tier 2 classifier disabled (regex only)"
+        )
         return False
-        
+
     try:
         # Load in thread — fasttext.load_model is synchronous and slow (~200ms)
         _ft_model = await asyncio.to_thread(fasttext.load_model, model_path)
@@ -52,6 +59,7 @@ async def load_classifier(model_path: str = "model.ftz") -> bool:
     except Exception as e:
         logger.error(f"❌ Failed to load FastText model: {e}")
         return False
+
 
 async def classify(text: str) -> tuple[str, float]:
     """
@@ -63,6 +71,7 @@ async def classify(text: str) -> tuple[str, float]:
     res = await classify_batch([text])
     return res[0]
 
+
 async def classify_batch(texts: list[str]) -> list[tuple[str, float]]:
     """
     Classify a batch of texts efficiently using native FastText batch prediction.
@@ -71,28 +80,34 @@ async def classify_batch(texts: list[str]) -> list[tuple[str, float]]:
         List of (label, confidence) tuples.
     """
     if _ft_model is None:
-        logger.warning("FastText model not loaded — traffic cop disabled, all messages will pass through")
+        logger.warning(
+            "FastText model not loaded — traffic cop disabled, all messages will pass through"
+        )
         return [("__label__UNKNOWN", 0.0)] * len(texts)
     if not texts:
         return []
-        
+
     try:
         # FastText.predict handles lists natively and is MUCH faster than looping
         # Clean and truncate each text for consistency
         cleaned = [t.lower().replace("\n", " ")[:512] for t in texts]
-        
-        labels_list, probs_list = await asyncio.to_thread(_ft_model.predict, cleaned, k=1)
-        
+
+        labels_list, probs_list = await asyncio.to_thread(
+            _ft_model.predict, cleaned, k=1
+        )
+
         # FastText returns [ [l1], [l2] ... ], [ [p1], [p2] ... ]
         return [(l[0], float(p[0])) for l, p in zip(labels_list, probs_list)]
     except Exception as exc:
         logger.warning(f"FastText batch inference error: {exc}")
         return [("__label__UNKNOWN", 0.0)] * len(texts)
 
+
 async def classify_one(text: str) -> tuple[str, float]:
     """Predicts label for a single string."""
     results = await classify_batch([text])
     return results[0]
+
 
 def _parse_ts(ts: str | datetime | Any) -> datetime:
     """Always returns a UTC-aware datetime from various timestamp formats.
@@ -105,14 +120,15 @@ def _parse_ts(ts: str | datetime | Any) -> datetime:
     """
     if isinstance(ts, datetime):
         return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-    
-    s = str(ts).replace('Z', '+00:00')
+
+    s = str(ts).replace("Z", "+00:00")
     try:
         dt = datetime.fromisoformat(s)
         return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     except (ValueError, TypeError):
         logger.warning(f"_parse_ts: could not parse {ts!r}, defaulting to epoch")
         return datetime.fromtimestamp(0, tz=timezone.utc)
+
 
 # Global state that needs to be shared across main and listener
 _buffer_flush_task: asyncio.Task[None] | None = None
@@ -157,6 +173,7 @@ _listener_reconnecting: bool = False
 # Indonesian deal-hunter chats actually flow (short bursts about one brand,
 # then a topic switch).
 
+
 class TemporalBrandTracker:
     """TTL-based conversational brand context cache."""
 
@@ -188,6 +205,7 @@ class TemporalBrandTracker:
                 return "Unknown"
             return brand
 
+
 context_tracker: TemporalBrandTracker = TemporalBrandTracker()
 
 
@@ -195,7 +213,7 @@ context_tracker: TemporalBrandTracker = TemporalBrandTracker()
 # "aman kak rutenya", "aman perjalanannya" should NOT trigger fast-path.
 
 TRANSIT_NOISE_PATTERN = re.compile(
-    r'\b(rute|jalan|macet|kereta|stasiun|paket|kirim|kurir|perjalanan|nyampe)(nya|an)?\b',
+    r"\b(rute|jalan|macet|kereta|stasiun|paket|kirim|kurir|perjalanan|nyampe)(nya|an)?\b",
     re.IGNORECASE,
 )
 
@@ -210,9 +228,10 @@ TRANSIT_NOISE_PATTERN = re.compile(
 _fuzzy_dedup_queue: list[dict[str, Any]] = []
 _fuzzy_dedup_lock = asyncio.Lock()
 
-async def is_fuzzy_duplicate(brand: str, summary: str,
-                              window_minutes: int = 15,
-                              threshold: float = 0.6) -> bool:
+
+async def is_fuzzy_duplicate(
+    brand: str, summary: str, window_minutes: int = 15, threshold: float = 0.6
+) -> bool:
     """Return True if a near-identical alert was seen within the window."""
     global _fuzzy_dedup_queue
     now = datetime.now(timezone.utc)
@@ -220,42 +239,49 @@ async def is_fuzzy_duplicate(brand: str, summary: str,
 
     async with _fuzzy_dedup_lock:
         # Prune expired entries
-        _fuzzy_dedup_queue = [
-            a for a in _fuzzy_dedup_queue if a['time'] >= cutoff
-        ]
+        _fuzzy_dedup_queue = [a for a in _fuzzy_dedup_queue if a["time"] >= cutoff]
 
         norm_brand = normalize_brand(brand).lower()
         norm_summary = summary.lower()
 
         for alert in _fuzzy_dedup_queue:
-            if alert['brand'] == norm_brand:
-                # Offload CPU-bound SequenceMatcher to thread to avoid blocking event loop
-                similarity = await asyncio.to_thread(
-                    difflib.SequenceMatcher(None, alert['summary'], norm_summary).ratio
-                )
+            if alert["brand"] == norm_brand:
+                # Execute SequenceMatcher inline instead of using asyncio.to_thread.
+                # For short strings (like telegram summaries), the thread-switching overhead
+                # (~0.5ms) is significantly larger than inline execution (~0.05ms).
+                similarity = difflib.SequenceMatcher(
+                    None, alert["summary"], norm_summary
+                ).ratio()
                 if similarity > threshold:
                     return True
 
-        _fuzzy_dedup_queue.append({
-            'brand': norm_brand,
-            'summary': norm_summary,
-            'time': now,
-        })
+        _fuzzy_dedup_queue.append(
+            {
+                "brand": norm_brand,
+                "summary": norm_summary,
+                "time": now,
+            }
+        )
         return False
+
 
 # Monotonic timestamp of the last processing_loop iteration. A dedicated
 # watchdog (main._loop_heartbeat_watchdog) alerts the owner if this goes
 # stale for >90s — i.e. the loop is blocked.
 _last_loop_tick: float | None = None
 
+
 def set_loop_tick() -> None:
     """Record that the processing_loop just ticked (called at top of each iter)."""
     global _last_loop_tick
     import time as _time
+
     _last_loop_tick = _time.monotonic()
+
 
 def get_loop_tick() -> float | None:
     return _last_loop_tick
+
 
 # Max age (seconds) of the oldest row we observed in the ancient tier on the
 # last batch fetch. Used by /diag to surface tail-latency risk.
@@ -266,10 +292,13 @@ _last_observed_ancient_age: float = 0.0
 # when the loop is still ticking (e.g. queue empty or semaphore saturated).
 _last_batch_spawn_ts: float | None = None
 
+
 def mark_batch_spawned() -> None:
     global _last_batch_spawn_ts
     import time as _time
+
     _last_batch_spawn_ts = _time.monotonic()
+
 
 # Wall-clock timestamp of the last message we ingested from the target group.
 # Primary signal for "is Telethon actually delivering updates" — much more
@@ -277,13 +306,17 @@ def mark_batch_spawned() -> None:
 # during MTProto reconnects even while messages are actively flowing.
 _last_message_ingest_ts: float | None = None
 
+
 def mark_message_ingested() -> None:
     global _last_message_ingest_ts
     import time as _time
+
     _last_message_ingest_ts = _time.monotonic()
+
 
 def seconds_since_last_ingest() -> float | None:
     import time as _time
+
     if _last_message_ingest_ts is None:
         return None
     return _time.monotonic() - _last_message_ingest_ts
@@ -298,7 +331,8 @@ def seconds_since_last_ingest() -> float | None:
 # drain through fast-path / poison-retirement rather than block behind
 # doomed batches.
 _ai_consecutive_failures: int = 0
-_ai_circuit_open_until: float = 0.0   # monotonic; AI paused until this ts
+_ai_circuit_open_until: float = 0.0  # monotonic; AI paused until this ts
+
 
 def record_ai_outcome(success: bool) -> None:
     """Called from process_one_batch after every AI call.
@@ -309,6 +343,7 @@ def record_ai_outcome(success: bool) -> None:
     """
     global _ai_consecutive_failures, _ai_circuit_open_until
     import time as _time
+
     if success:
         _ai_consecutive_failures = 0
         _ai_circuit_open_until = 0.0
@@ -317,11 +352,14 @@ def record_ai_outcome(success: bool) -> None:
     if _ai_consecutive_failures >= _AI_CIRCUIT_FAILURE_THRESHOLD:
         _ai_circuit_open_until = _time.monotonic() + _AI_CIRCUIT_COOLDOWN_SEC
 
+
 def ai_circuit_open_remaining() -> float:
     """Seconds remaining in the current AI pause, or 0 if AI is available."""
     import time as _time
+
     remaining = _ai_circuit_open_until - _time.monotonic()
     return remaining if remaining > 0 else 0.0
+
 
 # Threshold + cooldown. Kept here (not main.py) so /diag can read them.
 _AI_CIRCUIT_FAILURE_THRESHOLD: int = 50
@@ -331,9 +369,12 @@ _last_trend_alert_ts: float = 0.0
 _last_spike_alert: datetime = datetime.min.replace(tzinfo=timezone.utc)
 _last_hourly_digest: str = ""
 
-_ACTIVE_SLANG = re.compile(r'\b(jp|aman|on|work|luber|pecah)\b', re.IGNORECASE)
+_ACTIVE_SLANG = re.compile(r"\b(jp|aman|on|work|luber|pecah)\b", re.IGNORECASE)
 
-def _score_confidence(p: PromoExtraction, msg: dict, recently_alerted_brands: set[str]) -> int:
+
+def _score_confidence(
+    p: PromoExtraction, msg: dict, recently_alerted_brands: set[str]
+) -> int:
     """Calculates a confidence score for a promotion.
 
     Args:
@@ -345,17 +386,19 @@ def _score_confidence(p: PromoExtraction, msg: dict, recently_alerted_brands: se
         Confidence score from 0 to 100.
     """
     score = 0
-    if normalize_brand(p.brand) != "Unknown": score += 30
+    if normalize_brand(p.brand) != "Unknown":
+        score += 30
     if _CURRENCY_DISCOUNT_PATTERN.search(p.summary):
         score += 30
-        
+
     # BUG S1 FIX: Slang active signals count as implicit confirmation
-    if _ACTIVE_SLANG.search(p.summary or 
-''):
+    if _ACTIVE_SLANG.search(p.summary or ""):
         score += 15
-        
-    if p.status == 'active': score += 15
-    if msg.get('reply_to_msg_id'): score += 5
+
+    if p.status == "active":
+        score += 15
+    if msg.get("reply_to_msg_id"):
+        score += 5
 
     brand_key = normalize_brand(p.brand).lower()
     if brand_key in recently_alerted_brands:
@@ -372,6 +415,7 @@ def get_buffer_flush_task() -> asyncio.Task[None] | None:
     """
     return _buffer_flush_task
 
+
 def set_buffer_flush_task(task: asyncio.Task[None] | None) -> None:
     """Sets the current buffer flush task.
 
@@ -381,6 +425,7 @@ def set_buffer_flush_task(task: asyncio.Task[None] | None) -> None:
     global _buffer_flush_task
     _buffer_flush_task = task
 
+
 def get_stop_event() -> asyncio.Event:
     """Retrieves the global application stop event.
 
@@ -388,6 +433,7 @@ def get_stop_event() -> asyncio.Event:
         The asyncio Event used to signal shutdown.
     """
     return _stop_event
+
 
 def _make_tg_link(chat_id: int | str, msg_id: int | str) -> str:
     """Generates a direct Telegram deep-link for a message."""
@@ -423,7 +469,9 @@ async def _reconnect_listener(gap_minutes: float) -> None:
                     except Exception as e:
                         if "locked" in str(e).lower() and attempt < 4:
                             wait = min(2 * (attempt + 1), 8)
-                            logger.warning(f"⚠️ Telethon session locked, retrying in {wait}s...")
+                            logger.warning(
+                                f"⚠️ Telethon session locked, retrying in {wait}s..."
+                            )
                             await asyncio.sleep(wait)
                             continue
                         raise
@@ -440,21 +488,25 @@ async def _reconnect_listener(gap_minutes: float) -> None:
             async with asyncio.timeout(60):
                 await listener.sync_history(hours=min(gap_minutes / 60 + 0.25, 3.0))
         except (asyncio.TimeoutError, TimeoutError):
-            logger.warning("⚠️ _reconnect_listener: sync_history timed out (60s), skipping.")
+            logger.warning(
+                "⚠️ _reconnect_listener: sync_history timed out (60s), skipping."
+            )
         except Exception as e:
             logger.error(f"⚠️ _reconnect_listener sync_history failed: {e}")
 
-_ELONGATION_RE = re.compile(r'([a-zA-Z])\1{2,}')
+
+_ELONGATION_RE = re.compile(r"([a-zA-Z])\1{2,}")
 
 _BRAND_PATTERNS = {}
+
 
 def _guess_brand(text: str | None) -> str:
     """Fast, pattern-based brand identification with strict short-word matching."""
     if not text:
-        return 'Unknown'
+        return "Unknown"
 
     t_raw = text.lower()
-    t_norm = _ELONGATION_RE.sub(r'\1', t_raw)
+    t_norm = _ELONGATION_RE.sub(r"\1", t_raw)
 
     brand_canon = get_brand_canon()
     global _BRAND_PATTERNS
@@ -473,7 +525,7 @@ def _guess_brand(text: str | None) -> str:
         elif kw in t_raw or kw in t_norm:
             return brand
 
-    return 'Unknown'
+    return "Unknown"
 
 
 async def _flush_alert_buffer(delay: float = 0.5) -> None:
@@ -483,7 +535,7 @@ async def _flush_alert_buffer(delay: float = 0.5) -> None:
 
     async with _flush_lock:
         flush_id: str = str(uuid.uuid4())
-        
+
         if not db.conn:
             logger.error("Database connection missing in _flush_alert_buffer.")
             return
@@ -495,7 +547,8 @@ async def _flush_alert_buffer(delay: float = 0.5) -> None:
 
         async with db.conn.execute(
             "SELECT brand, p_data_json, tg_link, timestamp, corroborations, corroboration_texts, source "
-            "FROM pending_alerts WHERE flush_id=?", (flush_id,)
+            "FROM pending_alerts WHERE flush_id=?",
+            (flush_id,),
         ) as cur:
             rows = await cur.fetchall()
 
@@ -505,11 +558,18 @@ async def _flush_alert_buffer(delay: float = 0.5) -> None:
 
         snapshot: dict[str, list[tuple[PromoExtraction, str, Any, int, str, str]]] = {}
         for r in rows:
-            brand  = r['brand']
+            brand = r["brand"]
             try:
-                p_data = PromoExtraction.model_validate_json(r['p_data_json'])
+                p_data = PromoExtraction.model_validate_json(r["p_data_json"])
                 snapshot.setdefault(brand, []).append(
-                    (p_data, r['tg_link'], r['timestamp'], r['corroborations'], r['corroboration_texts'], r['source'])
+                    (
+                        p_data,
+                        r["tg_link"],
+                        r["timestamp"],
+                        r["corroborations"],
+                        r["corroboration_texts"],
+                        r["source"],
+                    )
                 )
             except Exception as e:
                 logger.error(f"Failed to parse p_data_json in flush: {e}")
@@ -518,15 +578,25 @@ async def _flush_alert_buffer(delay: float = 0.5) -> None:
         tasks = []
         task_to_item = []
         from telegram.constants import ParseMode
+
         for brand_key, items in snapshot.items():
             if len(items) == 1:
                 p, link, ts, corr, ctexts, src = items[0]
-                tasks.append(bot.send_alert(p, link, timestamp=ts, corroborations=corr, corroboration_texts=ctexts, source=src))
+                tasks.append(
+                    bot.send_alert(
+                        p,
+                        link,
+                        timestamp=ts,
+                        corroborations=corr,
+                        corroboration_texts=ctexts,
+                        source=src,
+                    )
+                )
                 task_to_item.append((brand_key, 0))
             else:
                 tasks.append(bot.send_grouped_alert(brand_key, items))
                 task_to_item.append((brand_key, None))
-        
+
         if tasks:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             # Identify which alerts succeeded vs failed
@@ -535,15 +605,17 @@ async def _flush_alert_buffer(delay: float = 0.5) -> None:
                 if isinstance(res, Exception):
                     brand_key, _ = task_to_item[idx]
                     failed_brands.add(brand_key)
-            
+
             if failed_brands:
                 # Only delete alerts for brands that succeeded
-                brands_to_delete = [b for b, _ in task_to_item if b not in failed_brands]
+                brands_to_delete = [
+                    b for b, _ in task_to_item if b not in failed_brands
+                ]
                 if brands_to_delete:
                     ph = ",".join("?" * len(brands_to_delete))
                     await db.conn.execute(
                         f"DELETE FROM pending_alerts WHERE flush_id=? AND brand IN ({ph})",
-                        (flush_id, *brands_to_delete)
+                        (flush_id, *brands_to_delete),
                     )
                     await db.conn.commit()
                 # Reset flush_id for failed brands so they retry
@@ -551,7 +623,7 @@ async def _flush_alert_buffer(delay: float = 0.5) -> None:
                     ph = ",".join("?" * len(failed_brands))
                     await db.conn.execute(
                         f"UPDATE pending_alerts SET flush_id=NULL WHERE flush_id=? AND brand IN ({ph})",
-                        (flush_id, *failed_brands)
+                        (flush_id, *failed_brands),
                     )
                     await db.conn.commit()
             else:
