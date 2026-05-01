@@ -1045,8 +1045,14 @@ class GeminiProcessor:
         }
         recent_brands_set = {normalize_brand(r['brand']).lower() for r in history_tail}
 
-        # ⚡ Bolt: Pre-calculate words for history items to prevent O(N*M) regex executions
-        history_words_cache: dict[str, set[str]] = {}
+        # Pre-process history_tail to avoid O(N^2) redundant regex calls
+        # We only care about entries that are in recent_brands_set.
+        processed_history: dict[str, list[set[str]]] = {}
+        for r in reversed(history_tail):
+            b_norm = normalize_brand(r['brand']).lower()
+            if b_norm in recent_brands_set and b_norm != 'unknown':
+                r_words = set(_WORDS_PATTERN.findall(r['summary'].lower())[:8])
+                processed_history.setdefault(b_norm, []).append(r_words)
 
         unique: list[PromoExtraction] = []
         intra_batch_keys: set[str] = set()
@@ -1063,15 +1069,10 @@ class GeminiProcessor:
 
             if brand_key in recent_brands_set and brand_key != 'unknown' and p.status == 'active':
                 is_dupe = False
-                for r in reversed(history_tail):
-                    if normalize_brand(r['brand']).lower() == brand_key:
-                        r_summary = r['summary'].lower()
-                        if r_summary not in history_words_cache:
-                            history_words_cache[r_summary] = set(_WORDS_PATTERN.findall(r_summary)[:8])
-                        r_words = history_words_cache[r_summary]
-                        if len(p_words & r_words) >= 2:
-                            is_dupe = True
-                            break
+                for r_words in processed_history.get(brand_key, []):
+                    if len(p_words & r_words) >= 2:
+                        is_dupe = True
+                        break
                 if is_dupe:
                     continue
 

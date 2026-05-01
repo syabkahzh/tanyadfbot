@@ -11,6 +11,10 @@
 **Learning:** `re.findall` and `re.compile` calls inside tight nested loops across history caches cause high processing latency and create O(N*M) redundant executions. Specifically, applying `re.findall(r'\w+', ...)` to the same history tail element repeatedly for every item in a batch creates an enormous overhead.
 **Action:** Always precompile heavily used regex expressions globally (`_WORDS_PATTERN = re.compile(r'\w+')`), and precompute / cache their results before entering inner loops involving cross-comparing data (e.g., $O(N \times M)$ comparisons in deduplication).
 
+## 2025-03-09 - [Pre-processing arrays instead of O(N^2)]
+**Learning:** Python's `re` module caches recent regex patterns internally, so globalizing pre-compiled `re.compile()` variable patterns in a small codebase gives essentially 0 speedup. True performance impact can be gained by attacking algorithmic complexity (e.g. nested loops inside `processor.py` doing regex and function call operations).
+**Action:** Always check the internal workings of python standard libraries before doing surface-level optimizations. Look for actual $O(N \times M)$ bottlenecks to solve rather than just refactoring $O(1)$ constant operations.
+
 ## 2025-05-18 - [Optimization & Stability: Regex & Exceptions]
 **Learning:** Pre-compiling commonly used regular expressions improves application throughput. Additionally, using bare `except:` clauses is dangerous as it can swallow `KeyboardInterrupt` and `SystemExit`.
 **Action:** Always declare heavy regular expressions at module scope using `re.compile()`, and explicitly catch specific exceptions (like `ValueError` or `json.JSONDecodeError`) instead of relying on a catch-all `except:`.
