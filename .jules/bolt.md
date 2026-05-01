@@ -7,6 +7,10 @@
 **Learning:** Pre-compiling RegEx locally within a frequently called asynchronous job function forces the Python interpreter to look up or recompile the regular expression repeatedly, causing unnecessary overhead. While Python caches RegEx compilations, relying on module-level constants circumvents the lookup entirely.
 **Action:** Consistently elevate pre-compiled `re.compile` patterns to the module level instead of defining them locally within functions, especially inside asynchronous loops or frequent jobs.
 
+## 2024-05-31 - Thread-switching overhead for lightweight operations
+**Learning:** Using `asyncio.to_thread` for fast, lightweight synchronous operations like `difflib.SequenceMatcher` on short strings (e.g., Telegram message summaries) introduces significant thread-switching overhead (~0.5ms vs ~0.05ms inline execution). The overhead easily exceeds the computation time itself.
+**Action:** Avoid offloading to threads for CPU-bound tasks when the input size is small or the operation is inherently very fast. Use synchronous inline execution for lightweight comparisons or short text processing.
+
 ## 2023-10-27 - [Precompile Regex in Batch Processing Loops]
 **Learning:** `re.findall` and `re.compile` calls inside tight nested loops across history caches cause high processing latency and create O(N*M) redundant executions. Specifically, applying `re.findall(r'\w+', ...)` to the same history tail element repeatedly for every item in a batch creates an enormous overhead.
 **Action:** Always precompile heavily used regex expressions globally (`_WORDS_PATTERN = re.compile(r'\w+')`), and precompute / cache their results before entering inner loops involving cross-comparing data (e.g., $O(N \times M)$ comparisons in deduplication).
