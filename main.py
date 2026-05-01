@@ -81,6 +81,7 @@ _PROTECTED_SIGNALS = re.compile(
 )
 
 _MARKETPLACE_URLS = re.compile(r'https?://(?!t\.me)[^\s]+', re.IGNORECASE)
+_URL_EXTRACT_RE = re.compile(r'(https?://[^\s>]+)')
 
 
 # ── Queue triage ───────────────────────────────────────────────────────────────
@@ -250,7 +251,7 @@ async def processing_loop() -> None:
                         logic_skip_ids.append(m['id'])
                         continue
 
-                    urls = re.findall(r'(https?://[^\s>]+)', m['text'] or "")
+                    urls = _URL_EXTRACT_RE.findall(m['text'] or "")
                     seen = set(p.links)
                     for url in urls:
                         u = url.strip('.,()[]"\'')

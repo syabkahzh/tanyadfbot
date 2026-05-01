@@ -6,6 +6,9 @@ spike detection, and database maintenance.
 
 import asyncio
 import html
+import sys
+import io
+import time as _time
 import re
 import pytz
 import logging
@@ -98,7 +101,6 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
     """
     logger.info("⏰ [Job] Starting time_reminder_job...")
     try:
-        import pytz
         if not db.conn:
             return
 
@@ -298,7 +300,6 @@ async def midnight_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
     """Generates a re-cap of overnight activity (02:00–05:00 WIB)."""
     logger.info("⏰ [Job] Starting midnight_digest_job...")
     try:
-        import pytz
         jakarta_tz = pytz.timezone("Asia/Jakarta")
         now_wib = datetime.now(jakarta_tz)
         # Anchor: today at 02:00 WIB
@@ -430,7 +431,6 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
     """Processes unhandled photo messages with the vision model."""
     logger.info("⏰ [Job] Starting image_processing_job...")
     try:
-        import pytz
         if not db.conn:
             return
 
@@ -808,7 +808,6 @@ async def time_mention_job(db: Database, bot: TelegramBot) -> None:
     """Monitors and alerts on relevant time-sensitive messages."""
     logger.info("⏰ [Job] Starting time_mention_job...")
     try:
-        import pytz
         if not db.conn:
             return
 
@@ -904,7 +903,6 @@ async def trend_job(db: Database, gemini: GeminiProcessor, bot: TelegramBot) -> 
 
         # Use combined topics as a simple string for the dedup check
         current_summary = " ".join([t.topic for t in trends])
-        import time as _time
         _TREND_REPEAT_COOLDOWN = 1800  # 30 min, not "exact same string"
         now_mono = _time.monotonic()
         if (current_summary == shared._last_trend_alert 
@@ -1047,7 +1045,6 @@ async def dead_promo_reaper_job(db: Database, bot: TelegramBot) -> None:
     """Closes expired promotions based on subsequent community chat signals."""
     logger.info("💀 [Job] Starting dead_promo_reaper_job...")
     try:
-        import pytz
         if not db.conn:
             return
             
@@ -1121,7 +1118,6 @@ async def confirmation_gate_job(db: Database) -> None:
     """Processes low-confidence promotions that were waiting for confirmation."""
     logger.info("⏰ [Job] Starting confirmation_gate_job...")
     try:
-        import pytz
         if not db.conn:
             return
             
@@ -1181,7 +1177,6 @@ async def db_maintenance_job(db: Database, bot: TelegramBot) -> None:
     logger.info("⏰ [Job] Starting db_maintenance_job...")
     try:
         # Skip heavy VACUUM during peak deal hours (9 AM - 11 PM WIB)
-        import pytz
         jakarta_tz = pytz.timezone("Asia/Jakarta")
         now_wib = datetime.now(jakarta_tz)
         
@@ -1205,7 +1200,6 @@ async def fasttext_retrain_job(db: Database, bot: TelegramBot) -> None:
     """Automatically exports data and retrains the FastText model."""
     logger.info("⏰ [Job] Starting FastText autonomous retraining...")
     try:
-        import sys
 
         export_script = os.path.join(os.getcwd(), "tools", "export_training_data.py")
         train_script = os.path.join(os.getcwd(), "tools", "train_model.py")
@@ -1274,11 +1268,9 @@ async def visual_trend_job(db: Database, bot: TelegramBot) -> None:
             return
 
         # Attempt to generate chart using matplotlib
-        import io
         try:
             import matplotlib.pyplot as plt
-            import io
-            
+
             # Encapsulate synchronous plotting logic
             def _draw_chart(b, c):
                 plt.switch_backend('Agg')

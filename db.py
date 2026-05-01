@@ -5,6 +5,8 @@ integrity recovery.
 """
 
 import logging
+import json
+import os
 import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Any, Sequence, cast
@@ -753,7 +755,6 @@ class Database:
         if not self.conn or not batch:
             return
 
-        import json
         from datetime import datetime, timedelta, timezone
 
         async with self.lock:
@@ -781,7 +782,7 @@ class Database:
                         row = existing_map[brand]
                         try:
                             texts = json.loads(row['corroboration_texts'] or "[]")
-                        except:
+                        except (json.JSONDecodeError, TypeError, ValueError):
                             texts = []
                         
                         if snippet and snippet not in texts:
@@ -1207,7 +1208,6 @@ class Database:
 
     async def get_db_size_mb(self) -> float:
         """Calculates the size of the database file in MB."""
-        import os
         from config import Config
         try:
             return os.path.getsize(Config.DB_PATH) / (1024 * 1024)

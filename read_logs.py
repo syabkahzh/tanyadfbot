@@ -33,5 +33,5 @@ if __name__ == "__main__":
     n = 10
     if len(sys.argv) > 1:
         try: n = int(sys.argv[1])
-        except: pass
+        except ValueError: pass
     read_logs(n)
