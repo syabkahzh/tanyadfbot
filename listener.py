@@ -92,6 +92,7 @@ def check_fast_path(text: str) -> bool:
 class TelethonListener:
     def __init__(self, db_manager):
         self.db = db_manager
+        self._background_tasks = set()
         self.client = TelegramClient(
             Config.SESSION_NAME,
             Config.API_ID,
@@ -110,8 +111,12 @@ class TelethonListener:
             # ── CRITICAL FIX: launch both tasks concurrently. ──────────────
             # fast-path runs without waiting for DB save.  It uses only the
             # in-memory event object — zero DB reads in the happy path.
-            asyncio.create_task(self._handle_fast_path_from_event(event))
-            asyncio.create_task(self._save_to_db(event))
+            t1 = asyncio.create_task(self._handle_fast_path_from_event(event))
+            t2 = asyncio.create_task(self._save_to_db(event))
+            self._background_tasks.add(t1)
+            self._background_tasks.add(t2)
+            t1.add_done_callback(self._background_tasks.discard)
+            t2.add_done_callback(self._background_tasks.discard)
 
     # ── Fast-path ─────────────────────────────────────────────────────────────
 
@@ -200,7 +205,9 @@ class TelethonListener:
 
         # Temporal context fallback (fire-and-forget update if brand found)
         if brand != "Unknown":
-            asyncio.create_task(context_tracker.update_brand(chat_id, brand))
+            t = asyncio.create_task(context_tracker.update_brand(chat_id, brand))
+            self._background_tasks.add(t)
+            t.add_done_callback(self._background_tasks.discard)
         else:
             # Try context WITHOUT blocking — get_context uses a lock but is fast
             try:
@@ -300,18 +307,22 @@ class TelethonListener:
             })
 
         # Save fastpath promo to promos table (fire-and-forget)
-        asyncio.create_task(db.save_fastpath_promo(
+        t3 = asyncio.create_task(db.save_fastpath_promo(
             brand=brand,
             summary=summary,
             conditions="",
             tg_link=tg_link,
             status="active",
         ))
+        self._background_tasks.add(t3)
+        t3.add_done_callback(self._background_tasks.discard)
 
         # Mark message processed by tg_id (fire-and-forget, race-safe)
-        asyncio.create_task(
+        t4 = asyncio.create_task(
             self.db.mark_processed_by_tg_id(event.id, chat_id)
         )
+        self._background_tasks.add(t4)
+        t4.add_done_callback(self._background_tasks.discard)
 
         # Trigger flush with minimal delay for fast-path
         t = shared.get_buffer_flush_task()
@@ -352,7 +363,9 @@ class TelethonListener:
         except Exception as e:
             logger.error(f"❌ _save_to_db error: {e}")
             if shared.bot:
-                asyncio.create_task(shared.bot.alert_error("listener_save_db", e))
+                t = asyncio.create_task(shared.bot.alert_error("listener_save_db", e))
+                self._background_tasks.add(t)
+                t.add_done_callback(self._background_tasks.discard)
 
     # ── Start / history sync ──────────────────────────────────────────────────
 
