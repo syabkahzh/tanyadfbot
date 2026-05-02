@@ -97,7 +97,10 @@ async def _auto_triage_queue() -> None:
             logger.info("Queue Surgeon: pressure normalized.")
         return
 
-    _queue_emergency_mode = queue > 250
+    if not _queue_emergency_mode and queue < 250:
+        return
+
+    _queue_emergency_mode = True
     triage_limit = min(queue, 2000)
     logger.warning(f"🧹 [Triage] {queue} unprocessed — clearing up to {triage_limit} noise messages...")
 
