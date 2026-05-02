@@ -445,10 +445,8 @@ async def processing_loop() -> None:
                 
                 # CRITICAL FIX: Only let FastText drop messages if the queue is backing up.
                 # Otherwise, let the LLM do its job.
-                dynamic_threshold = 0.88 if _queue_emergency_mode else 0.98
-                
                 for r, (label, confidence) in zip(candidates, results):
-                    if label == "__label__JUNK" and confidence >= dynamic_threshold:
+                    if _queue_emergency_mode and label == "__label__JUNK" and confidence >= 0.88:
                         fasttext_noise_ids.append(r['id'])
                     else:
                         to_ai.append({
