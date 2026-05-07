@@ -48,6 +48,10 @@ _TIME_HOUR_RE = re.compile(
     re.IGNORECASE,
 )
 
+_JSM_PSM_PATTERN = re.compile(r'\b(jsm|psm)\b')
+_AFM_PATTERN = re.compile(r'\bafm\b')
+_IDM_PATTERN = re.compile(r'\bidm\b')
+
 
 def _extract_time_of_day(text: str) -> tuple[int, int] | None:
     """Return (hour, minute) if text explicitly names a time of day.
@@ -512,11 +516,11 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                         'ovo', 'astrapay', 'aspay', 'linkaja', 'qris'
                     }
                     if promo.brand and promo.brand.lower().strip() in PAY_BRANDS:
-                        if re.search(r'\b(jsm|psm)\b', caption_l):
+                        if _JSM_PSM_PATTERN.search(caption_l):
                             promo.brand = 'Alfamart'
-                        elif re.search(r'\bafm\b', caption_l):
+                        elif _AFM_PATTERN.search(caption_l):
                             promo.brand = 'Alfamart'
-                        elif re.search(r'\bidm\b', caption_l):
+                        elif _IDM_PATTERN.search(caption_l):
                             promo.brand = 'Indomaret'
 
                     tg_link  = _make_tg_link(chat_id, tg_msg_id)
