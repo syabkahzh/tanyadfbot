@@ -37,6 +37,10 @@ def _read_file_bytes(path: str) -> bytes:
 # ─────────────────────────────────────────────────────────────────────────────
 
 # HH:MM / HH.MM / HH:MM WIB — anchored to word boundaries.
+_JSM_PSM_RE = re.compile(r'\b(jsm|psm)\b')
+_AFM_RE = re.compile(r'\bafm\b')
+_IDM_RE = re.compile(r'\bidm\b')
+
 _TIME_OF_DAY_RE = re.compile(
     r'\b(?:jam|pukul|pkl|pk|s[./]?d|sampai|sebelum|pada)?\s*'
     r'(\d{1,2})[:.](\d{2})\s*(?:wib|wit|wita)?\b',
@@ -512,11 +516,11 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                         'ovo', 'astrapay', 'aspay', 'linkaja', 'qris'
                     }
                     if promo.brand and promo.brand.lower().strip() in PAY_BRANDS:
-                        if re.search(r'\b(jsm|psm)\b', caption_l):
+                        if _JSM_PSM_RE.search(caption_l):
                             promo.brand = 'Alfamart'
-                        elif re.search(r'\bafm\b', caption_l):
+                        elif _AFM_RE.search(caption_l):
                             promo.brand = 'Alfamart'
-                        elif re.search(r'\bidm\b', caption_l):
+                        elif _IDM_RE.search(caption_l):
                             promo.brand = 'Indomaret'
 
                     tg_link  = _make_tg_link(chat_id, tg_msg_id)
