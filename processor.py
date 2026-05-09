@@ -31,59 +31,68 @@ from db import normalize_brand
 logger = logging.getLogger(__name__)
 
 # ── Pre-compiled Patterns ─────────────────────────────────────────────────────
-_WORD_BOUNDARY_KEYWORDS = re.compile(
-    r'\b(off|on|aman|work|bs|jp|mm)\b', re.IGNORECASE
-)
+_WORD_BOUNDARY_KEYWORDS = re.compile(r"\b(off|on|aman|work|bs|jp|mm)\b", re.IGNORECASE)
 _SOCIAL_FILLER = re.compile(
-    r'^(?:wkwk|haha|hehe|iya|noted|oke|ok|makasih|thanks|thx|mantap|gas|bos|guys|gais|bang|kak|siap|sip|lol|anjir|anjay|btw|oot|gws|semangat|ya allah|nangis|sedih|beneran|kah|[!.\s])+$',
-    re.IGNORECASE
+    r"^(?:wkwk|haha|hehe|iya|noted|oke|ok|makasih|thanks|thx|mantap|gas|bos|guys|gais|bang|kak|siap|sip|lol|anjir|anjay|btw|oot|gws|semangat|ya allah|nangis|sedih|beneran|kah|[!.\s])+$",
+    re.IGNORECASE,
 )
 _NON_PROMO = re.compile(
-    r'\b(setting|pengaturan|config|tutorial|cara|gimana|help|tolong|ini kak|'
-    r'oot|random|foto|selfie|meme|lucu|haha|wkwk)\b', re.IGNORECASE
+    r"\b(setting|pengaturan|config|tutorial|cara|gimana|help|tolong|ini kak|"
+    r"oot|random|foto|selfie|meme|lucu|haha|wkwk)\b",
+    re.IGNORECASE,
 )
 _PURE_QUESTION_PATTERN = re.compile(
-    r'^(kak|ka|guys?|gais|ges|gaes|bun|mba|mas|bang)\s+'
-    r'(ada|mau|bisa|boleh|tanya|gimana|berapa|kapan|dimana|apa|gmn|brp)\b',
-    re.IGNORECASE
+    r"^(kak|ka|guys?|gais|ges|gaes|bun|mba|mas|bang)\s+"
+    r"(ada|mau|bisa|boleh|tanya|gimana|berapa|kapan|dimana|apa|gmn|brp)\b",
+    re.IGNORECASE,
 )
 _PROMO = re.compile(
-    r'\b(promo|diskon|cashback|voucher|gratis|murah|hemat|sale|off|deal|potongan|'
-    r'sfood|gfood|grab|shopee|gojek|aman|on|jp|work|flash|limit|idm|alfa|indomaret|'
-    r'nt|abis|habis|gabisa|gaada|gamau|minbel|r\+s\+t\+k|r\+s\+t\+c\+k|r\+st\+ck|'
-    r'cb|kesbek|c\+s\+h\+b\+c\+k|cash back|kuota|slot|redeem|qr|scan|edc|'
-    r'membership|member|mamber|cek|info|luber|pecah|'
-    r'makasih|thx|thanks|makasi|mks|terima.?kasih|'
-    r'yang butuh aja|ymma|'
-    r'tukpo|murce|murmer|sopi|tsel|cgv|xxi|svip|badut|war|begal|kreator|'
-    r'kopken|chatime|gindaco|solaria|rotio|spx|gopay|spay|ovo|'
-    r'neo|tmrw|saqu|seabank|hero|'
-    r'garap|serbabu|goib|emados|tts|blibli|famima|supin|flip|superbank|gacoan|sei|azko|pc|ndog|'
-    r'periode|last day|reset|dom)\b', re.IGNORECASE
+    r"\b(promo|diskon|cashback|voucher|gratis|murah|hemat|sale|off|deal|potongan|"
+    r"sfood|gfood|grab|shopee|gojek|aman|on|jp|work|flash|limit|idm|alfa|indomaret|"
+    r"nt|abis|habis|gabisa|gaada|gamau|minbel|r\+s\+t\+k|r\+s\+t\+c\+k|r\+st\+ck|"
+    r"cb|kesbek|c\+s\+h\+b\+c\+k|cash back|kuota|slot|redeem|qr|scan|edc|"
+    r"membership|member|mamber|cek|info|luber|pecah|"
+    r"makasih|thx|thanks|makasi|mks|terima.?kasih|"
+    r"yang butuh aja|ymma|"
+    r"tukpo|murce|murmer|sopi|tsel|cgv|xxi|svip|badut|war|begal|kreator|"
+    r"kopken|chatime|gindaco|solaria|rotio|spx|gopay|spay|ovo|"
+    r"neo|tmrw|saqu|seabank|hero|"
+    r"garap|serbabu|goib|emados|tts|blibli|famima|supin|flip|superbank|gacoan|sei|azko|pc|ndog|"
+    r"periode|last day|reset|dom)\b",
+    re.IGNORECASE,
 )
 _JUNK_SUMMARY_PATTERN = re.compile(
-    r'\b(tidak ada|none|n/a|tidak ditemukan|no promo)\b', re.IGNORECASE
+    r"\b(tidak ada|none|n/a|tidak ditemukan|no promo)\b", re.IGNORECASE
 )
 _CURRENCY_DISCOUNT_PATTERN = re.compile(
-    r'(rp\s?\d|rb\s?\d|\d+[kK]|disc|diskon|gratis|free|\d+\s*%|cashback)',
-    re.IGNORECASE
+    r"(rp\s?\d|rb\s?\d|\d+[kK]|disc|diskon|gratis|free|\d+\s*%|cashback)", re.IGNORECASE
 )
 _META_SUMMARY_PATTERN = re.compile(
-    r'(user bertanya|tidak ada informasi|tidak disebutkan|no information|'
-    r'pesan ini|pertanyaan tentang|menanyakan|mencari tahu|'
-    r'meminta konfirmasi|menginformasikan bahwa)',
-    re.IGNORECASE
+    r"(user bertanya|tidak ada informasi|tidak disebutkan|no information|"
+    r"pesan ini|pertanyaan tentang|menanyakan|mencari tahu|"
+    r"meminta konfirmasi|menginformasikan bahwa)",
+    re.IGNORECASE,
 )
+_RETRY_IN_PATTERN = re.compile(r"try again in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)")
+_USAGE_LIMIT_PATTERN = re.compile(r"limit (\d+), used (\d+)")
+_QUESTION_AMAN_PATTERN_1 = re.compile(r"\b(aman|work|on)\s+(ga|gak|nggak|ya)\b")
+_QUESTION_AMAN_PATTERN_2 = re.compile(r"\b(aman|work|on)\s+(ngga)\b")
 
 # ── Response schemas ──────────────────────────────────────────────────────────
 
+
 class PromoExtraction(BaseModel):
     original_msg_id: int = 0
-    summary: str = Field(default="", description="1 kalimat ringkasan WAJIB DALAM BAHASA INDONESIA.")
+    summary: str = Field(
+        default="", description="1 kalimat ringkasan WAJIB DALAM BAHASA INDONESIA."
+    )
     brand: str = Field(default="", description="Nama brand yang tepat.")
-    conditions: str = Field(default="", description="Syarat dan ketentuan DALAM BAHASA INDONESIA, atau string kosong.")
+    conditions: str = Field(
+        default="",
+        description="Syarat dan ketentuan DALAM BAHASA INDONESIA, atau string kosong.",
+    )
     valid_until: Optional[str] = ""
-    status: Literal['active', 'expired', 'unknown'] = Field(default='unknown')
+    status: Literal["active", "expired", "unknown"] = Field(default="unknown")
     confidence: float = Field(default=1.0)
     links: List[str] = []
     detected_at: Optional[str] = None
@@ -91,13 +100,16 @@ class PromoExtraction(BaseModel):
     ai_time: Optional[float] = None
     model_name: Optional[str] = None
 
+
 class BatchResponse(BaseModel):
     promos: List[PromoExtraction]
+
 
 class TrendItem(BaseModel):
     topic: str
     msg_id: int
     model_name: Optional[str] = None
+
 
 class TrendResponse(BaseModel):
     trends: List[TrendItem]
@@ -148,40 +160,164 @@ DILARANG TABEL. Bold untuk brand."""
 # ── Keyword sets ──────────────────────────────────────────────────────────────
 
 _STRONG_KEYWORDS: set[str] = {
-    'sfood','gfood','grab','shopee','gojek','tokped','tokopedia',
-    'voucher','vcr','voc','diskon','promo','cashback','gratis','potongan',
-    'idm','indomaret','alfa','alfamart','alfagift','hokben',
-    'klaim','claim','restock','ristok','nt','abis','habis',
-    'gabisa','gaada','g+b+s','gamau','minbel',
-    'kuota','limit','slot','redeem','qr','scan','edc',
-    'r+s+t+k','r+s+t+c+k','r+st+ck',
-    'cb','kesbek','c\+s\+h\+b\+c\+k','cash back',
-    'luber','pecah','flash','sale','deal','murah','hemat','bonus',
-    'ongkir','gratis ongkir','membership','member','mamber',
-    'yang butuh aja','ymma','tukpo','murce','murmer','sopi','tsel','cgv','xxi',
-    'svip','badut','war','begal','kreator','live kreator',
-    'kopken','chatime','gindaco','solaria','rotio','spx','gopay','spay',
-    'shopeepay','ovo','neo','tmrw','saqu','seabank','hero',
-    'blibli','serbabu','famima','familymart','supin','superindo',
-    'gacoan','mie gacoan','wingstop','yoshinoya','azko','sei',
-    'flip','superbank','dana','tts','emados','ndog','pc','garap',
+    "sfood",
+    "gfood",
+    "grab",
+    "shopee",
+    "gojek",
+    "tokped",
+    "tokopedia",
+    "voucher",
+    "vcr",
+    "voc",
+    "diskon",
+    "promo",
+    "cashback",
+    "gratis",
+    "potongan",
+    "idm",
+    "indomaret",
+    "alfa",
+    "alfamart",
+    "alfagift",
+    "hokben",
+    "klaim",
+    "claim",
+    "restock",
+    "ristok",
+    "nt",
+    "abis",
+    "habis",
+    "gabisa",
+    "gaada",
+    "g+b+s",
+    "gamau",
+    "minbel",
+    "kuota",
+    "limit",
+    "slot",
+    "redeem",
+    "qr",
+    "scan",
+    "edc",
+    "r+s+t+k",
+    "r+s+t+c+k",
+    "r+st+ck",
+    "cb",
+    "kesbek",
+    "c\+s\+h\+b\+c\+k",
+    "cash back",
+    "luber",
+    "pecah",
+    "flash",
+    "sale",
+    "deal",
+    "murah",
+    "hemat",
+    "bonus",
+    "ongkir",
+    "gratis ongkir",
+    "membership",
+    "member",
+    "mamber",
+    "yang butuh aja",
+    "ymma",
+    "tukpo",
+    "murce",
+    "murmer",
+    "sopi",
+    "tsel",
+    "cgv",
+    "xxi",
+    "svip",
+    "badut",
+    "war",
+    "begal",
+    "kreator",
+    "live kreator",
+    "kopken",
+    "chatime",
+    "gindaco",
+    "solaria",
+    "rotio",
+    "spx",
+    "gopay",
+    "spay",
+    "shopeepay",
+    "ovo",
+    "neo",
+    "tmrw",
+    "saqu",
+    "seabank",
+    "hero",
+    "blibli",
+    "serbabu",
+    "famima",
+    "familymart",
+    "supin",
+    "superindo",
+    "gacoan",
+    "mie gacoan",
+    "wingstop",
+    "yoshinoya",
+    "azko",
+    "sei",
+    "flip",
+    "superbank",
+    "dana",
+    "tts",
+    "emados",
+    "ndog",
+    "pc",
+    "garap",
 }
 
 _WEAK_KEYWORDS: set[str] = {
-    'cek','info','makasih','thx','thanks','makasi','mks','terimakasih','terima kasih'
+    "cek",
+    "info",
+    "makasih",
+    "thx",
+    "thanks",
+    "makasi",
+    "mks",
+    "terimakasih",
+    "terima kasih",
 }
 
-_JUNK_SUMMARIES: set[str] = {'summary','none','n/a','-','tidak ada','tidak ditemukan'}
+_JUNK_SUMMARIES: set[str] = {
+    "summary",
+    "none",
+    "n/a",
+    "-",
+    "tidak ada",
+    "tidak ditemukan",
+}
 
 
 # ── AI Clients ────────────────────────────────────────────────────────────────
 
+
 class BaseAIClient:
-    async def generate_content(self, model: str, contents: Any, config: dict[str, Any], capabilities: dict[str, Any]) -> Any:
+    async def generate_content(
+        self,
+        model: str,
+        contents: Any,
+        config: dict[str, Any],
+        capabilities: dict[str, Any],
+    ) -> Any:
         raise NotImplementedError
 
+
 class WrappedResponse:
-    def __init__(self, res=None, text=None, parsed=None, model_name=None, usage=None, headers=None):
+    def __init__(
+        self,
+        res=None,
+        text=None,
+        parsed=None,
+        model_name=None,
+        usage=None,
+        headers=None,
+    ):
         self.res = res
         self._text = text
         self._parsed = parsed
@@ -191,17 +327,28 @@ class WrappedResponse:
 
     @property
     def text(self):
-        return self._text if self._text is not None else getattr(self.res, 'text', "")
+        return self._text if self._text is not None else getattr(self.res, "text", "")
 
     @property
     def parsed(self):
-        return self._parsed if self._parsed is not None else getattr(self.res, 'parsed', None)
+        return (
+            self._parsed
+            if self._parsed is not None
+            else getattr(self.res, "parsed", None)
+        )
+
 
 class GoogleClient(BaseAIClient):
     def __init__(self, api_key: str):
         self.client = genai.Client(api_key=api_key)
 
-    async def generate_content(self, model: str, contents: Any, config: dict[str, Any], capabilities: dict[str, Any]) -> Any:
+    async def generate_content(
+        self,
+        model: str,
+        contents: Any,
+        config: dict[str, Any],
+        capabilities: dict[str, Any],
+    ) -> Any:
         config = config.copy()
 
         if not capabilities.get("native_json", True):
@@ -221,7 +368,7 @@ class GoogleClient(BaseAIClient):
             system = config.pop("system_instruction", None)
             if system:
                 sys_text = system
-                if hasattr(system, 'parts'):
+                if hasattr(system, "parts"):
                     sys_text = system.parts[0].text
                 if isinstance(contents, str):
                     contents = f"SYSTEM: {sys_text}\n\n{contents}"
@@ -232,7 +379,11 @@ class GoogleClient(BaseAIClient):
             final_contents = []
             for item in contents:
                 if isinstance(item, dict) and "data" in item:
-                    final_contents.append(genai.types.Part.from_bytes(data=item["data"], mime_type=item["mime_type"]))
+                    final_contents.append(
+                        genai.types.Part.from_bytes(
+                            data=item["data"], mime_type=item["mime_type"]
+                        )
+                    )
                 else:
                     final_contents.append(item)
             contents = final_contents
@@ -243,19 +394,31 @@ class GoogleClient(BaseAIClient):
             model=model, contents=contents, config=config
         )
         usage = {
-            "prompt_tokens": getattr(res.usage_metadata, 'prompt_token_count', 0),
-            "completion_tokens": getattr(res.usage_metadata, 'candidates_token_count', 0),
-            "total_tokens": getattr(res.usage_metadata, 'total_token_count', 0),
+            "prompt_tokens": getattr(res.usage_metadata, "prompt_token_count", 0),
+            "completion_tokens": getattr(
+                res.usage_metadata, "candidates_token_count", 0
+            ),
+            "total_tokens": getattr(res.usage_metadata, "total_token_count", 0),
         }
         return WrappedResponse(res, usage=usage)
 
+
 class OpenAICompatibleClient(BaseAIClient):
-    def __init__(self, api_key: str, base_url: Optional[str] = None, provider: str = "openai"):
+    def __init__(
+        self, api_key: str, base_url: Optional[str] = None, provider: str = "openai"
+    ):
         from openai import AsyncOpenAI
+
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.provider = provider
 
-    async def generate_content(self, model: str, contents: Any, config: dict[str, Any], capabilities: dict[str, Any]) -> Any:
+    async def generate_content(
+        self,
+        model: str,
+        contents: Any,
+        config: dict[str, Any],
+        capabilities: dict[str, Any],
+    ) -> Any:
         system = config.get("system_instruction", "")
         response_schema = config.get("response_schema")
 
@@ -272,11 +435,16 @@ class OpenAICompatibleClient(BaseAIClient):
                     user_content.append({"type": "text", "text": item})
                 elif isinstance(item, dict) and "data" in item:
                     import base64
+
                     img_b64 = base64.b64encode(item["data"]).decode("utf-8")
-                    user_content.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{item['mime_type']};base64,{img_b64}"}
-                    })
+                    user_content.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{item['mime_type']};base64,{img_b64}"
+                            },
+                        }
+                    )
             if user_content:
                 messages.append({"role": "user", "content": user_content})
             else:
@@ -290,38 +458,54 @@ class OpenAICompatibleClient(BaseAIClient):
         if response_schema:
             if capabilities.get("native_tools", False):
                 schema_dict = response_schema.model_json_schema()
-                kwargs["tools"] = [{
-                    "type": "function",
-                    "function": {
-                        "name": "extract_data",
-                        "description": f"Extract structured {response_schema.__name__} data",
-                        "parameters": schema_dict
+                kwargs["tools"] = [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "extract_data",
+                            "description": f"Extract structured {response_schema.__name__} data",
+                            "parameters": schema_dict,
+                        },
                     }
-                }]
+                ]
                 kwargs["tool_choice"] = "auto"
             elif capabilities.get("native_json", True):
                 kwargs["response_format"] = {"type": "json_object"}
                 schema_str = response_schema.model_json_schema()
-                messages[0]["content"] += (
-                    f"\n\nYou MUST respond with ONLY valid JSON. No preamble.\nSchema:\n{schema_str}"
-                )
+                messages[0][
+                    "content"
+                ] += f"\n\nYou MUST respond with ONLY valid JSON. No preamble.\nSchema:\n{schema_str}"
 
         try:
             raw_res = await self.client.chat.completions.with_raw_response.create(
                 model=model, messages=messages, **kwargs
             )
             res = raw_res.parse()
-            headers = {k.lower(): v for k, v in raw_res.headers.items() if k.lower().startswith('x-ratelimit')}
+            headers = {
+                k.lower(): v
+                for k, v in raw_res.headers.items()
+                if k.lower().startswith("x-ratelimit")
+            }
         except Exception as e:
             err_str = str(e).lower()
-            if ("tool_use_failed" in err_str or "tool choice" in err_str) and hasattr(e, 'response'):
+            if ("tool_use_failed" in err_str or "tool choice" in err_str) and hasattr(
+                e, "response"
+            ):
                 try:
                     body = e.response.json()
-                    text = body.get('error', {}).get('failed_generation')
+                    text = body.get("error", {}).get("failed_generation")
                     if text:
-                        logger.info(f"💡 [AI] Rescued content from failed tool call for {model}")
-                        headers = {k.lower(): v for k, v in e.response.headers.items() if k.lower().startswith('x-ratelimit')}
-                        return WrappedResponse(text=text, model_name=model, headers=headers)
+                        logger.info(
+                            f"💡 [AI] Rescued content from failed tool call for {model}"
+                        )
+                        headers = {
+                            k.lower(): v
+                            for k, v in e.response.headers.items()
+                            if k.lower().startswith("x-ratelimit")
+                        }
+                        return WrappedResponse(
+                            text=text, model_name=model, headers=headers
+                        )
                 except Exception:
                     pass
             raise e
@@ -334,20 +518,28 @@ class OpenAICompatibleClient(BaseAIClient):
             text = message.content
 
         if text:
-            text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
-            text = re.sub(r'--- reasoning ---.*?--- reasoning ---', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+            text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+            text = re.sub(
+                r"--- reasoning ---.*?--- reasoning ---",
+                "",
+                text,
+                flags=re.DOTALL | re.IGNORECASE,
+            ).strip()
 
         usage = {
-            "prompt_tokens": getattr(res.usage, 'prompt_tokens', 0),
-            "completion_tokens": getattr(res.usage, 'completion_tokens', 0),
-            "total_tokens": getattr(res.usage, 'total_tokens', 0),
+            "prompt_tokens": getattr(res.usage, "prompt_tokens", 0),
+            "completion_tokens": getattr(res.usage, "completion_tokens", 0),
+            "total_tokens": getattr(res.usage, "total_tokens", 0),
         }
 
         parsed = None
         if response_schema and text:
             try:
-                clean_text = re.sub(r'^```json\s*|\s*```$', '', text.strip(), flags=re.MULTILINE)
+                clean_text = re.sub(
+                    r"^```json\s*|\s*```$", "", text.strip(), flags=re.MULTILINE
+                )
                 import json
+
                 try:
                     parsed = response_schema.model_validate_json(clean_text)
                 except Exception:
@@ -370,11 +562,11 @@ class OpenAICompatibleClient(BaseAIClient):
                         if isinstance(obj, dict):
                             for k, v in list(obj.items()):
                                 if v is None:
-                                    if k in ('queue_time', 'ai_time'):
+                                    if k in ("queue_time", "ai_time"):
                                         pass
-                                    elif k == 'confidence':
+                                    elif k == "confidence":
                                         obj[k] = 1.0
-                                    elif k == 'original_msg_id':
+                                    elif k == "original_msg_id":
                                         obj[k] = 0
                                     else:
                                         obj[k] = ""
@@ -386,32 +578,44 @@ class OpenAICompatibleClient(BaseAIClient):
             except Exception as e:
                 logger.warning(f"AI client failed to parse JSON from {model}: {e}")
 
-        return WrappedResponse(res, text=text, parsed=parsed, usage=usage, headers=headers)
+        return WrappedResponse(
+            res, text=text, parsed=parsed, usage=usage, headers=headers
+        )
 
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
 
+
 class _ModelSlot:
     """Sliding-window RPM + RPD + TPM limiter."""
 
-    def __init__(self, name: str, provider: str, model_id: str, client: BaseAIClient,
-                 limit: int, daily_limit: int = 0,
-                 tpm_limit: int = 0, tpd_limit: int = 0,
-                 priority: int = 3, capabilities: dict = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        provider: str,
+        model_id: str,
+        client: BaseAIClient,
+        limit: int,
+        daily_limit: int = 0,
+        tpm_limit: int = 0,
+        tpd_limit: int = 0,
+        priority: int = 3,
+        capabilities: dict = None,
+    ) -> None:
         self.name = name
         self.provider = provider
         self.model_id = model_id
         self.client = client
-        self.limit = limit          # RPM
+        self.limit = limit  # RPM
         self.daily_limit = daily_limit  # RPD
         self.tpm_limit = tpm_limit
         self.tpd_limit = tpd_limit
         self.priority = priority
         self.capabilities = capabilities or {}
 
-        self._calls: list[float] = []           # RPM timestamps
-        self._daily_calls: list[float] = []     # RPD timestamps
-        self._tokens: list[tuple[float, int]] = []        # TPM
+        self._calls: list[float] = []  # RPM timestamps
+        self._daily_calls: list[float] = []  # RPD timestamps
+        self._tokens: list[tuple[float, int]] = []  # TPM
         self._daily_tokens: list[tuple[float, int]] = []  # TPD
 
         # Per-slot lock — used ONLY for atomic check+append inside try_acquire_nowait
@@ -425,7 +629,9 @@ class _ModelSlot:
         if self.daily_limit > 0 or self._daily_calls:
             self._daily_calls = [t for t in self._daily_calls if now - t < 86400]
         if self.tpd_limit > 0 or self._daily_tokens:
-            self._daily_tokens = [(ts, n) for ts, n in self._daily_tokens if now - ts < 86400]
+            self._daily_tokens = [
+                (ts, n) for ts, n in self._daily_tokens if now - ts < 86400
+            ]
 
     def available(self, now: float) -> int:
         cutoff = now - 60
@@ -529,7 +735,9 @@ class _ModelSlot:
         diff = used - current_local
         if diff > 0:
             self._daily_tokens.append((now, diff))
-            logger.warning(f"🎯 [{self.name}] Syncing tokens: +{diff} (API Used: {used}/{limit})")
+            logger.warning(
+                f"🎯 [{self.name}] Syncing tokens: +{diff} (API Used: {used}/{limit})"
+            )
 
     def sync_from_headers(self, headers: dict) -> None:
         if not headers:
@@ -537,8 +745,8 @@ class _ModelSlot:
         now = time.monotonic()
 
         # RPD sync
-        limit_req = headers.get('x-ratelimit-limit-requests')
-        rem_req = headers.get('x-ratelimit-remaining-requests')
+        limit_req = headers.get("x-ratelimit-limit-requests")
+        rem_req = headers.get("x-ratelimit-remaining-requests")
         if limit_req and rem_req:
             try:
                 used = int(limit_req) - int(rem_req)
@@ -551,8 +759,8 @@ class _ModelSlot:
                 pass
 
         # TPM sync
-        limit_tokens = headers.get('x-ratelimit-limit-tokens')
-        rem_tokens = headers.get('x-ratelimit-remaining-tokens')
+        limit_tokens = headers.get("x-ratelimit-limit-tokens")
+        rem_tokens = headers.get("x-ratelimit-remaining-tokens")
         if limit_tokens and rem_tokens:
             try:
                 used = int(limit_tokens) - int(rem_tokens)
@@ -564,8 +772,8 @@ class _ModelSlot:
                 pass
 
         # TPD sync
-        limit_tpd = headers.get('x-ratelimit-limit-tokens-day')
-        rem_tpd = headers.get('x-ratelimit-remaining-tokens-day')
+        limit_tpd = headers.get("x-ratelimit-limit-tokens-day")
+        rem_tpd = headers.get("x-ratelimit-remaining-tokens-day")
         if limit_tpd and rem_tpd:
             try:
                 self.saturate_locally(int(limit_tpd) - int(rem_tpd), int(limit_tpd))
@@ -574,6 +782,7 @@ class _ModelSlot:
 
 
 # ── GeminiProcessor ───────────────────────────────────────────────────────────
+
 
 class GeminiProcessor:
     """Orchestrates AI analysis using the multi-provider fleet."""
@@ -592,53 +801,64 @@ class GeminiProcessor:
         army = Config.get_ai_army()
         for p in army:
             client = None
-            api_key = p.get('api_key')
+            api_key = p.get("api_key")
 
-            if p['provider'] != 'ollama' and not api_key:
-                logger.warning(f"Skipping {p['name']}: {p.get('api_key_env', 'API_KEY')} not set.")
+            if p["provider"] != "ollama" and not api_key:
+                logger.warning(
+                    f"Skipping {p['name']}: {p.get('api_key_env', 'API_KEY')} not set."
+                )
                 continue
 
-            if p['provider'] == 'google':
+            if p["provider"] == "google":
                 client = GoogleClient(api_key=api_key)
-            elif p['provider'] in ('groq', 'glm', 'openrouter', 'mistral', 'siliconflow', 'cerebras'):
+            elif p["provider"] in (
+                "groq",
+                "glm",
+                "openrouter",
+                "mistral",
+                "siliconflow",
+                "cerebras",
+            ):
                 client = OpenAICompatibleClient(
-                    api_key=api_key,
-                    base_url=p.get('base_url'),
-                    provider=p['provider']
+                    api_key=api_key, base_url=p.get("base_url"), provider=p["provider"]
                 )
 
             if client:
                 slot = _ModelSlot(
-                    name=p['name'],
-                    provider=p['provider'],
-                    model_id=p['model_id'],
+                    name=p["name"],
+                    provider=p["provider"],
+                    model_id=p["model_id"],
                     client=client,
-                    limit=p['rpm'],
-                    daily_limit=p.get('rpd', 0),
-                    tpm_limit=p.get('tpm', 0),
-                    tpd_limit=p.get('tpd', 0),
-                    priority=p.get('priority', 3),
-                    capabilities=p.get('capabilities', {})
+                    limit=p["rpm"],
+                    daily_limit=p.get("rpd", 0),
+                    tpm_limit=p.get("tpm", 0),
+                    tpd_limit=p.get("tpd", 0),
+                    priority=p.get("priority", 3),
+                    capabilities=p.get("capabilities", {}),
                 )
-                self._slots[p['name']] = slot
+                self._slots[p["name"]] = slot
 
         # Sorted list: priority ASC, then name for determinism
         self._priority_list = [
-            s.name for s in sorted(self._slots.values(), key=lambda x: (x.priority, x.name))
+            s.name
+            for s in sorted(self._slots.values(), key=lambda x: (x.priority, x.name))
         ]
-        logger.info(f"AI Fleet initialized: {len(self._slots)} models | order: {self._priority_list}")
+        logger.info(
+            f"AI Fleet initialized: {len(self._slots)} models | order: {self._priority_list}"
+        )
 
     def update_model_priority(self, name: str, priority: int) -> bool:
         import json
         import os
+
         path = os.path.join(os.path.dirname(__file__), "models_config.json")
         try:
             with open(path, "r") as f:
                 army = json.load(f)
             found = False
             for p in army:
-                if p['name'] == name:
-                    p['priority'] = priority
+                if p["name"] == name:
+                    p["priority"] = priority
                     found = True
                     break
             if not found:
@@ -680,7 +900,8 @@ class GeminiProcessor:
 
             # Build candidate list
             candidates = [
-                n for n in self._priority_list
+                n
+                for n in self._priority_list
                 if n not in excludes
                 and not self._slots[n].is_daily_exhausted(now)
                 and (not require_vision or self._slots[n].capabilities.get("vision"))
@@ -690,7 +911,8 @@ class GeminiProcessor:
             if require_vision and not candidates:
                 # Fallback: any model not exhausted
                 candidates = [
-                    n for n in self._priority_list
+                    n
+                    for n in self._priority_list
                     if n not in excludes and now >= self._slots[n].exhausted_until
                 ]
 
@@ -732,17 +954,28 @@ class GeminiProcessor:
             async with self._fleet_lock:
                 now = time.monotonic()
                 available = [
-                    n for n in self._priority_list
-                    if n not in excludes and now >= self._slots[n].exhausted_until
+                    n
+                    for n in self._priority_list
+                    if n not in excludes
+                    and now >= self._slots[n].exhausted_until
                     and not self._slots[n].is_daily_exhausted(now)
                 ]
-                available.sort(key=lambda n: (self._slots[n].priority, self._slots[n].current_usage() / max(1, self._slots[n].limit)))
+                available.sort(
+                    key=lambda n: (
+                        self._slots[n].priority,
+                        self._slots[n].current_usage() / max(1, self._slots[n].limit),
+                    )
+                )
                 for name in available:
                     if await self._slots[name].try_acquire_nowait(estimated_tokens):
                         return name
 
         # True last resort
-        best = self._priority_list[0] if self._priority_list else list(self._slots.keys())[0]
+        best = (
+            self._priority_list[0]
+            if self._priority_list
+            else list(self._slots.keys())[0]
+        )
         logger.error(f"_pick_model: all slots saturated after 90s, forcing {best}")
         return best
 
@@ -779,15 +1012,17 @@ class GeminiProcessor:
         estimated_tokens = self._estimate_tokens(contents)
 
         try:
-            logger.debug(f"🛰️ [AI] {slot.model_id} ({slot.provider}) attempt {attempt}...")
+            logger.debug(
+                f"🛰️ [AI] {slot.model_id} ({slot.provider}) attempt {attempt}..."
+            )
             response = await asyncio.wait_for(
                 slot.client.generate_content(
                     model=slot.model_id,
                     contents=contents,
                     config=config.copy(),
-                    capabilities=slot.capabilities
+                    capabilities=slot.capabilities,
                 ),
-                timeout=self._AI_CALL_TIMEOUT_SEC
+                timeout=self._AI_CALL_TIMEOUT_SEC,
             )
 
             if response is None:
@@ -796,7 +1031,9 @@ class GeminiProcessor:
             response.model_name = slot_name
 
             # Correct token accounting
-            actual_tokens = response.usage.get("total_tokens", 0) if response.usage else 0
+            actual_tokens = (
+                response.usage.get("total_tokens", 0) if response.usage else 0
+            )
             if actual_tokens > 0:
                 slot.update_actual_usage(estimated_tokens, actual_tokens)
             if response.headers:
@@ -806,8 +1043,11 @@ class GeminiProcessor:
 
         except Exception as e:
             import random
+
             err_str = str(e).lower()
-            logger.warning(f"🔄 [{slot.name}] Failure attempt {attempt}: {type(e).__name__}: {str(e)[:120]}")
+            logger.warning(
+                f"🔄 [{slot.name}] Failure attempt {attempt}: {type(e).__name__}: {str(e)[:120]}"
+            )
             slot.release_last()
 
             is_rate_limit = (
@@ -820,12 +1060,16 @@ class GeminiProcessor:
                 sleep_sec = 61.0
 
                 # OpenRouter daily limit
-                if slot.provider == "openrouter" and ("50 requests" in err_str or "daily limit" in err_str):
+                if slot.provider == "openrouter" and (
+                    "50 requests" in err_str or "daily limit" in err_str
+                ):
                     sleep_sec = 3600 * 12
-                    logger.warning(f"🛑 [{slot.name}] OpenRouter daily limit hit — backing off 12h")
+                    logger.warning(
+                        f"🛑 [{slot.name}] OpenRouter daily limit hit — backing off 12h"
+                    )
 
                 # Parse "try again in Xm Ys" from error
-                wait_match = re.search(r'try again in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)', err_str)
+                wait_match = _RETRY_IN_PATTERN.search(err_str)
                 if wait_match:
                     h = int(wait_match.group(1) or 0)
                     m = int(wait_match.group(2) or 0)
@@ -835,28 +1079,36 @@ class GeminiProcessor:
                     sleep_sec = 3600 * 4
 
                 # Adaptive sync from error message
-                usage_match = re.search(r'limit (\d+), used (\d+)', err_str)
+                usage_match = _USAGE_LIMIT_PATTERN.search(err_str)
                 if usage_match:
-                    slot.saturate_locally(int(usage_match.group(2)), int(usage_match.group(1)))
+                    slot.saturate_locally(
+                        int(usage_match.group(2)), int(usage_match.group(1))
+                    )
 
                 jitter = random.uniform(0.9, 1.1)
                 slot.exhausted_until = time.monotonic() + sleep_sec * jitter
-                logger.warning(f"⏳ [{slot.name}] Rate limited — pausing {sleep_sec * jitter:.0f}s")
+                logger.warning(
+                    f"⏳ [{slot.name}] Rate limited — pausing {sleep_sec * jitter:.0f}s"
+                )
 
             if attempt < max_attempts:
                 is_vision = isinstance(contents, list) and any(
-                    isinstance(item, dict) and 'data' in item for item in contents
+                    isinstance(item, dict) and "data" in item for item in contents
                 )
 
                 exclude_list = list(tried)
 
                 # Provider-wide ban on server death (5xx)
-                is_server_death = any(s in err_str for s in ["500", "502", "503", "504"])
-                if hasattr(e, 'status_code') and getattr(e, 'status_code', 0) >= 500:
+                is_server_death = any(
+                    s in err_str for s in ["500", "502", "503", "504"]
+                )
+                if hasattr(e, "status_code") and getattr(e, "status_code", 0) >= 500:
                     is_server_death = True
                 if is_server_death:
                     banned_providers.add(slot.provider)
-                    logger.warning(f"🚫 [{slot.provider}] Provider banned (5xx server death)")
+                    logger.warning(
+                        f"🚫 [{slot.provider}] Provider banned (5xx server death)"
+                    )
 
                 for n, s in self._slots.items():
                     if s.provider in banned_providers and n not in exclude_list:
@@ -869,8 +1121,13 @@ class GeminiProcessor:
                 )
                 if next_slot:
                     return await self._call(
-                        contents, config, next_slot,
-                        attempt + 1, max_attempts, tried, banned_providers
+                        contents,
+                        config,
+                        next_slot,
+                        attempt + 1,
+                        max_attempts,
+                        tried,
+                        banned_providers,
                     )
 
             logger.error(f"❌ AI call failed after {attempt} attempts")
@@ -903,17 +1160,32 @@ class GeminiProcessor:
         if bool(_PROMO.search(t)):
             score += 2
 
-        question_words = {'ga', 'gak', 'nggak', 'apa', 'gimana', 'berapa', 'kapan', 'dimana', 'kenapa', 'ada', 'masih', 'ya'}
+        question_words = {
+            "ga",
+            "gak",
+            "nggak",
+            "apa",
+            "gimana",
+            "berapa",
+            "kapan",
+            "dimana",
+            "kenapa",
+            "ada",
+            "masih",
+            "ya",
+        }
 
-        if '?' in t:
+        if "?" in t:
             score -= 5
-        if re.search(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b', t):
+        if _QUESTION_AMAN_PATTERN_1.search(t):
             score -= 8
-        if t.endswith('?') and words and words[0] in question_words:
+        if t.endswith("?") and words and words[0] in question_words:
             score -= 5
-        if any(w in question_words for w in words) and ('aman' in t or 'work' in t or 'on' in t):
+        if any(w in question_words for w in words) and (
+            "aman" in t or "work" in t or "on" in t
+        ):
             score -= 8
-        if re.search(r'\b(aman|work|on)\s+(ngga)\b', t):
+        if _QUESTION_AMAN_PATTERN_2.search(t):
             score -= 15
 
         if any(kw in t for kw in _STRONG_KEYWORDS) and score >= 0:
@@ -923,7 +1195,9 @@ class GeminiProcessor:
 
         return score >= 2
 
-    async def process_batch(self, messages: Sequence[dict[str, Any]], db: Any = None) -> list[PromoExtraction] | None:
+    async def process_batch(
+        self, messages: Sequence[dict[str, Any]], db: Any = None
+    ) -> list[PromoExtraction] | None:
         """
         Extract promos from a batch of messages using concurrent scatter-gather.
 
@@ -933,24 +1207,34 @@ class GeminiProcessor:
         if not messages:
             return []
 
-        filtered = [m for m in messages if self._is_worth_checking(m.get('text'), bool(m.get('has_photo', False)))]
+        filtered = [
+            m
+            for m in messages
+            if self._is_worth_checking(m.get("text"), bool(m.get("has_photo", False)))
+        ]
         if not filtered:
             return []
 
         # Enrich with reply context
         if db:
-            chat_id = filtered[0]['chat_id']
-            reply_ids = [m['reply_to_msg_id'] for m in filtered if m.get('reply_to_msg_id')]
-            reply_map = await db.get_deep_context_bulk(reply_ids, chat_id, max_depth=3) if reply_ids else {}
+            chat_id = filtered[0]["chat_id"]
+            reply_ids = [
+                m["reply_to_msg_id"] for m in filtered if m.get("reply_to_msg_id")
+            ]
+            reply_map = (
+                await db.get_deep_context_bulk(reply_ids, chat_id, max_depth=3)
+                if reply_ids
+                else {}
+            )
             for m in filtered:
-                if m.get('reply_to_msg_id') and m['reply_to_msg_id'] in reply_map:
-                    ctx_text = reply_map[m['reply_to_msg_id']]
-                    m['context'] = f"C:{ctx_text[-800:]} "
+                if m.get("reply_to_msg_id") and m["reply_to_msg_id"] in reply_map:
+                    ctx_text = reply_map[m["reply_to_msg_id"]]
+                    m["context"] = f"C:{ctx_text[-800:]} "
                 else:
-                    m['context'] = ""
+                    m["context"] = ""
         else:
             for m in filtered:
-                m['context'] = ""
+                m["context"] = ""
 
         config = {
             "response_mime_type": "application/json",
@@ -960,19 +1244,27 @@ class GeminiProcessor:
 
         # Scatter-gather: each chunk gets its own model from the fleet
         CHUNK_SIZE = 10
-        chunks = [filtered[i:i + CHUNK_SIZE] for i in range(0, len(filtered), CHUNK_SIZE)]
+        chunks = [
+            filtered[i : i + CHUNK_SIZE] for i in range(0, len(filtered), CHUNK_SIZE)
+        ]
 
         # Pre-select models for all chunks (under fleet lock, atomically)
         # This ensures chunks get DIFFERENT models when possible
         selected_models: list[str] = []
         used_this_batch: list[str] = []
         for chunk in chunks:
-            tokens = self._estimate_tokens("\n".join(
-                f"ID:{m['id']} {m.get('context','')[:200]}MSG:{m['text'] or ''}"
-                for m in chunk
-            ))
+            tokens = self._estimate_tokens(
+                "\n".join(
+                    f"ID:{m['id']} {m.get('context','')[:200]}MSG:{m['text'] or ''}"
+                    for m in chunk
+                )
+            )
             model = await self._pick_model(
-                exclude=used_this_batch if len(used_this_batch) < len(self._priority_list) - 1 else None,
+                exclude=(
+                    used_this_batch
+                    if len(used_this_batch) < len(self._priority_list) - 1
+                    else None
+                ),
                 estimated_tokens=tokens,
             )
             selected_models.append(model)
@@ -1025,8 +1317,11 @@ class GeminiProcessor:
             )
         return valid
 
-    async def filter_duplicates(self, new_promos: Sequence[PromoExtraction],
-                                recent_alerts: Sequence[dict[str, Any]]) -> list[PromoExtraction]:
+    async def filter_duplicates(
+        self,
+        new_promos: Sequence[PromoExtraction],
+        recent_alerts: Sequence[dict[str, Any]],
+    ) -> list[PromoExtraction]:
         if not new_promos:
             return []
 
@@ -1035,7 +1330,7 @@ class GeminiProcessor:
             f"{normalize_brand(r['brand']).lower()}:{r['summary'][:35].lower()}"
             for r in recent_alerts
         }
-        recent_brands_set = {normalize_brand(r['brand']).lower() for r in history_tail}
+        recent_brands_set = {normalize_brand(r["brand"]).lower() for r in history_tail}
 
         unique: list[PromoExtraction] = []
         intra_batch_keys: set[str] = set()
@@ -1048,20 +1343,24 @@ class GeminiProcessor:
             if key in recent_keys or key in intra_batch_keys:
                 continue
 
-            p_words = set(re.findall(r'\w+', p.summary.lower())[:8])
+            p_words = set(re.findall(r"\w+", p.summary.lower())[:8])
 
-            if brand_key in recent_brands_set and brand_key != 'unknown' and p.status == 'active':
+            if (
+                brand_key in recent_brands_set
+                and brand_key != "unknown"
+                and p.status == "active"
+            ):
                 is_dupe = False
                 for r in reversed(history_tail):
-                    if normalize_brand(r['brand']).lower() == brand_key:
-                        r_words = set(re.findall(r'\w+', r['summary'].lower())[:8])
+                    if normalize_brand(r["brand"]).lower() == brand_key:
+                        r_words = set(re.findall(r"\w+", r["summary"].lower())[:8])
                         if len(p_words & r_words) >= 2:
                             is_dupe = True
                             break
                 if is_dupe:
                     continue
 
-            if brand_key != 'unknown':
+            if brand_key != "unknown":
                 for prev_words in intra_batch_by_brand.get(brand_key, ()):
                     if len(p_words & prev_words) >= 2:
                         break
@@ -1092,8 +1391,12 @@ class GeminiProcessor:
         res = response.text if response else "❌ Gagal merangkum."
         return f"{res}\n\n— via {target}" if response else res
 
-    async def summarize_thread(self, parent_text: str, replies: Sequence[str],
-                               parent_photo: bytes | None = None) -> str:
+    async def summarize_thread(
+        self,
+        parent_text: str,
+        replies: Sequence[str],
+        parent_photo: bytes | None = None,
+    ) -> str:
         if not replies:
             return "Thread ini sedang ramai dibicarakan."
         reply_context = "\n- ".join(replies[:20])
@@ -1110,7 +1413,7 @@ class GeminiProcessor:
         target = await self._pick_model(
             provider="google" if parent_photo else None,
             estimated_tokens=tokens,
-            require_vision=bool(parent_photo)
+            require_vision=bool(parent_photo),
         )
         response = await self._call(
             contents=contents,
@@ -1131,14 +1434,15 @@ class GeminiProcessor:
         res = response.text if response else "❌ AI Busy."
         return f"{res}\n\n— via {target}" if response else res
 
-    async def process_image(self, image_bytes: bytes, caption: str | None,
-                            original_msg_id: int) -> PromoExtraction | None:
+    async def process_image(
+        self, image_bytes: bytes, caption: str | None, original_msg_id: int
+    ) -> PromoExtraction | None:
         has_promo = bool(_PROMO.search(caption)) if caption else False
         has_nonpro = bool(_NON_PROMO.search(caption)) if caption else False
         if has_nonpro and not has_promo:
             return None
 
-        prompt = (f'Caption: "{caption}"' if caption else "Analisis gambar saja.")
+        prompt = f'Caption: "{caption}"' if caption else "Analisis gambar saja."
         config = {
             "response_mime_type": "application/json",
             "response_schema": PromoExtraction,
@@ -1148,9 +1452,7 @@ class GeminiProcessor:
         tokens = self._estimate_tokens(contents)
 
         target = await self._pick_model(
-            provider="google",
-            estimated_tokens=tokens,
-            require_vision=True
+            provider="google", estimated_tokens=tokens, require_vision=True
         )
 
         response = await self._call(
@@ -1168,32 +1470,49 @@ class GeminiProcessor:
             return None
         res.brand = verified_brand
 
-        JUNK = {'tidak ada', 'none', 'n/a', 'tidak ada promo', 'no promo', 'tidak ditemukan', '-', 'unknown'}
-        if (not res.summary or len(res.summary) < 10
-                or res.summary.lower().strip() in JUNK):
+        JUNK = {
+            "tidak ada",
+            "none",
+            "n/a",
+            "tidak ada promo",
+            "no promo",
+            "tidak ditemukan",
+            "-",
+            "unknown",
+        }
+        if (
+            not res.summary
+            or len(res.summary) < 10
+            or res.summary.lower().strip() in JUNK
+        ):
             return None
         res.original_msg_id = original_msg_id
         return res
 
-    async def generate_narrative(self, messages: Sequence[dict[str, Any]],
-                                 db: Any = None) -> list[TrendItem]:
+    async def generate_narrative(
+        self, messages: Sequence[dict[str, Any]], db: Any = None
+    ) -> list[TrendItem]:
         if not messages:
             return []
 
         parent_map: dict[int, str] = {}
         if db is not None:
             try:
-                chat_id = messages[0]['chat_id']
-                reply_ids = [m['reply_to_msg_id'] for m in messages if m['reply_to_msg_id']]
+                chat_id = messages[0]["chat_id"]
+                reply_ids = [
+                    m["reply_to_msg_id"] for m in messages if m["reply_to_msg_id"]
+                ]
                 if chat_id is not None and reply_ids:
-                    parent_map = await db.get_deep_context_bulk(reply_ids, chat_id, max_depth=2)
+                    parent_map = await db.get_deep_context_bulk(
+                        reply_ids, chat_id, max_depth=2
+                    )
             except Exception as e:
                 logger.warning(f"generate_narrative: reply enrichment failed: {e}")
 
         lines: list[str] = []
         for m in messages[:50]:
             ctx = ""
-            rid = m['reply_to_msg_id']
+            rid = m["reply_to_msg_id"]
             if rid and rid in parent_map:
                 parent_txt = (parent_map[rid] or "")[-120:].replace("\n", " ")
                 if parent_txt:
@@ -1214,16 +1533,14 @@ class GeminiProcessor:
             ),
         }
         response = await self._call(
-            contents=f"Pesan grup:\n{context}",
-            config=config,
-            slot_name=target
+            contents=f"Pesan grup:\n{context}", config=config, slot_name=target
         )
 
         seen_topics: list[set[str]] = []
         unique_trends: list[TrendItem] = []
         if response and response.parsed:
             for t in response.parsed.trends:
-                words = set(re.findall(r'\w+', t.topic.lower()))
+                words = set(re.findall(r"\w+", t.topic.lower()))
                 if any(len(words & s) >= 3 for s in seen_topics):
                     continue
                 t.model_name = target
@@ -1232,8 +1549,9 @@ class GeminiProcessor:
 
         return unique_trends
 
-    async def interpret_keywords(self, hot_words: Sequence[str], window: int,
-                                 context_msgs: Sequence[str]) -> str | None:
+    async def interpret_keywords(
+        self, hot_words: Sequence[str], window: int, context_msgs: Sequence[str]
+    ) -> str | None:
         if not context_msgs:
             return None
 
@@ -1256,7 +1574,7 @@ class GeminiProcessor:
         response = await self._call(
             contents=f"Pesan context:\n{context_block}",
             config={"system_instruction": system},
-            slot_name=target
+            slot_name=target,
         )
         result = response.text.strip() if response and response.text else None
         return result if result and "NO_TREND" not in result else None

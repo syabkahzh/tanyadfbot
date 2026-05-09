@@ -28,35 +28,36 @@ logger = logging.getLogger(__name__)
 
 # ── Pre-compiled Patterns ─────────────────────────────────────────────────────
 TIME_PATTERN = re.compile(
-    r'(\b(jam|pukul|pukl|stgh|setengah)\s?\d{1,2}([:.]\d{2})?(\s?wib)?\b|'
-    r'\b\d{1,2}[:.]\d{2}\s?(wib)?\b|'
-    r'\b(malem|sore|subuh|pagi|siang)\b)',
-    re.IGNORECASE
+    r"(\b(jam|pukul|pukl|stgh|setengah)\s?\d{1,2}([:.]\d{2})?(\s?wib)?\b|"
+    r"\b\d{1,2}[:.]\d{2}\s?(wib)?\b|"
+    r"\b(malem|sore|subuh|pagi|siang)\b)",
+    re.IGNORECASE,
 )
 
 INSTANT_PATTERN = re.compile(
-    r'\b(on|jp|jackpot|work|aman|luber|pecah|berhasil|gacor|mantul|restock|ristok|aktif|ready|'
-    r'nyala|masuk|udah pake|dikirim|cair|done|lancar|cek|info|'
-    r'makasih|thx|thanks|makasi|mks|terima.?kasih|'
-    r'potongan|idm|alfa|indomaret|ag|alfagift|voc|voucher|minbel|'
-    r'r\+s\+t\+k|r\+s\+t\+c\+k|r\+st\+ck|cb|kesbek|c\+s\+h\+b\+c\+k|cash back|'
-    r'qr|scan|edc|membership|member|mamber)\b',
-    re.IGNORECASE
+    r"\b(on|jp|jackpot|work|aman|luber|pecah|berhasil|gacor|mantul|restock|ristok|aktif|ready|"
+    r"nyala|masuk|udah pake|dikirim|cair|done|lancar|cek|info|"
+    r"makasih|thx|thanks|makasi|mks|terima.?kasih|"
+    r"potongan|idm|alfa|indomaret|ag|alfagift|voc|voucher|minbel|"
+    r"r\+s\+t\+k|r\+s\+t\+c\+k|r\+st\+ck|cb|kesbek|c\+s\+h\+b\+c\+k|cash back|"
+    r"qr|scan|edc|membership|member|mamber)\b",
+    re.IGNORECASE,
 )
 
 NEG_PATTERN = re.compile(
-    r'\b(kapan|kok|ga pernah|ga\b|ya\b|tidak|belom|belum|gaada|ngga|ga ada|gak|nggak|bukan|jangan|'
-    r'iya|cuma|pas|tadi|gamau|jamber|jambrapa|jamberapa|'
-    r'b\+r\+p|brp|berapa|drmana|dimana|dmn|mana|d\+r\+m\+n|'
-    r'tunggu|nunggu|nanti|besok|lusa|tar\b|dulu|sore|malem|malam|pagi|'
-    r'harusnya|katanya|mungkin|kayaknya|kyknya|sepertinya|entah|'
-    r'koid|hangus|refund|batal|balsis|ngebadut|zonk|habis|sold|error|'
-    r'coba|nyoba|semoga|mudah.mudahan|insya|makasih|terima kasih|thanks|nuhun|tengkyu|nangis|sedih|anjir|bgst|halo|hai)\b',
-    re.IGNORECASE
+    r"\b(kapan|kok|ga pernah|ga\b|ya\b|tidak|belom|belum|gaada|ngga|ga ada|gak|nggak|bukan|jangan|"
+    r"iya|cuma|pas|tadi|gamau|jamber|jambrapa|jamberapa|"
+    r"b\+r\+p|brp|berapa|drmana|dimana|dmn|mana|d\+r\+m\+n|"
+    r"tunggu|nunggu|nanti|besok|lusa|tar\b|dulu|sore|malem|malam|pagi|"
+    r"harusnya|katanya|mungkin|kayaknya|kyknya|sepertinya|entah|"
+    r"koid|hangus|refund|batal|balsis|ngebadut|zonk|habis|sold|error|"
+    r"coba|nyoba|semoga|mudah.mudahan|insya|makasih|terima kasih|thanks|nuhun|tengkyu|nangis|sedih|anjir|bgst|halo|hai)\b",
+    re.IGNORECASE,
 )
 
-FAST_ALLCAPS = re.compile(r'^[^a-z]*[A-Z][^a-z]*$')
-_PROMO_CODE_PATTERN = re.compile(r'\b(?=.*[A-Z])[A-Z0-9]{6,25}\b')
+FAST_ALLCAPS = re.compile(r"^[^a-z]*[A-Z][^a-z]*$")
+_PROMO_CODE_PATTERN = re.compile(r"\b(?=.*[A-Z])[A-Z0-9]{6,25}\b")
+_QUESTION_AMAN_PATTERN = re.compile(r"\b(aman|work|on)\s+(ga|gak|nggak|ya)\b")
 
 
 def check_fast_path(text: str) -> bool:
@@ -66,18 +67,20 @@ def check_fast_path(text: str) -> bool:
     t = text.strip()
     tl = t.lower()
 
-    if '?' in t or NEG_PATTERN.search(tl):
+    if "?" in t or NEG_PATTERN.search(tl):
         return False
 
-    if re.search(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b', tl):
+    if _QUESTION_AMAN_PATTERN.search(tl):
         return False
 
     from processor import _SOCIAL_FILLER
+
     if _SOCIAL_FILLER.match(t):
         return False
 
     from shared import TRANSIT_NOISE_PATTERN
-    if 'aman' in tl and TRANSIT_NOISE_PATTERN.search(tl):
+
+    if "aman" in tl and TRANSIT_NOISE_PATTERN.search(tl):
         return False
 
     if FAST_ALLCAPS.match(t) and len(t) > 3:
@@ -130,18 +133,26 @@ class TelethonListener:
         _fp_start = time.monotonic()
 
         from shared import (
-            _make_tg_link, _guess_brand, _flush_alert_buffer,
-            db, _alerted_aman_parents, _alerted_aman_parents_deque, _aman_lock,
-            _recent_alerts_history, _recent_alerts_lock,
-            _fastpath_brand_last_fired, _fastpath_brand_lock,
+            _make_tg_link,
+            _guess_brand,
+            _flush_alert_buffer,
+            db,
+            _alerted_aman_parents,
+            _alerted_aman_parents_deque,
+            _aman_lock,
+            _recent_alerts_history,
+            _recent_alerts_lock,
+            _fastpath_brand_last_fired,
+            _fastpath_brand_lock,
             FASTPATH_BRAND_DEDUP_SEC,
-            context_tracker, TRANSIT_NOISE_PATTERN,
+            context_tracker,
+            TRANSIT_NOISE_PATTERN,
             is_fuzzy_duplicate,
         )
         from db import normalize_brand
         from processor import PromoExtraction, _SOCIAL_FILLER
 
-        text = (event.text or '').strip()
+        text = (event.text or "").strip()
         text_lower = text.lower()
         chat_id = event.chat_id
         reply_to_msg_id = event.reply_to_msg_id
@@ -150,9 +161,11 @@ class TelethonListener:
         if not check_fast_path(text):
             return
 
-        is_instant = bool(INSTANT_PATTERN.search(text)) and '?' not in text
-        is_allcaps = bool(FAST_ALLCAPS.match(text)) and len(text.strip()) > 3 and '?' not in text
-        is_aman_standalone = text_lower == 'aman' and '?' not in text
+        is_instant = bool(INSTANT_PATTERN.search(text)) and "?" not in text
+        is_allcaps = (
+            bool(FAST_ALLCAPS.match(text)) and len(text.strip()) > 3 and "?" not in text
+        )
+        is_aman_standalone = text_lower == "aman" and "?" not in text
         has_promo_code = bool(_PROMO_CODE_PATTERN.search(text))
 
         if _SOCIAL_FILLER.match(text):
@@ -161,9 +174,9 @@ class TelethonListener:
             return
         if NEG_PATTERN.search(text_lower):
             return
-        if re.search(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b', text_lower):
+        if _QUESTION_AMAN_PATTERN.search(text_lower):
             return
-        if 'aman' in text_lower and TRANSIT_NOISE_PATTERN.search(text):
+        if "aman" in text_lower and TRANSIT_NOISE_PATTERN.search(text):
             return
 
         # ── Gate 2: standalone "aman" requires parent ─────────────────────
@@ -189,11 +202,11 @@ class TelethonListener:
                 async with asyncio.timeout(0.3):
                     async with self.db.conn.execute(
                         "SELECT text FROM messages WHERE tg_msg_id=? AND chat_id=?",
-                        (reply_to_msg_id, chat_id)
+                        (reply_to_msg_id, chat_id),
                     ) as cur:
                         row = await cur.fetchone()
                         if row:
-                            parent_text = row['text']
+                            parent_text = row["text"]
                             brand = normalize_brand(_guess_brand(parent_text or text))
             except Exception:
                 pass  # stay Unknown — fast-path may skip below
@@ -211,15 +224,39 @@ class TelethonListener:
 
         # ── Gate 3: ambiguous signals need a known brand ──────────────────
         AMBIGUOUS = {
-            'on', 'ready', 'aktif', 'restock', 'ristok', 'cek', 'info',
-            'makasih', 'thx', 'thanks', 'makasi', 'mks', 'terimakasih',
-            'luber', 'pecah'
+            "on",
+            "ready",
+            "aktif",
+            "restock",
+            "ristok",
+            "cek",
+            "info",
+            "makasih",
+            "thx",
+            "thanks",
+            "makasi",
+            "mks",
+            "terimakasih",
+            "luber",
+            "pecah",
         }
-        found_sigs = set(w for w in INSTANT_PATTERN.findall(text_lower) if isinstance(w, str))
-        if (not is_allcaps and not has_promo_code and brand == "Unknown"
-                and (found_sigs & AMBIGUOUS) and len(text) > 15):
+        found_sigs = set(
+            w for w in INSTANT_PATTERN.findall(text_lower) if isinstance(w, str)
+        )
+        if (
+            not is_allcaps
+            and not has_promo_code
+            and brand == "Unknown"
+            and (found_sigs & AMBIGUOUS)
+            and len(text) > 15
+        ):
             return
-        if not is_allcaps and not has_promo_code and brand == "Unknown" and (is_aman_standalone or is_instant):
+        if (
+            not is_allcaps
+            and not has_promo_code
+            and brand == "Unknown"
+            and (is_aman_standalone or is_instant)
+        ):
             return
 
         # ── Gate 4: brand-level dedup (short window) ──────────────────────
@@ -246,9 +283,9 @@ class TelethonListener:
         combined = (text or "") + " " + (parent_text or "")
         promo_links: list[str] = []
         seen: set[str] = set()
-        for url in re.findall(r'(https?://[^\s>]+)', combined):
-            u = url.strip('.,()[]"\'')
-            if 't.me' not in u and 'telegram.me' not in u and u not in seen:
+        for url in re.findall(r"(https?://[^\s>]+)", combined):
+            u = url.strip(".,()[]\"'")
+            if "t.me" not in u and "telegram.me" not in u and u not in seen:
                 promo_links.append(u)
                 seen.add(u)
 
@@ -262,7 +299,9 @@ class TelethonListener:
         if velocity >= 100:
             summary = f"🔥 RAMAI ({velocity} msg/5m) — {summary}"
 
-        queue_time = (datetime.now(timezone.utc) - event.date.astimezone(timezone.utc)).total_seconds()
+        queue_time = (
+            datetime.now(timezone.utc) - event.date.astimezone(timezone.utc)
+        ).total_seconds()
 
         fast_promo = PromoExtraction(
             original_msg_id=0,
@@ -273,7 +312,7 @@ class TelethonListener:
             status="active",
             links=promo_links[:3],
             queue_time=queue_time,
-            ai_time=0.0
+            ai_time=0.0,
         )
 
         tg_link = _make_tg_link(chat_id, event.id)
@@ -288,30 +327,32 @@ class TelethonListener:
             p_data_json=fast_promo.model_dump_json(),
             tg_link=tg_link,
             timestamp=event.date,
-            source='python',
-            commit=True
+            source="python",
+            commit=True,
         )
 
         # Prevent AI loop from re-alerting the same promo
         async with _recent_alerts_lock:
-            _recent_alerts_history.append({
-                "brand": normalize_brand(brand),
-                "summary": summary,
-            })
+            _recent_alerts_history.append(
+                {
+                    "brand": normalize_brand(brand),
+                    "summary": summary,
+                }
+            )
 
         # Save fastpath promo to promos table (fire-and-forget)
-        asyncio.create_task(db.save_fastpath_promo(
-            brand=brand,
-            summary=summary,
-            conditions="",
-            tg_link=tg_link,
-            status="active",
-        ))
+        asyncio.create_task(
+            db.save_fastpath_promo(
+                brand=brand,
+                summary=summary,
+                conditions="",
+                tg_link=tg_link,
+                status="active",
+            )
+        )
 
         # Mark message processed by tg_id (fire-and-forget, race-safe)
-        asyncio.create_task(
-            self.db.mark_processed_by_tg_id(event.id, chat_id)
-        )
+        asyncio.create_task(self.db.mark_processed_by_tg_id(event.id, chat_id))
 
         # Trigger flush with minimal delay for fast-path
         t = shared.get_buffer_flush_task()
@@ -345,7 +386,7 @@ class TelethonListener:
                 processed=0,
                 has_photo=1 if event.photo else 0,
                 has_time_mention=1 if has_time else 0,
-                commit=True
+                commit=True,
             )
             if internal_id:
                 logger.debug(f"   📥 Queued (ID={internal_id})")
@@ -358,6 +399,7 @@ class TelethonListener:
 
     async def start(self):
         import logging as _logging
+
         _l = _logging.getLogger(__name__)
 
         for attempt in range(5):
@@ -367,7 +409,9 @@ class TelethonListener:
             except Exception as e:
                 if "locked" in str(e).lower() and attempt < 4:
                     wait = 3 * (attempt + 1)
-                    _l.warning(f"⚠️ Telethon session locked on start, retrying in {wait}s...")
+                    _l.warning(
+                        f"⚠️ Telethon session locked on start, retrying in {wait}s..."
+                    )
                     await asyncio.sleep(wait)
                     continue
                 raise
@@ -394,20 +438,30 @@ class TelethonListener:
                 if not message.text:
                     continue
 
-                msg_age = (datetime.now(timezone.utc) - message.date.astimezone(timezone.utc)).total_seconds()
+                msg_age = (
+                    datetime.now(timezone.utc) - message.date.astimezone(timezone.utc)
+                ).total_seconds()
                 mark_processed = 1 if msg_age > 900 else 0
 
                 has_time = any(
                     w in message.text.lower()
-                    for w in ['jam', 'menit', 'detik', 'sore', 'siang', 'pagi', 'malam']
+                    for w in ["jam", "menit", "detik", "sore", "siang", "pagi", "malam"]
                 )
 
-                buffer.append((
-                    message.id, chat_id, message.sender_id,
-                    f"User_{message.sender_id}", _ts_str(message.date),
-                    message.text, message.reply_to_msg_id,
-                    mark_processed, 1 if message.photo else 0, 1 if has_time else 0
-                ))
+                buffer.append(
+                    (
+                        message.id,
+                        chat_id,
+                        message.sender_id,
+                        f"User_{message.sender_id}",
+                        _ts_str(message.date),
+                        message.text,
+                        message.reply_to_msg_id,
+                        mark_processed,
+                        1 if message.photo else 0,
+                        1 if has_time else 0,
+                    )
+                )
 
                 if len(buffer) >= 100:
                     await self._bulk_save_to_db(buffer)
@@ -424,26 +478,32 @@ class TelethonListener:
                 gap_hours = 999.0
             else:
                 gap_hours = (
-                    (datetime.now(timezone.utc) - last_ts).total_seconds() / 3600
-                )
+                    datetime.now(timezone.utc) - last_ts
+                ).total_seconds() / 3600
 
             if gap_hours > catchup_hours:
-                logger.info(f"⚠️ Gap {gap_hours:.1f}h — fetching last {catchup_hours}h only.")
+                logger.info(
+                    f"⚠️ Gap {gap_hours:.1f}h — fetching last {catchup_hours}h only."
+                )
                 limit_date = datetime.now(timezone.utc) - timedelta(hours=catchup_hours)
-                await fetch_and_buffer(self.client.iter_messages(
-                    chat_id, offset_date=limit_date, reverse=True
-                ))
+                await fetch_and_buffer(
+                    self.client.iter_messages(
+                        chat_id, offset_date=limit_date, reverse=True
+                    )
+                )
             else:
-                logger.info(f"🔄 Short gap ({gap_hours:.1f}h) — catching up from msg {last_id}.")
-                await fetch_and_buffer(self.client.iter_messages(
-                    chat_id, min_id=last_id, reverse=True
-                ))
+                logger.info(
+                    f"🔄 Short gap ({gap_hours:.1f}h) — catching up from msg {last_id}."
+                )
+                await fetch_and_buffer(
+                    self.client.iter_messages(chat_id, min_id=last_id, reverse=True)
+                )
         else:
             logger.info(f"⏱️ DB empty — syncing last {hours}h.")
             limit_date = datetime.now(timezone.utc) - timedelta(hours=hours)
-            await fetch_and_buffer(self.client.iter_messages(
-                chat_id, offset_date=limit_date, reverse=True
-            ))
+            await fetch_and_buffer(
+                self.client.iter_messages(chat_id, offset_date=limit_date, reverse=True)
+            )
 
         logger.info("✅ History sync complete.")
 
@@ -452,12 +512,15 @@ class TelethonListener:
         if not self.db.conn or not msgs_data:
             return
         try:
-            await self.db.conn.executemany("""
+            await self.db.conn.executemany(
+                """
                 INSERT OR IGNORE INTO messages
                     (tg_msg_id, chat_id, sender_id, sender_name, timestamp,
                      text, reply_to_msg_id, processed, has_photo, has_time_mention)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, msgs_data)
+            """,
+                msgs_data,
+            )
             await self.db.conn.commit()
             logger.debug(f"   📥 Bulk Queued {len(msgs_data)} msgs")
         except Exception as e:
