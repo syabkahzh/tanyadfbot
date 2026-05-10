@@ -14,6 +14,10 @@ import os
 from datetime import datetime, timezone, timedelta
 from typing import Any, cast
 
+_JSM_PSM_PATTERN = re.compile(r'\b(jsm|psm)\b')
+_AFM_PATTERN = re.compile(r'\bafm\b')
+_IDM_PATTERN = re.compile(r'\bidm\b')
+
 from db import Database
 from processor import GeminiProcessor
 from bot import TelegramBot
@@ -512,11 +516,11 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                         'ovo', 'astrapay', 'aspay', 'linkaja', 'qris'
                     }
                     if promo.brand and promo.brand.lower().strip() in PAY_BRANDS:
-                        if re.search(r'\b(jsm|psm)\b', caption_l):
+                        if _JSM_PSM_PATTERN.search(caption_l):
                             promo.brand = 'Alfamart'
-                        elif re.search(r'\bafm\b', caption_l):
+                        elif _AFM_PATTERN.search(caption_l):
                             promo.brand = 'Alfamart'
-                        elif re.search(r'\bidm\b', caption_l):
+                        elif _IDM_PATTERN.search(caption_l):
                             promo.brand = 'Indomaret'
 
                     tg_link  = _make_tg_link(chat_id, tg_msg_id)
