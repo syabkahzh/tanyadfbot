@@ -1128,6 +1128,48 @@ class Database:
         except Exception as e:
             logger.error(f"DB save_pending_alert error: {e}")
 
+    async def save_pending_alerts_bulk(self, alerts: list[dict], commit: bool = True) -> None:
+        """Saves multiple alerts waiting to be flushed to Telegram.
+
+        Args:
+            alerts: List of dicts, each containing:
+                - brand: Normalized brand name.
+                - p_data_json: JSON string of promo data.
+                - tg_link: Link to source message.
+                - timestamp: Original message timestamp.
+                - corroborations: Initial corroboration count (default 0).
+                - corroboration_texts: JSON list of snippets (default '[]').
+                - source: Source of the alert ('ai' or 'python', default 'ai').
+            commit: Whether to commit immediately.
+        """
+        if not self.conn or not alerts:
+            return
+
+        values = []
+        for a in alerts:
+            ts = _ts_str(a['timestamp']) if not isinstance(a['timestamp'], str) else a['timestamp']
+            values.append((
+                a['brand'],
+                a['p_data_json'],
+                a['tg_link'],
+                ts,
+                a.get('corroborations', 0),
+                a.get('corroboration_texts', '[]'),
+                a.get('source', 'ai')
+            ))
+
+        try:
+            await self.conn.executemany(
+                "INSERT INTO pending_alerts "
+                "(brand, p_data_json, tg_link, timestamp, corroborations, corroboration_texts, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                values
+            )
+            if commit:
+                await self.conn.commit()
+        except Exception as e:
+            logger.error(f"DB save_pending_alerts_bulk error: {e}")
+
     # ── Velocity ──────────────────────────────────────────────────────────────
 
     async def get_brand_velocity(self, brand: str, minutes: int = 5) -> int:
