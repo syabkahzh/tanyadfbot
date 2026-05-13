@@ -781,7 +781,7 @@ class Database:
                         row = existing_map[brand]
                         try:
                             texts = json.loads(row['corroboration_texts'] or "[]")
-                        except:
+                        except (json.JSONDecodeError, TypeError, ValueError):
                             texts = []
                         
                         if snippet and snippet not in texts:
