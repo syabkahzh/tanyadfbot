@@ -7,3 +7,14 @@
 **Learning:** Pre-compiling RegEx locally within a frequently called asynchronous job function forces the Python interpreter to look up or recompile the regular expression repeatedly, causing unnecessary overhead. While Python caches RegEx compilations, relying on module-level constants circumvents the lookup entirely.
 
 **Action:** Consistently elevate pre-compiled `re.compile` patterns to the module level instead of defining them locally within functions, especially inside asynchronous loops or frequent jobs.
+## 2024-05-31 - Optimization of RegEx compilation across critical paths
+
+**Learning:** Pre-compiling RegEx locally within a frequently called asynchronous job function forces the Python interpreter to look up or recompile the regular expression repeatedly, causing unnecessary overhead. While Python caches RegEx compilations, relying on module-level constants circumvents the lookup entirely. Specifically, inline  calls in high-throughput paths (like message loop parsing and prompt formatting) can add up and create latency.
+
+**Action:** Consistently elevate pre-compiled `re.compile` patterns to the module level instead of defining them locally within functions, especially inside asynchronous loops or frequent jobs. This was applied to `listener.py`, `jobs.py`, and `processor.py`.
+
+## 2024-05-31 - Optimization of RegEx compilation across critical paths
+
+**Learning:** Pre-compiling RegEx locally within a frequently called asynchronous job function forces the Python interpreter to look up or recompile the regular expression repeatedly, causing unnecessary overhead. While Python caches RegEx compilations, relying on module-level constants circumvents the lookup entirely. Specifically, inline `re.search()` calls in high-throughput paths (like message loop parsing and prompt formatting) can add up and create latency.
+
+**Action:** Consistently elevate pre-compiled `re.compile` patterns to the module level instead of defining them locally within functions, especially inside asynchronous loops or frequent jobs. This was applied to `listener.py`, `jobs.py`, and `processor.py`.
