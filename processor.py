@@ -75,6 +75,9 @@ _META_SUMMARY_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+_AMAN_GA_PATTERN = re.compile(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b', re.IGNORECASE)
+_AMAN_NGGA_PATTERN = re.compile(r'\b(aman|work|on)\s+(ngga)\b', re.IGNORECASE)
+
 # ── Response schemas ──────────────────────────────────────────────────────────
 
 class PromoExtraction(BaseModel):
@@ -155,7 +158,7 @@ _STRONG_KEYWORDS: set[str] = {
     'gabisa','gaada','g+b+s','gamau','minbel',
     'kuota','limit','slot','redeem','qr','scan','edc',
     'r+s+t+k','r+s+t+c+k','r+st+ck',
-    'cb','kesbek','c\+s\+h\+b\+c\+k','cash back',
+    'cb','kesbek','c+s+h+b+c+k','cash back',
     'luber','pecah','flash','sale','deal','murah','hemat','bonus',
     'ongkir','gratis ongkir','membership','member','mamber',
     'yang butuh aja','ymma','tukpo','murce','murmer','sopi','tsel','cgv','xxi',
@@ -907,13 +910,13 @@ class GeminiProcessor:
 
         if '?' in t:
             score -= 5
-        if re.search(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b', t):
+        if _AMAN_GA_PATTERN.search(t):
             score -= 8
         if t.endswith('?') and words and words[0] in question_words:
             score -= 5
         if any(w in question_words for w in words) and ('aman' in t or 'work' in t or 'on' in t):
             score -= 8
-        if re.search(r'\b(aman|work|on)\s+(ngga)\b', t):
+        if _AMAN_NGGA_PATTERN.search(t):
             score -= 15
 
         if any(kw in t for kw in _STRONG_KEYWORDS) and score >= 0:

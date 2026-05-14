@@ -9,6 +9,7 @@ import html
 import re
 import pytz
 import logging
+import sys
 import time
 import os
 from datetime import datetime, timezone, timedelta
@@ -98,7 +99,6 @@ async def time_reminder_job(db: Database, bot: TelegramBot, WIB: Any) -> None:
     """
     logger.info("⏰ [Job] Starting time_reminder_job...")
     try:
-        import pytz
         if not db.conn:
             return
 
@@ -298,7 +298,6 @@ async def midnight_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
     """Generates a re-cap of overnight activity (02:00–05:00 WIB)."""
     logger.info("⏰ [Job] Starting midnight_digest_job...")
     try:
-        import pytz
         jakarta_tz = pytz.timezone("Asia/Jakarta")
         now_wib = datetime.now(jakarta_tz)
         # Anchor: today at 02:00 WIB
@@ -415,6 +414,10 @@ async def halfhour_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegr
 # the Python interpreter from attempting to recompile them (or look them up
 # in its internal cache) every time `image_processing_job` runs. This saves
 # micro-seconds per execution and reduces overhead on the event loop.
+_IMG_PAY_BRANDS_JSM = re.compile(r'\b(jsm|psm)\b', re.IGNORECASE)
+_IMG_PAY_BRANDS_AFM = re.compile(r'\bafm\b', re.IGNORECASE)
+_IMG_PAY_BRANDS_IDM = re.compile(r'\bidm\b', re.IGNORECASE)
+
 _IMG_SKIP = re.compile(
     r'\b(setting|pengaturan|config|tutorial|cara|gimana|help|tolong|'
     r'oot|random|selfie|meme|lucu|haha|wkwk|ini kak|kak ini)\b',
@@ -430,7 +433,6 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
     """Processes unhandled photo messages with the vision model."""
     logger.info("⏰ [Job] Starting image_processing_job...")
     try:
-        import pytz
         if not db.conn:
             return
 
@@ -512,11 +514,11 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
                         'ovo', 'astrapay', 'aspay', 'linkaja', 'qris'
                     }
                     if promo.brand and promo.brand.lower().strip() in PAY_BRANDS:
-                        if re.search(r'\b(jsm|psm)\b', caption_l):
+                        if _IMG_PAY_BRANDS_JSM.search(caption_l):
                             promo.brand = 'Alfamart'
-                        elif re.search(r'\bafm\b', caption_l):
+                        elif _IMG_PAY_BRANDS_AFM.search(caption_l):
                             promo.brand = 'Alfamart'
-                        elif re.search(r'\bidm\b', caption_l):
+                        elif _IMG_PAY_BRANDS_IDM.search(caption_l):
                             promo.brand = 'Indomaret'
 
                     tg_link  = _make_tg_link(chat_id, tg_msg_id)
@@ -808,7 +810,6 @@ async def time_mention_job(db: Database, bot: TelegramBot) -> None:
     """Monitors and alerts on relevant time-sensitive messages."""
     logger.info("⏰ [Job] Starting time_mention_job...")
     try:
-        import pytz
         if not db.conn:
             return
 
@@ -1047,7 +1048,6 @@ async def dead_promo_reaper_job(db: Database, bot: TelegramBot) -> None:
     """Closes expired promotions based on subsequent community chat signals."""
     logger.info("💀 [Job] Starting dead_promo_reaper_job...")
     try:
-        import pytz
         if not db.conn:
             return
             
@@ -1121,7 +1121,6 @@ async def confirmation_gate_job(db: Database) -> None:
     """Processes low-confidence promotions that were waiting for confirmation."""
     logger.info("⏰ [Job] Starting confirmation_gate_job...")
     try:
-        import pytz
         if not db.conn:
             return
             
@@ -1137,27 +1136,36 @@ async def confirmation_gate_job(db: Database) -> None:
             return
 
         fired_ids: list[int] = []
+        alerts_to_save: list[dict[str, Any]] = []
         from processor import PromoExtraction
+
         for r in ready:
             if r['corroborations'] >= 1:
                 p_data = PromoExtraction.model_validate_json(r['p_data_json'])
                 logger.info(f"Confirm gate CORROBORATED: {r['brand']}")
-                await db.save_pending_alert(
-                    r['brand'], r['p_data_json'], r['tg_link'],
-                    r['timestamp'], corroborations=r['corroborations'],
-                    corroboration_texts=r['corroboration_texts'],
-                    source='ai', commit=False
-                )
-                t = shared.get_buffer_flush_task()
-                if t is None or t.done():
-                    shared.set_buffer_flush_task(
-                        asyncio.create_task(_flush_alert_buffer(delay=0.3))
-                    )
+                alerts_to_save.append({
+                    'brand': r['brand'],
+                    'p_data_json': r['p_data_json'],
+                    'tg_link': r['tg_link'],
+                    'timestamp': r['timestamp'],
+                    'corroborations': r['corroborations'],
+                    'corroboration_texts': r['corroboration_texts'],
+                    'source': 'ai'
+                })
+
                 async with shared._recent_alerts_lock:
                     shared._recent_alerts_history.append({
                         "brand": r['brand'], "summary": p_data.summary
                     })
             fired_ids.append(r['id'])
+
+        if alerts_to_save:
+            await db.save_pending_alerts_bulk(alerts_to_save)
+            t = shared.get_buffer_flush_task()
+            if t is None or t.done():
+                shared.set_buffer_flush_task(
+                    asyncio.create_task(_flush_alert_buffer(delay=0.3))
+                )
 
         if fired_ids:
             ph = ','.join('?' * len(fired_ids))
@@ -1181,7 +1189,6 @@ async def db_maintenance_job(db: Database, bot: TelegramBot) -> None:
     logger.info("⏰ [Job] Starting db_maintenance_job...")
     try:
         # Skip heavy VACUUM during peak deal hours (9 AM - 11 PM WIB)
-        import pytz
         jakarta_tz = pytz.timezone("Asia/Jakarta")
         now_wib = datetime.now(jakarta_tz)
         
@@ -1205,8 +1212,6 @@ async def fasttext_retrain_job(db: Database, bot: TelegramBot) -> None:
     """Automatically exports data and retrains the FastText model."""
     logger.info("⏰ [Job] Starting FastText autonomous retraining...")
     try:
-        import sys
-
         export_script = os.path.join(os.getcwd(), "tools", "export_training_data.py")
         train_script = os.path.join(os.getcwd(), "tools", "train_model.py")
 

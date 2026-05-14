@@ -10,6 +10,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Sequence, cast
 import functools
 
+import json
 import aiosqlite
 from config import Config
 
@@ -753,9 +754,6 @@ class Database:
         if not self.conn or not batch:
             return
 
-        import json
-        from datetime import datetime, timedelta, timezone
-
         async with self.lock:
             try:
                 # 1. Fetch all existing records for these brands in one go
@@ -781,7 +779,7 @@ class Database:
                         row = existing_map[brand]
                         try:
                             texts = json.loads(row['corroboration_texts'] or "[]")
-                        except:
+                        except (json.JSONDecodeError, TypeError, ValueError):
                             texts = []
                         
                         if snippet and snippet not in texts:
@@ -1092,6 +1090,34 @@ class Database:
             (msg_id,)
         ) as cur:
             return await cur.fetchone()
+
+    async def save_pending_alerts_bulk(self, alerts: list[dict[str, Any]]) -> None:
+        """Saves a batch of pending alerts efficiently using executemany.
+
+        Args:
+            alerts: A list of dictionaries containing alert data.
+        """
+        if not self.conn or not alerts:
+            return
+
+        to_insert = []
+        for a in alerts:
+            ts = _ts_str(a['timestamp']) if not isinstance(a['timestamp'], str) else a['timestamp']
+            to_insert.append((
+                a['brand'], a['p_data_json'], a['tg_link'], ts,
+                a.get('corroborations', 0), a.get('corroboration_texts', '[]'), a.get('source', 'ai')
+            ))
+
+        try:
+            await self.conn.executemany(
+                "INSERT INTO pending_alerts "
+                "(brand, p_data_json, tg_link, timestamp, corroborations, corroboration_texts, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                to_insert
+            )
+            await self.conn.commit()
+        except Exception as e:
+            logger.error(f"DB save_pending_alerts_bulk error: {e}")
 
     async def save_pending_alert(self, brand: str, p_data_json: str,
                                   tg_link: str, timestamp: str | datetime,
