@@ -75,6 +75,11 @@ _META_SUMMARY_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+_ERR_WAIT_RE = re.compile(r'try again in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)')
+_ERR_USAGE_RE = re.compile(r'limit (\d+), used (\d+)')
+_AMAN_QUESTION_RE = re.compile(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b')
+_AMAN_NGGA_RE = re.compile(r'\b(aman|work|on)\s+(ngga)\b')
+
 # ── Response schemas ──────────────────────────────────────────────────────────
 
 class PromoExtraction(BaseModel):
@@ -825,7 +830,7 @@ class GeminiProcessor:
                     logger.warning(f"🛑 [{slot.name}] OpenRouter daily limit hit — backing off 12h")
 
                 # Parse "try again in Xm Ys" from error
-                wait_match = re.search(r'try again in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)', err_str)
+                wait_match = _ERR_WAIT_RE.search(err_str)
                 if wait_match:
                     h = int(wait_match.group(1) or 0)
                     m = int(wait_match.group(2) or 0)
@@ -835,7 +840,7 @@ class GeminiProcessor:
                     sleep_sec = 3600 * 4
 
                 # Adaptive sync from error message
-                usage_match = re.search(r'limit (\d+), used (\d+)', err_str)
+                usage_match = _ERR_USAGE_RE.search(err_str)
                 if usage_match:
                     slot.saturate_locally(int(usage_match.group(2)), int(usage_match.group(1)))
 
@@ -907,13 +912,13 @@ class GeminiProcessor:
 
         if '?' in t:
             score -= 5
-        if re.search(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b', t):
+        if _AMAN_QUESTION_RE.search(t):
             score -= 8
         if t.endswith('?') and words and words[0] in question_words:
             score -= 5
         if any(w in question_words for w in words) and ('aman' in t or 'work' in t or 'on' in t):
             score -= 8
-        if re.search(r'\b(aman|work|on)\s+(ngga)\b', t):
+        if _AMAN_NGGA_RE.search(t):
             score -= 15
 
         if any(kw in t for kw in _STRONG_KEYWORDS) and score >= 0:
