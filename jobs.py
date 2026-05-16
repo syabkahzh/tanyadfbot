@@ -1137,17 +1137,21 @@ async def confirmation_gate_job(db: Database) -> None:
             return
 
         fired_ids: list[int] = []
+        alerts_to_save: list[dict[str, Any]] = []
         from processor import PromoExtraction
         for r in ready:
             if r['corroborations'] >= 1:
                 p_data = PromoExtraction.model_validate_json(r['p_data_json'])
                 logger.info(f"Confirm gate CORROBORATED: {r['brand']}")
-                await db.save_pending_alert(
-                    r['brand'], r['p_data_json'], r['tg_link'],
-                    r['timestamp'], corroborations=r['corroborations'],
-                    corroboration_texts=r['corroboration_texts'],
-                    source='ai', commit=False
-                )
+                alerts_to_save.append({
+                    'brand': r['brand'],
+                    'p_data_json': r['p_data_json'],
+                    'tg_link': r['tg_link'],
+                    'timestamp': r['timestamp'],
+                    'corroborations': r['corroborations'],
+                    'corroboration_texts': r['corroboration_texts'],
+                    'source': 'ai'
+                })
                 t = shared.get_buffer_flush_task()
                 if t is None or t.done():
                     shared.set_buffer_flush_task(
@@ -1158,6 +1162,9 @@ async def confirmation_gate_job(db: Database) -> None:
                         "brand": r['brand'], "summary": p_data.summary
                     })
             fired_ids.append(r['id'])
+
+        if alerts_to_save:
+            await db.save_pending_alerts_bulk(alerts_to_save, commit=False)
 
         if fired_ids:
             ph = ','.join('?' * len(fired_ids))
