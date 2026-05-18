@@ -38,6 +38,7 @@ _SOCIAL_FILLER = re.compile(
     r'^(?:wkwk|haha|hehe|iya|noted|oke|ok|makasih|thanks|thx|mantap|gas|bos|guys|gais|bang|kak|siap|sip|lol|anjir|anjay|btw|oot|gws|semangat|ya allah|nangis|sedih|beneran|kah|[!.\s])+$',
     re.IGNORECASE
 )
+_WORD_RE = re.compile(r'\w+')
 _NON_PROMO = re.compile(
     r'\b(setting|pengaturan|config|tutorial|cara|gimana|help|tolong|ini kak|'
     r'oot|random|foto|selfie|meme|lucu|haha|wkwk)\b', re.IGNORECASE
@@ -1035,7 +1036,14 @@ class GeminiProcessor:
             f"{normalize_brand(r['brand']).lower()}:{r['summary'][:35].lower()}"
             for r in recent_alerts
         }
-        recent_brands_set = {normalize_brand(r['brand']).lower() for r in history_tail}
+
+        # Pre-compute words and group by brand to avoid O(N*M) regex parsing
+        history_by_brand: dict[str, list[set[str]]] = {}
+        for r in reversed(history_tail):
+            b_key = normalize_brand(r['brand']).lower()
+            if b_key != 'unknown':
+                r_words = set(_WORD_RE.findall(r['summary'].lower())[:8])
+                history_by_brand.setdefault(b_key, []).append(r_words)
 
         unique: list[PromoExtraction] = []
         intra_batch_keys: set[str] = set()
@@ -1048,16 +1056,14 @@ class GeminiProcessor:
             if key in recent_keys or key in intra_batch_keys:
                 continue
 
-            p_words = set(re.findall(r'\w+', p.summary.lower())[:8])
+            p_words = set(_WORD_RE.findall(p.summary.lower())[:8])
 
-            if brand_key in recent_brands_set and brand_key != 'unknown' and p.status == 'active':
+            if brand_key in history_by_brand and p.status == 'active':
                 is_dupe = False
-                for r in reversed(history_tail):
-                    if normalize_brand(r['brand']).lower() == brand_key:
-                        r_words = set(re.findall(r'\w+', r['summary'].lower())[:8])
-                        if len(p_words & r_words) >= 2:
-                            is_dupe = True
-                            break
+                for r_words in history_by_brand[brand_key]:
+                    if len(p_words & r_words) >= 2:
+                        is_dupe = True
+                        break
                 if is_dupe:
                     continue
 
