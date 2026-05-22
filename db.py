@@ -1128,6 +1128,46 @@ class Database:
         except Exception as e:
             logger.error(f"DB save_pending_alert error: {e}")
 
+    async def save_pending_alerts_bulk(self, alerts: list[dict[str, Any]]) -> None:
+        """Saves multiple alerts that are waiting to be flushed to Telegram in a single batch.
+
+        Each dictionary in the `alerts` list should contain the following keys:
+        - brand: str
+        - p_data_json: str
+        - tg_link: str
+        - timestamp: str | datetime
+        - corroborations: int
+        - corroboration_texts: str
+        - source: str
+        """
+        if not self.conn or not alerts:
+            return
+
+        rows = []
+        for alert in alerts:
+            ts = alert['timestamp']
+            ts_str = _ts_str(ts) if not isinstance(ts, str) else ts
+            rows.append((
+                alert['brand'],
+                alert['p_data_json'],
+                alert['tg_link'],
+                ts_str,
+                alert.get('corroborations', 0),
+                alert.get('corroboration_texts', '[]'),
+                alert.get('source', 'ai')
+            ))
+
+        try:
+            await self.conn.executemany(
+                "INSERT INTO pending_alerts "
+                "(brand, p_data_json, tg_link, timestamp, corroborations, corroboration_texts, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows
+            )
+            await self.conn.commit()
+        except Exception as e:
+            logger.error(f"DB save_pending_alerts_bulk error: {e}")
+
     # ── Velocity ──────────────────────────────────────────────────────────────
 
     async def get_brand_velocity(self, brand: str, minutes: int = 5) -> int:

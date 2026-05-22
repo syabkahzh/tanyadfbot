@@ -229,10 +229,7 @@ async def is_fuzzy_duplicate(brand: str, summary: str,
 
         for alert in _fuzzy_dedup_queue:
             if alert['brand'] == norm_brand:
-                # Offload CPU-bound SequenceMatcher to thread to avoid blocking event loop
-                similarity = await asyncio.to_thread(
-                    difflib.SequenceMatcher(None, alert['summary'], norm_summary).ratio
-                )
+                similarity = difflib.SequenceMatcher(None, alert['summary'], norm_summary).ratio()
                 if similarity > threshold:
                     return True
 
