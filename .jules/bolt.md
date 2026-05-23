@@ -7,3 +7,7 @@
 **Learning:** Pre-compiling RegEx locally within a frequently called asynchronous job function forces the Python interpreter to look up or recompile the regular expression repeatedly, causing unnecessary overhead. While Python caches RegEx compilations, relying on module-level constants circumvents the lookup entirely.
 
 **Action:** Consistently elevate pre-compiled `re.compile` patterns to the module level instead of defining them locally within functions, especially inside asynchronous loops or frequent jobs.
+## 2024-05-30 - Overhead of asyncio.to_thread for lightweight operations
+
+**Learning:** `asyncio.to_thread` introduces significant thread-switching and management overhead (often ~4-5x slower for very small tasks) compared to synchronous execution. Offloading lightweight operations like `difflib.SequenceMatcher` on short strings to a background thread ends up being a net negative for performance.
+**Action:** Avoid `asyncio.to_thread` for fast, lightweight synchronous operations, reserving it only for truly blocking or long-running tasks (e.g., heavy file I/O or complex CPU-bound algorithms on large datasets).
