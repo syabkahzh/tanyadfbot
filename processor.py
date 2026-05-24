@@ -74,6 +74,14 @@ _META_SUMMARY_PATTERN = re.compile(
     r'meminta konfirmasi|menginformasikan bahwa)',
     re.IGNORECASE
 )
+_THINK_TAG_PATTERN = re.compile(r'<think>.*?</think>', flags=re.DOTALL)
+_REASONING_PATTERN = re.compile(r'--- reasoning ---.*?--- reasoning ---', flags=re.DOTALL | re.IGNORECASE)
+_JSON_BLOCK_PATTERN = re.compile(r'^```json\s*|\s*```$', flags=re.MULTILINE)
+_WAIT_MATCH_PATTERN = re.compile(r'try again in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)')
+_USAGE_MATCH_PATTERN = re.compile(r'limit (\d+), used (\d+)')
+_AMAN_GA_PATTERN = re.compile(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b')
+_AMAN_NGGA_PATTERN = re.compile(r'\b(aman|work|on)\s+(ngga)\b')
+_WORD_EXTRACT_PATTERN = re.compile(r'\w+')
 
 # ── Response schemas ──────────────────────────────────────────────────────────
 
@@ -334,8 +342,8 @@ class OpenAICompatibleClient(BaseAIClient):
             text = message.content
 
         if text:
-            text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
-            text = re.sub(r'--- reasoning ---.*?--- reasoning ---', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+            text = _THINK_TAG_PATTERN.sub('', text).strip()
+            text = _REASONING_PATTERN.sub('', text).strip()
 
         usage = {
             "prompt_tokens": getattr(res.usage, 'prompt_tokens', 0),
@@ -346,7 +354,7 @@ class OpenAICompatibleClient(BaseAIClient):
         parsed = None
         if response_schema and text:
             try:
-                clean_text = re.sub(r'^```json\s*|\s*```$', '', text.strip(), flags=re.MULTILINE)
+                clean_text = _JSON_BLOCK_PATTERN.sub('', text.strip())
                 import json
                 try:
                     parsed = response_schema.model_validate_json(clean_text)
@@ -825,7 +833,7 @@ class GeminiProcessor:
                     logger.warning(f"🛑 [{slot.name}] OpenRouter daily limit hit — backing off 12h")
 
                 # Parse "try again in Xm Ys" from error
-                wait_match = re.search(r'try again in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)', err_str)
+                wait_match = _WAIT_MATCH_PATTERN.search(err_str)
                 if wait_match:
                     h = int(wait_match.group(1) or 0)
                     m = int(wait_match.group(2) or 0)
@@ -835,7 +843,7 @@ class GeminiProcessor:
                     sleep_sec = 3600 * 4
 
                 # Adaptive sync from error message
-                usage_match = re.search(r'limit (\d+), used (\d+)', err_str)
+                usage_match = _USAGE_MATCH_PATTERN.search(err_str)
                 if usage_match:
                     slot.saturate_locally(int(usage_match.group(2)), int(usage_match.group(1)))
 
@@ -907,13 +915,13 @@ class GeminiProcessor:
 
         if '?' in t:
             score -= 5
-        if re.search(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b', t):
+        if _AMAN_GA_PATTERN.search(t):
             score -= 8
         if t.endswith('?') and words and words[0] in question_words:
             score -= 5
         if any(w in question_words for w in words) and ('aman' in t or 'work' in t or 'on' in t):
             score -= 8
-        if re.search(r'\b(aman|work|on)\s+(ngga)\b', t):
+        if _AMAN_NGGA_PATTERN.search(t):
             score -= 15
 
         if any(kw in t for kw in _STRONG_KEYWORDS) and score >= 0:
@@ -1048,13 +1056,13 @@ class GeminiProcessor:
             if key in recent_keys or key in intra_batch_keys:
                 continue
 
-            p_words = set(re.findall(r'\w+', p.summary.lower())[:8])
+            p_words = set(_WORD_EXTRACT_PATTERN.findall(p.summary.lower())[:8])
 
             if brand_key in recent_brands_set and brand_key != 'unknown' and p.status == 'active':
                 is_dupe = False
                 for r in reversed(history_tail):
                     if normalize_brand(r['brand']).lower() == brand_key:
-                        r_words = set(re.findall(r'\w+', r['summary'].lower())[:8])
+                        r_words = set(_WORD_EXTRACT_PATTERN.findall(r['summary'].lower())[:8])
                         if len(p_words & r_words) >= 2:
                             is_dupe = True
                             break
@@ -1223,7 +1231,7 @@ class GeminiProcessor:
         unique_trends: list[TrendItem] = []
         if response and response.parsed:
             for t in response.parsed.trends:
-                words = set(re.findall(r'\w+', t.topic.lower()))
+                words = set(_WORD_EXTRACT_PATTERN.findall(t.topic.lower()))
                 if any(len(words & s) >= 3 for s in seen_topics):
                     continue
                 t.model_name = target
