@@ -69,7 +69,8 @@ def check_fast_path(text: str) -> bool:
     if '?' in t or NEG_PATTERN.search(tl):
         return False
 
-    if re.search(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b', tl):
+    from processor import _AMAN_GA_PATTERN
+    if _AMAN_GA_PATTERN.search(tl):
         return False
 
     from processor import _SOCIAL_FILLER
@@ -161,7 +162,8 @@ class TelethonListener:
             return
         if NEG_PATTERN.search(text_lower):
             return
-        if re.search(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b', text_lower):
+        from processor import _AMAN_GA_PATTERN
+        if _AMAN_GA_PATTERN.search(text_lower):
             return
         if 'aman' in text_lower and TRANSIT_NOISE_PATTERN.search(text):
             return

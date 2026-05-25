@@ -7,3 +7,6 @@
 **Learning:** Pre-compiling RegEx locally within a frequently called asynchronous job function forces the Python interpreter to look up or recompile the regular expression repeatedly, causing unnecessary overhead. While Python caches RegEx compilations, relying on module-level constants circumvents the lookup entirely.
 
 **Action:** Consistently elevate pre-compiled `re.compile` patterns to the module level instead of defining them locally within functions, especially inside asynchronous loops or frequent jobs.
+## 2024-06-01 - Over-allocation of Local Structures
+**Learning:** Instantiating constant collections (e.g. `question_words = {'ga', 'gak', ...}`) inside hot-path functions like `_is_worth_checking` creates redundant memory allocations and garbage collection pressure upon every evaluation, impacting batch processing throughput.
+**Action:** Elevate static sets and dictionaries to module-level constants to ensure they are allocated only once.
