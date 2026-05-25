@@ -169,13 +169,19 @@ async def test_in_progress_reaper_evicts_stale():
     # Snapshot & reset
     saved = dict(mainmod._in_progress_ids)
     mainmod._in_progress_ids.clear()
+
+    # Mock db.recover_stuck_alerts which is called in health_monitor_job
+    async def mock_recover():
+        pass
+    mainmod.db.recover_stuck_alerts = mock_recover
+
     try:
         now = time.monotonic()
         mainmod._in_progress_ids[1] = now - 400   # stale (>130s)
         mainmod._in_progress_ids[2] = now - 50    # fresh (<130s)
         mainmod._in_progress_ids[3] = now - 600   # very stale
 
-        await mainmod._in_progress_reaper()
+        await mainmod.health_monitor_job()
 
         assert 1 not in mainmod._in_progress_ids
         assert 3 not in mainmod._in_progress_ids

@@ -31,12 +31,16 @@ async def test_ai_timeout_propagates_through_call(monkeypatch) -> None:
     """A hanging generate_content must be aborted by asyncio.timeout, not wait
     forever. We stub the SDK to sleep longer than the timeout and assert None
     is returned within a sane wall-clock bound."""
-    from processor import GeminiProcessor, _ModelSlot
+    from processor import GeminiProcessor, _ModelSlot, BaseAIClient
+
+    class DummyClient(BaseAIClient):
+        async def generate_content(self, model, contents, config, capabilities):
+            pass
 
     proc = GeminiProcessor.__new__(GeminiProcessor)
     proc._slots = {
-        "primary":   _ModelSlot("primary", 12),
-        "secondary": _ModelSlot("secondary", 12),
+        "primary":   _ModelSlot("primary", "dummy", "model_id", DummyClient(), 12),
+        "secondary": _ModelSlot("secondary", "dummy", "model_id", DummyClient(), 12),
     }
     proc._rr_idx = 0
     proc._rr_lock = asyncio.Lock()
@@ -62,7 +66,7 @@ async def test_ai_timeout_propagates_through_call(monkeypatch) -> None:
     await proc._slots["secondary"].try_acquire_nowait()
 
     start = asyncio.get_event_loop().time()
-    result = await proc._call("batch", {}, "primary", retries=0)
+    result = await proc._call("batch", {}, "primary", attempt=6)
     elapsed = asyncio.get_event_loop().time() - start
 
     assert result is None, "Hung AI call must return None, not block indefinitely."

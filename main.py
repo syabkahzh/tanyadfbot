@@ -5,12 +5,11 @@ and alert broadcasting.
 """
 
 import asyncio
-import json
 import re
 import sys
 import time
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Any, Sequence
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -25,7 +24,7 @@ import jobs
 import shared
 
 from shared import (
-    db, gemini, bot, listener,
+    db, gemini,
     _recent_alerts_history, _recent_alerts_lock,
     _parse_ts,
     _make_tg_link, _flush_alert_buffer, _score_confidence,
@@ -150,7 +149,7 @@ async def _auto_triage_queue() -> None:
 
 async def processing_loop() -> None:
     """Main background loop for message analysis and promotion extraction."""
-    global _triage_cycle_counter, _queue_emergency_mode
+    global _queue_emergency_mode
 
     recent_promos = await db.get_recent_alert_brands(hours=6, limit=300)
     async with _recent_alerts_lock:
@@ -350,11 +349,6 @@ async def processing_loop() -> None:
             # if circuit_wait > 0:
             #     await asyncio.sleep(min(circuit_wait, 2.0))
             #     continue
-
-            now_m = time.monotonic()
-            total_used = sum(len([t for t in slot._calls if now_m - t < 60]) for slot in gemini._slots.values())
-            total_cap    = sum(s.limit for s in gemini._slots.values())
-            headroom_pct = max(0.0, 1.0 - (total_used / max(total_cap, 1)))
 
             if _queue_emergency_mode:
                 batch_size = 20 # Still keep it somewhat small

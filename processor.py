@@ -155,7 +155,7 @@ _STRONG_KEYWORDS: set[str] = {
     'gabisa','gaada','g+b+s','gamau','minbel',
     'kuota','limit','slot','redeem','qr','scan','edc',
     'r+s+t+k','r+s+t+c+k','r+st+ck',
-    'cb','kesbek','c\+s\+h\+b\+c\+k','cash back',
+    'cb','kesbek','c+s+h+b+c+k','cash back',
     'luber','pecah','flash','sale','deal','murah','hemat','bonus',
     'ongkir','gratis ongkir','membership','member','mamber',
     'yang butuh aja','ymma','tukpo','murce','murmer','sopi','tsel','cgv','xxi',
@@ -172,7 +172,10 @@ _WEAK_KEYWORDS: set[str] = {
 }
 
 _JUNK_SUMMARIES: set[str] = {'summary','none','n/a','-','tidak ada','tidak ditemukan'}
+_QUESTION_WORDS: set[str] = {'ga', 'gak', 'nggak', 'apa', 'gimana', 'berapa', 'kapan', 'dimana', 'kenapa', 'ada', 'masih', 'ya'}
+_VISION_JUNK_SUMMARIES: set[str] = {'tidak ada', 'none', 'n/a', 'tidak ada promo', 'no promo', 'tidak ditemukan', '-', 'unknown'}
 
+_WORD_TOKENIZER = re.compile(r'\w+')
 
 # ── AI Clients ────────────────────────────────────────────────────────────────
 
@@ -903,15 +906,13 @@ class GeminiProcessor:
         if bool(_PROMO.search(t)):
             score += 2
 
-        question_words = {'ga', 'gak', 'nggak', 'apa', 'gimana', 'berapa', 'kapan', 'dimana', 'kenapa', 'ada', 'masih', 'ya'}
-
         if '?' in t:
             score -= 5
         if re.search(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b', t):
             score -= 8
-        if t.endswith('?') and words and words[0] in question_words:
+        if t.endswith('?') and words and words[0] in _QUESTION_WORDS:
             score -= 5
-        if any(w in question_words for w in words) and ('aman' in t or 'work' in t or 'on' in t):
+        if any(w in _QUESTION_WORDS for w in words) and ('aman' in t or 'work' in t or 'on' in t):
             score -= 8
         if re.search(r'\b(aman|work|on)\s+(ngga)\b', t):
             score -= 15
@@ -1035,7 +1036,13 @@ class GeminiProcessor:
             f"{normalize_brand(r['brand']).lower()}:{r['summary'][:35].lower()}"
             for r in recent_alerts
         }
-        recent_brands_set = {normalize_brand(r['brand']).lower() for r in history_tail}
+
+        history_by_brand: dict[str, list[set[str]]] = {}
+        for r in history_tail:
+            b_key = normalize_brand(r['brand']).lower()
+            if b_key != 'unknown':
+                r_words = set(_WORD_TOKENIZER.findall(r['summary'].lower())[:8])
+                history_by_brand.setdefault(b_key, []).append(r_words)
 
         unique: list[PromoExtraction] = []
         intra_batch_keys: set[str] = set()
@@ -1048,33 +1055,33 @@ class GeminiProcessor:
             if key in recent_keys or key in intra_batch_keys:
                 continue
 
-            p_words = set(re.findall(r'\w+', p.summary.lower())[:8])
+            p_words = set(_WORD_TOKENIZER.findall(p.summary.lower())[:8])
 
-            if brand_key in recent_brands_set and brand_key != 'unknown' and p.status == 'active':
-                is_dupe = False
-                for r in reversed(history_tail):
-                    if normalize_brand(r['brand']).lower() == brand_key:
-                        r_words = set(re.findall(r'\w+', r['summary'].lower())[:8])
+            if brand_key != 'unknown':
+                if p.status == 'active' and brand_key in history_by_brand:
+                    is_dupe = False
+                    for r_words in reversed(history_by_brand[brand_key]):
                         if len(p_words & r_words) >= 2:
                             is_dupe = True
                             break
-                if is_dupe:
-                    continue
+                    if is_dupe:
+                        continue
 
-            if brand_key != 'unknown':
+                is_intra_dupe = False
                 for prev_words in intra_batch_by_brand.get(brand_key, ()):
                     if len(p_words & prev_words) >= 2:
+                        is_intra_dupe = True
                         break
-                else:
+
+                if not is_intra_dupe:
                     unique.append(p)
                     recent_keys.add(key)
                     intra_batch_keys.add(key)
                     intra_batch_by_brand.setdefault(brand_key, []).append(p_words)
-                continue
-
-            unique.append(p)
-            recent_keys.add(key)
-            intra_batch_keys.add(key)
+            else:
+                unique.append(p)
+                recent_keys.add(key)
+                intra_batch_keys.add(key)
 
         return unique
 
@@ -1168,9 +1175,8 @@ class GeminiProcessor:
             return None
         res.brand = verified_brand
 
-        JUNK = {'tidak ada', 'none', 'n/a', 'tidak ada promo', 'no promo', 'tidak ditemukan', '-', 'unknown'}
         if (not res.summary or len(res.summary) < 10
-                or res.summary.lower().strip() in JUNK):
+                or res.summary.lower().strip() in _VISION_JUNK_SUMMARIES):
             return None
         res.original_msg_id = original_msg_id
         return res
