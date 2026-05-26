@@ -57,7 +57,7 @@ NEG_PATTERN = re.compile(
 
 FAST_ALLCAPS = re.compile(r'^[^a-z]*[A-Z][^a-z]*$')
 _PROMO_CODE_PATTERN = re.compile(r'\b(?=.*[A-Z])[A-Z0-9]{6,25}\b')
-
+_AMAN_QUESTION_PATTERN = re.compile(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b')
 
 def check_fast_path(text: str) -> bool:
     """Synchronous logic check for fast-path eligibility. Zero I/O."""
@@ -69,7 +69,7 @@ def check_fast_path(text: str) -> bool:
     if '?' in t or NEG_PATTERN.search(tl):
         return False
 
-    if re.search(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b', tl):
+    if _AMAN_QUESTION_PATTERN.search(tl):
         return False
 
     from processor import _SOCIAL_FILLER
@@ -161,7 +161,7 @@ class TelethonListener:
             return
         if NEG_PATTERN.search(text_lower):
             return
-        if re.search(r'\b(aman|work|on)\s+(ga|gak|nggak|ya)\b', text_lower):
+        if _AMAN_QUESTION_PATTERN.search(text_lower):
             return
         if 'aman' in text_lower and TRANSIT_NOISE_PATTERN.search(text):
             return

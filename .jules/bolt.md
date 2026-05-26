@@ -7,3 +7,8 @@
 **Learning:** Pre-compiling RegEx locally within a frequently called asynchronous job function forces the Python interpreter to look up or recompile the regular expression repeatedly, causing unnecessary overhead. While Python caches RegEx compilations, relying on module-level constants circumvents the lookup entirely.
 
 **Action:** Consistently elevate pre-compiled `re.compile` patterns to the module level instead of defining them locally within functions, especially inside asynchronous loops or frequent jobs.
+## 2024-05-30 - Optimization of Iterables and Memory Allocation
+
+**Learning:** Allocating a set or list repeatedly inside a high-frequency method (like `_is_worth_checking` which parses thousands of chat messages) incurs a large cumulative memory allocation overhead. Additionally, using Python's generator-based `any()` checks for intersection between lists and sets introduces looping overhead that can be optimized using fast C-level set operations `set_a & set_b`.
+
+**Action:** Elevate locally instantiated sets to the module level. Swap `any(w in TARGET_SET for w in source_list)` with `set(source_list) & TARGET_SET` when both sets are already built or can be cached.
