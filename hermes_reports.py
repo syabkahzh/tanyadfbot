@@ -2,8 +2,25 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
+
+_WIB = timezone(timedelta(hours=7))
+
+
+def _to_wib(utc_str: str | None) -> str:
+    """Convert a UTC timestamp string to WIB (UTC+7) display format."""
+    if not utc_str:
+        return "unknown"
+    try:
+        dt = datetime.fromisoformat(utc_str.replace("+00:00", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        wib = dt.astimezone(_WIB)
+        return wib.strftime("%Y-%m-%d %H:%M WIB")
+    except (ValueError, TypeError):
+        return utc_str
 
 NEGATIVE_CORRECTIONS = {"NOT_A_PROMO", "SPAM_OR_NOISE"}
 _SECRET_PATTERNS = [
@@ -373,11 +390,11 @@ def build_service_health_report(
         )
 
         failure_lines = [
-            f"{row['created_at']} `{row['component']}`: {_redact_secrets(row['error_msg'])}"
+            f"{_to_wib(row['created_at'])} `{row['component']}`: {_redact_secrets(row['error_msg'])}"
             for row in failure_rows
         ]
         system_log_lines = [
-            f"{row['created_at']} `{row['level']}` `{row['logger_name'] or 'unknown'}`: {_redact_secrets(row['message'])}"
+            f"{_to_wib(row['created_at'])} `{row['level']}` `{row['logger_name'] or 'unknown'}`: {_redact_secrets(row['message'])}"
             for row in log_rows
         ]
 
@@ -443,7 +460,7 @@ def build_command_center_report(
         )
         recent_promo_lines = [
             (
-                f"{row['created_at']} `{row['brand'] or 'Unknown'}`: {row['summary'] or 'no AI summary'}"
+                f"{_to_wib(row['created_at'])} `{row['brand'] or 'Unknown'}`: {row['summary'] or 'no AI summary'}"
                 f" | status={row['status'] or 'unknown'}"
                 f" | fastpath={'yes' if row['via_fastpath'] else 'no'}"
                 + (f" | link={row['tg_link']}" if row["tg_link"] else "")
@@ -486,9 +503,14 @@ def build_recent_promo_lookup_report(
     hours: int = 2,
     brand: str | None = None,
     limit: int = 5,
+    today: bool = False,
 ) -> str:
     conn = _connect(db_path)
     try:
+        if today:
+            now_wib = datetime.now(_WIB)
+            midnight_wib = now_wib.replace(hour=0, minute=0, second=0, microsecond=0)
+            hours = max(1, int((now_wib - midnight_wib).total_seconds() / 3600) + 1)
         params: list[Any] = [f"-{hours} hours"]
         brand_filter = ""
         if brand:
@@ -512,7 +534,7 @@ def build_recent_promo_lookup_report(
         data_plane_warning = _data_plane_warning(total_messages=total_messages, total_promos=total_promos)
         latest_lines = [
             (
-                f"{row['created_at']} `{row['brand'] or 'Unknown'}`: {row['summary'] or 'no AI summary'}"
+                f"{_to_wib(row['created_at'])} `{row['brand'] or 'Unknown'}`: {row['summary'] or 'no AI summary'}"
                 f" | status={row['status'] or 'unknown'}"
                 f" | fastpath={'yes' if row['via_fastpath'] else 'no'}"
                 + (f" | link={row['tg_link']}" if row["tg_link"] else "")
