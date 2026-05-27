@@ -1037,6 +1037,15 @@ class GeminiProcessor:
         }
         recent_brands_set = {normalize_brand(r['brand']).lower() for r in history_tail}
 
+        # ⚡ Bolt Optimization: Pre-compute repeated regex tokenization of historical alerts
+        # grouped by brand to avoid O(N*M) nested loop recalculations for every new promo.
+        history_words_by_brand: dict[str, list[set[str]]] = {}
+        for r in reversed(history_tail):
+            b_key = normalize_brand(r['brand']).lower()
+            if b_key != 'unknown':
+                r_words = set(re.findall(r'\w+', r['summary'].lower())[:8])
+                history_words_by_brand.setdefault(b_key, []).append(r_words)
+
         unique: list[PromoExtraction] = []
         intra_batch_keys: set[str] = set()
         intra_batch_by_brand: dict[str, list[set[str]]] = {}
@@ -1052,12 +1061,10 @@ class GeminiProcessor:
 
             if brand_key in recent_brands_set and brand_key != 'unknown' and p.status == 'active':
                 is_dupe = False
-                for r in reversed(history_tail):
-                    if normalize_brand(r['brand']).lower() == brand_key:
-                        r_words = set(re.findall(r'\w+', r['summary'].lower())[:8])
-                        if len(p_words & r_words) >= 2:
-                            is_dupe = True
-                            break
+                for r_words in history_words_by_brand.get(brand_key, []):
+                    if len(p_words & r_words) >= 2:
+                        is_dupe = True
+                        break
                 if is_dupe:
                     continue
 

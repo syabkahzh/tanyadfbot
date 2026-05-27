@@ -7,3 +7,7 @@
 **Learning:** Pre-compiling RegEx locally within a frequently called asynchronous job function forces the Python interpreter to look up or recompile the regular expression repeatedly, causing unnecessary overhead. While Python caches RegEx compilations, relying on module-level constants circumvents the lookup entirely.
 
 **Action:** Consistently elevate pre-compiled `re.compile` patterns to the module level instead of defining them locally within functions, especially inside asynchronous loops or frequent jobs.
+
+## 2025-02-20 - [Pre-compute historical tokenization in duplicate filter]
+**Learning:** O(N*M) performance bottlenecks can easily happen when filtering batch items (`new_promos`) against a historical collection (`history_tail`) if string operations or regular expressions are executed inside the inner loop.
+**Action:** Always pre-compute repeated operations on static collections before entering the iteration loop, grouping results by a shared lookup key to enable fast O(1) evaluation.
