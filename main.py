@@ -784,7 +784,7 @@ async def main() -> None:
     scheduler.add_job(jobs.dead_promo_reaper_job, "interval", minutes=20, id="reaper", args=[db, bot])
     scheduler.add_job(jobs.confirmation_gate_job, "interval", minutes=1, id="confirm_gate", args=[db])
     scheduler.add_job(jobs.db_maintenance_job, "cron", hour="*/4", minute=5, id="db_maint", args=[db, bot])
-    # scheduler.add_job(jobs.fasttext_retrain_job, "cron", hour="*/6", minute=15, id="ft_retrain", args=[db, bot], jitter=300)
+    scheduler.add_job(jobs.fasttext_retrain_job, "cron", hour="*/6", minute=15, id="ft_retrain", args=[db, bot], jitter=300)
     scheduler.add_job(health_monitor_job, "interval", minutes=1, id="health_monitor")
     scheduler.add_job(_listener_health_watchdog, "interval", seconds=30, id="listener_health")
     scheduler.add_job(jobs.time_reminder_job, "interval", minutes=1, id="time_reminder", args=[db, bot, WIB])

@@ -128,10 +128,20 @@ ATURAN EKSTRAKSI:
 4. Jangan tulis "SKIP" - gunakan "Unknown" untuk brand/summary yang tidak relevan.
 5. Summary: 1 kalimat padat, awali dengan nama brand bold (**Brand**).
 
+PENTING - JANGAN EKSTRAK SEBAGAI PROMO:
+- Pesan yang mengandung "?" atau tanda tanya → itu PERTANYAAN, bukan promo
+- Pesan yang hanya bilang "on/aktif", "masih ada", "habis" → itu STATUS, bukan promo
+- Pesan casual seperti "makasih", "ok", "sip", "hehe" → itu REPLY, bukan promo
+- Pesan yang nanya "pake voucher apa", "gimana caranya", "brp harganya" → itu TANYA, bukan promo
+- Pesan yang cuma bilang "sering harga 50k" tanpa info promo spesifik → itu OBSERVASI, bukan promo
+
 CONTOH:
 ID:1 C:sfood diskon 80k MSG:nyala -> {"promos":[{"original_msg_id":1,"brand":"ShopeeFood","summary":"**ShopeeFood** diskon 80k aktif.","status":"active","confidence":0.95}]}
 ID:2 C:gopay coins MSG:nt -> {"promos":[{"original_msg_id":2,"brand":"GoPay","summary":"**GoPay** Coins sudah habis/expired.","status":"expired","confidence":0.90}]}
-ID:3 MSG:ada yg tau cgv tsel? -> {"promos":[{"original_msg_id":3,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}"""
+ID:3 MSG:ada yg tau cgv tsel? -> {"promos":[{"original_msg_id":3,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:4 MSG:kak pake voucher apa? -> {"promos":[{"original_msg_id":4,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:5 MSG:on/aktif -> {"promos":[{"original_msg_id":5,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:6 MSG:sering harga 50k pake koin -> {"promos":[{"original_msg_id":6,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}"""
 
 _DEDUP_SYSTEM = "Kamu agen deteksi duplikasi. Output HANYA angka indeks dipisah koma."
 
@@ -177,6 +187,39 @@ _WEAK_KEYWORDS: set[str] = {
 }
 
 _JUNK_SUMMARIES: set[str] = {'summary','none','n/a','-','tidak ada','tidak ditemukan'}
+
+# ── False positive filters ──────────────────────────────────────────
+# Detect questions (messages asking about promos, not announcing them)
+_QUESTION_PATTERN = re.compile(
+    r'(\?|apa\s+ini|gimana\s+caranya|brp\s+harganya|berapa\s+harga|'
+    r'kapan\s+mulai|dimana\s+bisa|kenapa\s+|ada\s+yg\s+tau|'
+    r'pake\s+voucher\s+apa|pake\s+voc\s+apa|'
+    r'cara\s+claim|cara\s+klaim|cara\s+pakai|'
+    r'gmn|gmana|gmna|nta|tanya|nanya)',
+    re.IGNORECASE
+)
+
+# Detect vague/low-quality summaries that don't convey useful promo info
+_VAGUE_SUMMARY_PATTERN = re.compile(
+    r'(on/aktif|'
+    r'^aktif\.?$|'
+    r'^tidak\s+aktif|'
+    r'habis\.?$|'
+    r'^expired\.?$|'
+    r'belum\s+tau|gatau|gak\s+tau|ga\s+tau|'
+    r'truk|liat|cek\s+saja|info\s+aja|'
+    r'sering\s+harga|harga\s+sering)',
+    re.IGNORECASE
+)
+
+# Detect casual replies that aren't promo announcements
+_CASUAL_REPLY_PATTERN = re.compile(
+    r'^(iya|oh|ok|oke|ohh|ohhh|nah|hehe|haha|wkwk|'
+    r'makasih|thanks|thx|mks|terimakasih|'
+    r'sip|mantap|jos|joss|keren|'
+    r'ga\s+tau|gak\s+tau|gatau)',
+    re.IGNORECASE
+)
 
 # ── Pre-compiled optimized keyword patterns ───────────────────────────────────
 _STRONG_PATTERN = re.compile('|'.join(map(re.escape, _STRONG_KEYWORDS)))
@@ -1024,6 +1067,13 @@ class GeminiProcessor:
                 if summary.lower() in _JUNK_SUMMARIES:
                     continue
                 if _META_SUMMARY_PATTERN.search(summary):
+                    continue
+                # False positive filters: questions, vague, casual
+                if _QUESTION_PATTERN.search(summary):
+                    continue
+                if _VAGUE_SUMMARY_PATTERN.search(summary):
+                    continue
+                if _CASUAL_REPLY_PATTERN.search(summary):
                     continue
                 verified_brand = normalize_brand(p.brand)
                 if verified_brand == "Unknown":

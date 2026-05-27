@@ -98,6 +98,17 @@ mechanic:
     - hari ini
     - jam
 
+transport:
+  weight: 2.0
+  terms:
+    - kereta
+    - kai
+    - travel
+    - tiket kereta
+    - stasiun
+    - commuter
+    - krl
+
 social:
   weight: 1.0
   terms:
