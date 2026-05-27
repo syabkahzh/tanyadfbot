@@ -596,7 +596,12 @@ class GeminiProcessor:
     _fleet_lock: asyncio.Lock = asyncio.Lock()
 
     def __init__(self) -> None:
+        self._current_extract_prompt: str = _EXTRACT_SYSTEM
         self.reinitialize()
+
+    def set_extraction_prompt(self, prompt: str) -> None:
+        """Override the extraction system prompt (called by Hermes config)."""
+        self._current_extract_prompt = prompt
 
     def reinitialize(self) -> None:
         self._slots: dict[str, _ModelSlot] = {}
@@ -965,7 +970,7 @@ class GeminiProcessor:
         config = {
             "response_mime_type": "application/json",
             "response_schema": BatchResponse,
-            "system_instruction": _EXTRACT_SYSTEM,
+            "system_instruction": self._current_extract_prompt,
         }
 
         # Scatter-gather: each chunk gets its own model from the fleet

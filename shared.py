@@ -167,6 +167,60 @@ _stop_event: asyncio.Event = asyncio.Event()
 
 _listener_reconnecting: bool = False
 
+# ── Hermes config cache ─────────────────────────────────────────────────────
+# TTL-based cache so Tanya's processing loop doesn't hit the DB on every message.
+hermes_config_cache: dict[str, Any] = {}
+_hermes_config_loaded_at: float = 0.0
+_HERMES_CONFIG_TTL_SEC: float = 30.0
+
+
+async def reload_hermes_config(db: Any) -> dict[str, Any]:
+    """Refresh the hermes_config cache from DB if TTL has expired.
+
+    Returns the current cache (possibly stale if TTL hasn't expired).
+    """
+    global hermes_config_cache, _hermes_config_loaded_at
+    import time
+    now = time.monotonic()
+    if now - _hermes_config_loaded_at < _HERMES_CONFIG_TTL_SEC:
+        return hermes_config_cache
+    try:
+        hermes_config_cache = await db.get_all_hermes_config()
+        _hermes_config_loaded_at = now
+    except Exception:
+        pass  # keep stale cache on DB errors
+    return hermes_config_cache
+
+
+def get_hermes_config_float(key: str, default: float) -> float:
+    """Read a float value from the hermes config cache."""
+    raw = hermes_config_cache.get(key)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        return default
+
+
+def get_hermes_config_int(key: str, default: int) -> int:
+    """Read an int value from the hermes config cache."""
+    raw = hermes_config_cache.get(key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return default
+
+
+def get_hermes_config_bool(key: str, default: bool) -> bool:
+    """Read a boolean value from the hermes config cache (1/0 or true/false)."""
+    raw = hermes_config_cache.get(key)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes")
+
 # ── Temporal Brand Context Tracker ────────────────────────────────────────────
 #
 # Tracks the *active conversational brand* per chat within a TTL window.

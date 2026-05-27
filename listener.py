@@ -137,10 +137,14 @@ class TelethonListener:
             _fastpath_brand_last_fired, _fastpath_brand_lock,
             FASTPATH_BRAND_DEDUP_SEC,
             context_tracker, TRANSIT_NOISE_PATTERN,
-            is_fuzzy_duplicate,
+            is_fuzzy_duplicate, get_hermes_config_bool,
         )
         from db import normalize_brand
         from processor import PromoExtraction, _SOCIAL_FILLER
+
+        # ── Hermes kill switch ──────────────────────────────────────────
+        if not get_hermes_config_bool('fastpath_enabled', True):
+            return
 
         text = (event.text or '').strip()
         text_lower = text.lower()

@@ -693,3 +693,141 @@ def build_maestro_report(
         "## Tuning Proposals\n"
         f"{build_tuning_proposal_report(db_path=db_path, hours=review_hours)}\n"
     )
+
+
+def build_extraction_quality_report(
+    db_path: str | None = None,
+    hours: int = 24,
+) -> str:
+    """Analyze recent AI extractions vs corrections to suggest prompt improvements."""
+    conn = _connect(db_path)
+    try:
+        # Total messages processed
+        row = conn.execute(
+            "SELECT COUNT(*) AS total FROM messages "
+            "WHERE processed=1 AND timestamp >= strftime('%Y-%m-%d %H:%M:%S+00:00','now', ?)",
+            (f"-{hours} hours",),
+        ).fetchone()
+        total_processed = row["total"] if row else 0
+
+        # Promos extracted
+        row = conn.execute(
+            "SELECT COUNT(*) AS total FROM promos "
+            "WHERE created_at >= strftime('%Y-%m-%d %H:%M:%S+00:00','now', ?)",
+            (f"-{hours} hours",),
+        ).fetchone()
+        total_promos = row["total"] if row else 0
+
+        # Corrections
+        rows = conn.execute(
+            "SELECT correction, COUNT(*) AS cnt FROM ai_corrections "
+            "WHERE created_at >= strftime('%Y-%m-%d %H:%M:%S+00:00','now', ?) "
+            "GROUP BY correction ORDER BY cnt DESC LIMIT 10",
+            (f"-{hours} hours",),
+        ).fetchall()
+
+        # AI failures
+        row = conn.execute(
+            "SELECT COUNT(*) AS total FROM messages "
+            "WHERE ai_failure_count > 0 AND timestamp >= strftime('%Y-%m-%d %H:%M:%S+00:00','now', ?)",
+            (f"-{hours} hours",),
+        ).fetchone()
+        ai_failures = row["total"] if row else 0
+
+        # Extraction prompt (from hermes_config)
+        row = conn.execute(
+            "SELECT value FROM hermes_config WHERE key='extraction_prompt'"
+        ).fetchone()
+        prompt_override = row["value"] if row else None
+
+        lines: list[str] = []
+        lines.append("# Extraction Quality Report\n")
+        lines.append(f"**Period:** last {hours} hours\n")
+        lines.append(f"| Metric | Value |")
+        lines.append(f"|--------|-------|")
+        lines.append(f"| Messages processed | {total_processed} |")
+        lines.append(f"| Promos extracted | {total_promos} |")
+        lines.append(f"| AI failures | {ai_failures} |")
+        extraction_rate = (total_promos / total_processed * 100) if total_processed else 0
+        lines.append(f"| Extraction rate | {extraction_rate:.1f}% |")
+        lines.append(f"| Prompt override active | {'yes' if prompt_override else 'no (using default)'} |")
+        lines.append("")
+
+        if rows:
+            lines.append("## Corrections Breakdown\n")
+            lines.append("| Correction Type | Count |")
+            lines.append("|-----------------|-------|")
+            for r in rows:
+                lines.append(f"| {r['correction']} | {r['cnt']} |")
+            lines.append("")
+        else:
+            lines.append("*No corrections recorded in this period.*\n")
+
+        if extraction_rate < 1:
+            lines.append("**Warning:** Extraction rate is very low. Consider reviewing the extraction prompt or trigger terms.\n")
+        elif extraction_rate > 30:
+            lines.append("**Warning:** Extraction rate is unusually high. Possible false-positive surge.\n")
+
+        return "\n".join(lines)
+    finally:
+        conn.close()
+
+
+def build_alert_flow_report(
+    db_path: str | None = None,
+    hours: int = 24,
+) -> str:
+    """Show what was alerted, suppressed, and held."""
+    conn = _connect(db_path)
+    try:
+        # Alerts sent (promos with status)
+        rows = conn.execute(
+            "SELECT brand, status, COUNT(*) AS cnt FROM promos "
+            "WHERE created_at >= strftime('%Y-%m-%d %H:%M:%S+00:00','now', ?) "
+            "GROUP BY brand, status ORDER BY cnt DESC LIMIT 20",
+            (f"-{hours} hours",),
+        ).fetchall()
+
+        # Pending alerts (not yet flushed)
+        row = conn.execute(
+            "SELECT COUNT(*) AS total FROM pending_alerts"
+        ).fetchone()
+        pending = row["total"] if row else 0
+
+        # Suppressed brands (from hermes_config)
+        row = conn.execute(
+            "SELECT value FROM hermes_config WHERE key='alert_suppress_list'"
+        ).fetchone()
+        suppressed_raw = row["value"] if row else "[]"
+        try:
+            suppressed_list = json.loads(suppressed_raw)
+        except (json.JSONDecodeError, TypeError):
+            suppressed_list = []
+
+        lines: list[str] = []
+        lines.append("# Alert Flow Report\n")
+        lines.append(f"**Period:** last {hours} hours\n")
+
+        if rows:
+            lines.append("## Promo Alerts by Brand\n")
+            lines.append("| Brand | Status | Count |")
+            lines.append("|-------|--------|-------|")
+            for r in rows:
+                lines.append(f"| {r['brand']} | {r['status']} | {r['cnt']} |")
+            lines.append("")
+        else:
+            lines.append("*No promos recorded in this period.*\n")
+
+        lines.append(f"**Pending alerts in buffer:** {pending}\n")
+
+        if suppressed_list:
+            lines.append("## Suppressed Brands\n")
+            for b in suppressed_list:
+                lines.append(f"- {b}")
+            lines.append("")
+        else:
+            lines.append("*No brands currently suppressed.*\n")
+
+        return "\n".join(lines)
+    finally:
+        conn.close()

@@ -29,7 +29,9 @@ from shared import (
     _recent_alerts_history, _recent_alerts_lock,
     _parse_ts,
     _make_tg_link, _flush_alert_buffer, _score_confidence,
-    _reconnect_listener
+    _reconnect_listener,
+    reload_hermes_config, get_hermes_config_float, get_hermes_config_int,
+    get_hermes_config_bool,
 )
 import structured_judge
 
@@ -163,6 +165,84 @@ async def _auto_triage_queue() -> None:
         logger.info(f"Triage discarded {len(discard_ids)} noise msgs ({queue - len(discard_ids)} remain).")
 
 
+# ── Hermes command processor ──────────────────────────────────────────────────
+
+async def _process_hermes_command(cmd) -> None:
+    """Execute a command sent by Hermes via the hermes_commands table."""
+    import json as _json
+
+    command = cmd['command']
+    payload_str = cmd['payload'] or '{}'
+    try:
+        payload = _json.loads(payload_str)
+    except _json.JSONDecodeError:
+        logger.warning(f"Invalid JSON in Hermes command #{cmd['id']}: {payload_str[:100]}")
+        return
+
+    if command == 'reprocess':
+        msg_ids = payload.get('msg_ids', [])
+        if not msg_ids:
+            logger.warning("reprocess command with no msg_ids")
+            return
+        logger.info(f"🔄 [Hermes] Reprocessing {len(msg_ids)} messages")
+        # Mark as unprocessed so the loop picks them up again
+        for mid in msg_ids:
+            await db.conn.execute(
+                "UPDATE messages SET processed=0 WHERE id=?", (mid,)
+            )
+        await db.conn.commit()
+
+    elif command == 'suppress_brand':
+        brand = payload.get('brand')
+        if not brand:
+            logger.warning("suppress_brand command with no brand")
+            return
+        # Store in hermes_config so the processing loop respects it
+        existing = await db.get_hermes_config('alert_suppress_list', '[]')
+        try:
+            suppressed = _json.loads(existing)
+        except _json.JSONDecodeError:
+            suppressed = []
+        if brand not in suppressed:
+            suppressed.append(brand)
+        await db.set_hermes_config('alert_suppress_list', _json.dumps(suppressed))
+        logger.info(f"🔇 [Hermes] Suppressed brand: {brand}")
+
+    elif command == 'override_alert':
+        msg_id = payload.get('msg_id')
+        if not msg_id:
+            logger.warning("override_alert command with no msg_id")
+            return
+        logger.info(f"🚨 [Hermes] Force-alerting message #{msg_id}")
+        # Mark as unprocessed with high priority so it goes through AI
+        await db.conn.execute(
+            "UPDATE messages SET processed=0 WHERE id=?", (msg_id,)
+        )
+        await db.conn.commit()
+
+    elif command == 'force_alert':
+        promo_id = payload.get('promo_id')
+        if not promo_id:
+            logger.warning("force_alert command with no promo_id")
+            return
+        logger.info(f"📢 [Hermes] Force-sending alert for promo #{promo_id}")
+        # Fetch the promo and send it
+        async with db.conn.execute(
+            "SELECT brand, summary, tg_link, created_at FROM promos WHERE id=?",
+            (promo_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if row and bot:
+            p = PromoExtraction(
+                brand=row['brand'], summary=row['summary'],
+                conditions='', status='unknown', confidence=1.0,
+            )
+            await bot.send_alert(p, row['tg_link'], row['created_at'])
+
+    else:
+        logger.warning(f"Unknown Hermes command: {command}")
+
+
 # ── Processing loop ────────────────────────────────────────────────────────────
 
 async def processing_loop() -> None:
@@ -293,8 +373,17 @@ async def processing_loop() -> None:
                             await bot.send_verification_poll(p, tg_link, m['timestamp'])
                             continue
 
-                        if confidence >= 45:
+                        confidence_threshold = get_hermes_config_int('confidence_threshold', 45)
+                        if confidence >= confidence_threshold:
                             if await shared.is_fuzzy_duplicate(brand_key, p.summary):
+                                continue
+                            # Hermes brand suppression
+                            _suppress_raw = shared.hermes_config_cache.get('alert_suppress_list', '[]')
+                            try:
+                                _suppress_list = json.loads(_suppress_raw)
+                            except (json.JSONDecodeError, TypeError):
+                                _suppress_list = []
+                            if brand_key in _suppress_list:
                                 continue
                             await db.save_pending_alert(
                                 brand_key, p.model_dump_json(), tg_link, m['timestamp'],
@@ -350,6 +439,30 @@ async def processing_loop() -> None:
             shared.set_loop_tick()
             await db.ensure_connection()
 
+            # ── Hermes config reload (30s TTL cache) ─────────────────────
+            await reload_hermes_config(db)
+
+            # Apply extraction prompt override if Hermes set one
+            _custom_prompt = shared.hermes_config_cache.get('extraction_prompt')
+            if _custom_prompt:
+                gemini.set_extraction_prompt(_custom_prompt)
+
+            if not get_hermes_config_bool('processing_enabled', True):
+                await asyncio.sleep(5)
+                continue
+
+            # ── Process Hermes commands ──────────────────────────────────
+            for _ in range(5):  # drain up to 5 commands per tick
+                cmd = await db.pickup_hermes_command()
+                if not cmd:
+                    break
+                try:
+                    await _process_hermes_command(cmd)
+                    await db.complete_hermes_command(cmd['id'], 'ok')
+                except Exception as e:
+                    logger.error(f"Hermes command #{cmd['id']} failed: {e}")
+                    await db.fail_hermes_command(cmd['id'], str(e)[:200])
+
             queue_size = await db.get_queue_size()
             # CRITICAL FIX: Match the threshold to prevent unnecessary DB polling.
             if queue_size > 150:
@@ -376,7 +489,7 @@ async def processing_loop() -> None:
             if _queue_emergency_mode:
                 batch_size = 20 # Still keep it somewhat small
             else:
-                batch_size = 12 # Ideal for fast parallel extraction
+                batch_size = get_hermes_config_int('batch_size', 12)
 
             # Optimization: Fetch candidates OUTSIDE of the lock to minimize contention
             ancient_reserve = int(batch_size * 0.4)
@@ -477,7 +590,10 @@ async def processing_loop() -> None:
                 
                 # CRITICAL FIX: Only let FastText drop messages if the queue is backing up.
                 # Otherwise, let the LLM do its job.
-                dynamic_threshold = 0.88 if _queue_emergency_mode else 0.98
+                if _queue_emergency_mode:
+                    dynamic_threshold = get_hermes_config_float('fasttext_threshold_emergency', 0.88)
+                else:
+                    dynamic_threshold = get_hermes_config_float('fasttext_threshold', 0.98)
                 
                 for r, (label, confidence) in zip(candidates, results):
                     if label == "__label__JUNK" and confidence >= dynamic_threshold:

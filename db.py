@@ -306,6 +306,30 @@ class Database:
             )
         """)
 
+        # ── hermes_config (Hermes runtime parameters) ───────────────────────
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS hermes_config (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S+00:00','now'))
+            )
+        """)
+
+        # ── hermes_commands (Operator commands for Tanya) ───────────────────
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS hermes_commands (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                command    TEXT NOT NULL,
+                payload    TEXT NOT NULL DEFAULT '{}',
+                status     TEXT NOT NULL DEFAULT 'pending'
+                           CHECK(status IN ('pending','picked_up','done','failed')),
+                result     TEXT,
+                created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S+00:00','now')),
+                picked_at  TEXT,
+                done_at    TEXT
+            )
+        """)
+
         await self.conn.commit()
 
         # ── Safe migrations (idempotent) ──────────────────────────────────────
@@ -1602,3 +1626,105 @@ class Database:
         except Exception as e:
             logger.error(f"DB recover_stuck_alerts error: {e}")
             return 0
+
+    # ── Hermes Config & Commands ────────────────────────────────────────────
+
+    async def get_hermes_config(self, key: str, default: str | None = None) -> str | None:
+        """Read a Hermes config value by key."""
+        try:
+            async with self.conn.execute(
+                "SELECT value FROM hermes_config WHERE key = ?", (key,)
+            ) as cur:
+                row = await cur.fetchone()
+                return row[0] if row else default
+        except Exception:
+            return default
+
+    async def get_all_hermes_config(self) -> dict[str, str]:
+        """Read all Hermes config values."""
+        try:
+            async with self.conn.execute("SELECT key, value FROM hermes_config") as cur:
+                return {row[0]: row[1] for row in await cur.fetchall()}
+        except Exception:
+            return {}
+
+    async def set_hermes_config(self, key: str, value: str) -> None:
+        """Write a Hermes config value (upsert)."""
+        await self.conn.execute(
+            "INSERT INTO hermes_config (key, value, updated_at) "
+            "VALUES (?, ?, strftime('%Y-%m-%d %H:%M:%S+00:00','now')) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, value),
+        )
+        await self.conn.commit()
+
+    async def delete_hermes_config(self, key: str) -> None:
+        """Delete a Hermes config key."""
+        await self.conn.execute("DELETE FROM hermes_config WHERE key = ?", (key,))
+        await self.conn.commit()
+
+    async def send_hermes_command(self, command: str, payload: str = "{}") -> int:
+        """Queue a Hermes command for Tanya to pick up. Returns command ID."""
+        cur = await self.conn.execute(
+            "INSERT INTO hermes_commands (command, payload) VALUES (?, ?)",
+            (command, payload),
+        )
+        await self.conn.commit()
+        return cur.lastrowid  # type: ignore[return-value]
+
+    async def pickup_hermes_command(self, command: str | None = None) -> aiosqlite.Row | None:
+        """Pick up the oldest pending command (optionally filtered by type). Marks it picked_up."""
+        if command:
+            sql = (
+                "SELECT * FROM hermes_commands WHERE status='pending' AND command=? "
+                "ORDER BY created_at ASC LIMIT 1"
+            )
+            params: tuple[str, ...] = (command,)
+        else:
+            sql = (
+                "SELECT * FROM hermes_commands WHERE status='pending' "
+                "ORDER BY created_at ASC LIMIT 1"
+            )
+            params = ()
+        async with self.conn.execute(sql, params) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        await self.conn.execute(
+            "UPDATE hermes_commands SET status='picked_up', picked_at=strftime('%Y-%m-%d %H:%M:%S+00:00','now') WHERE id=?",
+            (row["id"],),
+        )
+        await self.conn.commit()
+        return row
+
+    async def complete_hermes_command(self, cmd_id: int, result: str = "") -> None:
+        """Mark a command as done."""
+        await self.conn.execute(
+            "UPDATE hermes_commands SET status='done', result=?, done_at=strftime('%Y-%m-%d %H:%M:%S+00:00','now') WHERE id=?",
+            (result, cmd_id),
+        )
+        await self.conn.commit()
+
+    async def fail_hermes_command(self, cmd_id: int, result: str = "") -> None:
+        """Mark a command as failed."""
+        await self.conn.execute(
+            "UPDATE hermes_commands SET status='failed', result=?, done_at=strftime('%Y-%m-%d %H:%M:%S+00:00','now') WHERE id=?",
+            (result, cmd_id),
+        )
+        await self.conn.commit()
+
+    async def get_pending_commands(self, command: str | None = None) -> list[aiosqlite.Row]:
+        """List pending commands (optionally filtered by type)."""
+        if command:
+            sql = (
+                "SELECT * FROM hermes_commands WHERE status='pending' AND command=? "
+                "ORDER BY created_at ASC"
+            )
+            return list(await (await self.conn.execute(sql, (command,))).fetchall())
+        sql = "SELECT * FROM hermes_commands WHERE status='pending' ORDER BY created_at ASC"
+        return list(await (await self.conn.execute(sql)).fetchall())
+
+    async def get_recent_commands(self, limit: int = 20) -> list[aiosqlite.Row]:
+        """List recent commands (all statuses)."""
+        sql = "SELECT * FROM hermes_commands ORDER BY created_at DESC LIMIT ?"
+        return list(await (await self.conn.execute(sql, (limit,))).fetchall())
