@@ -250,7 +250,6 @@ async def _process_hermes_command(cmd) -> None:
 
 async def processing_loop() -> None:
     """Main background loop for message analysis and promotion extraction."""
-    global _triage_cycle_counter, _queue_emergency_mode
 
     recent_promos = await db.get_recent_alert_brands(hours=6, limit=300)
     async with _recent_alerts_lock:

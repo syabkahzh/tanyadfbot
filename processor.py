@@ -174,7 +174,7 @@ _STRONG_KEYWORDS: set[str] = {
     'gabisa','gaada','g+b+s','gamau','minbel',
     'kuota','limit','slot','redeem','qr','scan','edc',
     'r+s+t+k','r+s+t+c+k','r+st+ck',
-    'cb','kesbek','c\+s\+h\+b\+c\+k','cash back',
+    'cb','kesbek','c+s+h+b+c+k','cash back',
     'luber','pecah','flash','sale','deal','murah','hemat','bonus',
     'ongkir','gratis ongkir','membership','member','mamber',
     'yang butuh aja','ymma','tukpo','murce','murmer','sopi','tsel','cgv','xxi',

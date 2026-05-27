@@ -558,7 +558,6 @@ def _guess_brand(text: str | None) -> str:
     t_norm = _ELONGATION_RE.sub(r"\1", t_raw)
 
     brand_canon = get_brand_canon()
-    global _BRAND_PATTERNS
     if not _BRAND_PATTERNS:
         for kw in brand_canon.keys():
             if len(kw) <= 5 or "+" in kw:
