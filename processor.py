@@ -199,7 +199,20 @@ _QUESTION_PATTERN = re.compile(
     r'kapan\s+mulai|dimana\s+bisa|kenapa\s+|ada\s+yg\s+tau|'
     r'pake\s+voucher\s+apa|pake\s+voc\s+apa|'
     r'cara\s+claim|cara\s+klaim|cara\s+pakai|'
-    r'gmn|gmana|gmna|nta|tanya|nanya)',
+    r'gmn|gmana|gmna|nta|tanya|nanya|'
+    r'(?:masih|lagi)\s+(?:ada|on|work|aktif)\s+(?:ga|gak|nggak|ya|yah|aja)|'
+    r'(?:dpt|dapet|dapat|dapatkan)\s+\w*\s*(?:dari|dr)\s+\w|'
+    r'brp\b|berapa\b|dpt\s+brp|'
+    r'worth\s+(?:it|ga|gak|ya|yah)|'
+    r'(?:stay|ada)\s+(?:dimana|dmn|mana|gimana|gmn)|'
+    r'(?:masih|udah|belum)\s+\w+\s*(?:ga|gak|ya|yah)|'
+    r'(?:lg|lagi)\s+\w+\s*(?:ga|gak|ya|yah)|'
+    r'(?:bisa|bs)\s+\w+\s+(?:ga|gak|gabisa|nggak|ga bisa)|'
+    r'(?:bisa|bs)\s+(?:ga|gak|gabisa|nggak|ga bisa)|'
+    r'gimana\s+(?:sih|dong|kak|ka|gy)|'
+    r'gmn\s+sih|ko\s+tumben|'
+    r'(?:pada|pade)\s+dpt|'
+    r'yang\s+(?:tau|tahu|tw)\s+\w)',
     re.IGNORECASE
 )
 # Detect vague/low-quality summaries that don't convey useful promo info
