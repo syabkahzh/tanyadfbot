@@ -5,8 +5,6 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from config import Config
-
 NEGATIVE_CORRECTIONS = {"NOT_A_PROMO", "SPAM_OR_NOISE"}
 _SECRET_PATTERNS = [
     re.compile(r"\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|AUTH)[A-Z0-9_]*)=([^\s]+)"),
@@ -14,8 +12,16 @@ _SECRET_PATTERNS = [
 ]
 
 
+def _default_db_path() -> str:
+    try:
+        from config import Config
+    except Exception:
+        return "tanya_main.db"
+    return Config.DB_PATH
+
+
 def _connect(db_path: str | None = None) -> sqlite3.Connection:
-    path = db_path or Config.DB_PATH
+    path = db_path or _default_db_path()
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     return conn

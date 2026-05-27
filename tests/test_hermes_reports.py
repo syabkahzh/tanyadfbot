@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -269,3 +272,28 @@ def test_build_recent_promo_lookup_report_handles_empty_window(tmp_path: Path) -
     assert "# Hermes Recent Promo Lookup" in report
     assert "No promo found" in report
     assert "do not fall back to SSH" in report
+
+
+def test_hermes_reports_import_without_dotenv_dependency(tmp_path: Path) -> None:
+    db_path = tmp_path / "report.db"
+    _seed_db(db_path)
+
+    env = os.environ.copy()
+    repo_root = Path(__file__).resolve().parent.parent
+    command = (
+        "import sys; "
+        "sys.modules['dotenv'] = None; "
+        "from hermes_reports import build_recent_promo_lookup_report; "
+        f"print(build_recent_promo_lookup_report(r'{db_path}', hours=2))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", command],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "# Hermes Recent Promo Lookup" in result.stdout
