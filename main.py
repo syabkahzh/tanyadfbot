@@ -641,7 +641,11 @@ async def main() -> None:
         msg = (f"🔄 **Startup Recovery**\n\nFound {count} errors marked as fixed.")
         await bot.send_plain(msg)
 
-    await bot.app.updater.start_polling()
+    # Bot is send-only (alerts, digests). Polling is disabled because the same
+    # bot token is used by Hermes in webhook mode for operator DMs.
+    # Commands (/status, /today, etc.) and callback buttons won't work until
+    # a separate bot token is assigned to Tanya.
+    # await bot.app.updater.start_polling()
     asyncio.create_task(processing_loop())
     await listener.start()
     asyncio.create_task(_reconnect_listener(BOOT_CATCHUP_WINDOW / 60))
