@@ -134,6 +134,8 @@ PENTING - JANGAN EKSTRAK SEBAGAI PROMO:
 - Pesan casual seperti "makasih", "ok", "sip", "hehe" → itu REPLY, bukan promo
 - Pesan yang nanya "pake voucher apa", "gimana caranya", "brp harganya" → itu TANYA, bukan promo
 - Pesan yang cuma bilang "sering harga 50k" tanpa info promo spesifik → itu OBSERVASI, bukan promo
+- Pesan yang cuma bilang "Alhamdulillah", "syukur", "thanks" → itu EKSPRESI, bukan promo
+- Pesan yang cerita "beli X", "makan X", "lagi X" → itu CHAT, bukan promo
 
 CONTOH:
 ID:1 C:sfood diskon 80k MSG:nyala -> {"promos":[{"original_msg_id":1,"brand":"ShopeeFood","summary":"**ShopeeFood** diskon 80k aktif.","status":"active","confidence":0.95}]}
@@ -141,7 +143,9 @@ ID:2 C:gopay coins MSG:nt -> {"promos":[{"original_msg_id":2,"brand":"GoPay","su
 ID:3 MSG:ada yg tau cgv tsel? -> {"promos":[{"original_msg_id":3,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
 ID:4 MSG:kak pake voucher apa? -> {"promos":[{"original_msg_id":4,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
 ID:5 MSG:on/aktif -> {"promos":[{"original_msg_id":5,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
-ID:6 MSG:sering harga 50k pake koin -> {"promos":[{"original_msg_id":6,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}"""
+ID:6 MSG:sering harga 50k pake koin -> {"promos":[{"original_msg_id":6,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:7 MSG:Alhamdulillah -> {"promos":[{"original_msg_id":7,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:8 MSG:beli ubi 5k nya -> {"promos":[{"original_msg_id":8,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}"""
 
 _DEDUP_SYSTEM = "Kamu agen deteksi duplikasi. Output HANYA angka indeks dipisah koma."
 
@@ -198,17 +202,20 @@ _QUESTION_PATTERN = re.compile(
     r'gmn|gmana|gmna|nta|tanya|nanya)',
     re.IGNORECASE
 )
-
 # Detect vague/low-quality summaries that don't convey useful promo info
+# Only filter standalone status words — NOT when used as status modifier in a real promo
 _VAGUE_SUMMARY_PATTERN = re.compile(
-    r'(on/aktif|'
-    r'^aktif\.?$|'
-    r'^tidak\s+aktif|'
-    r'habis\.?$|'
-    r'^expired\.?$|'
+    r'^(?:\*\*[^*]+\*\*\s*)?'  # optional **Brand** prefix
+    r'(?:on/aktif|aktif|tidak\s+aktif|habis|expired|'
     r'belum\s+tau|gatau|gak\s+tau|ga\s+tau|'
-    r'truk|liat|cek\s+saja|info\s+aja|'
-    r'sering\s+harga|harga\s+sering)',
+    r'truk|liat|cek\s+saja|info\s+aja)'
+    r'\s*\.?\s*$'  # must be at end of summary too
+    , re.IGNORECASE
+)
+
+# Vague observations — match anywhere in summary (not just standalone)
+_VAGUE_OBSERVATION_PATTERN = re.compile(
+    r'sering\s+harga|harga\s+sering',
     re.IGNORECASE
 )
 
@@ -217,7 +224,17 @@ _CASUAL_REPLY_PATTERN = re.compile(
     r'^(iya|oh|ok|oke|ohh|ohhh|nah|hehe|haha|wkwk|'
     r'makasih|thanks|thx|mks|terimakasih|'
     r'sip|mantap|jos|joss|keren|'
-    r'ga\s+tau|gak\s+tau|gatau)',
+    r'ga\s+tau|gak\s+tau|gatau|'
+    r'alhamdulillah|syukur|allhamdulillah|alhamdulilah)',
+    re.IGNORECASE
+)
+
+# Detect casual chat about buying/eating things (not promos)
+_CASUAL_CHAT_PATTERN = re.compile(
+    r'^(beli\s+\w+|makan\s+\w+|lagi\s+\w+|habis\s+\w+|'
+    r'udah\s+\w+|baru\s+\w+|mau\s+\w+| lagi\s+\w+|'
+    r'kemarin\s+\w+|kemaren\s+\w+|'
+    r'gak\s+\w+|ga\s+\w+|nggak\s+\w+)',
     re.IGNORECASE
 )
 
@@ -1073,7 +1090,11 @@ class GeminiProcessor:
                     continue
                 if _VAGUE_SUMMARY_PATTERN.search(summary):
                     continue
+                if _VAGUE_OBSERVATION_PATTERN.search(summary):
+                    continue
                 if _CASUAL_REPLY_PATTERN.search(summary):
+                    continue
+                if _CASUAL_CHAT_PATTERN.search(summary):
                     continue
                 verified_brand = normalize_brand(p.brand)
                 if verified_brand == "Unknown":

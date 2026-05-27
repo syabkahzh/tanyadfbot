@@ -86,6 +86,9 @@ _BRAND_CANON: dict[str, str] = {
     'svip': 'ShopeeFood',
     'spud': 'SPUD',
     'skin1004': 'SKIN1004', 'skin': 'SKIN1004', 'skinenjel': 'SKIN1004',
+    # Banking & E-wallet (added from feedback)
+    'mybca': 'MyBCA', 'my bca': 'MyBCA', 'm+y+b+c+a': 'MyBCA',
+    'bca': 'BCA', 'b+c+a': 'BCA',
     # junk sentinels → Unknown
     'brand': 'Unknown', 'tidak diketahui': 'Unknown',
     'tidak disebutkan': 'Unknown', 'sunknown': 'Unknown',
