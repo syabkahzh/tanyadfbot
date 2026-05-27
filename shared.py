@@ -10,7 +10,10 @@ from collections import OrderedDict, deque
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import fasttext
+try:
+    import fasttext
+except ImportError:
+    fasttext = None
 
 # NumPy 2.0+ compatibility fix for FastText
 try:
@@ -46,6 +49,9 @@ _ft_model = None
 async def load_classifier(model_path: str = "model.ftz") -> bool:
     """Load FastText model at startup. Non-blocking."""
     global _ft_model
+    if fasttext is None:
+        logger.warning("FastText package unavailable — Tier 2 classifier disabled (regex only)")
+        return False
     if not os.path.exists(model_path):
         logger.warning(
             f"⚠️  No {model_path} found — Tier 2 classifier disabled (regex only)"

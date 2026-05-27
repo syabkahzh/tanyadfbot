@@ -274,6 +274,27 @@ def test_build_recent_promo_lookup_report_handles_empty_window(tmp_path: Path) -
     assert "do not fall back to SSH" in report
 
 
+def test_recent_promo_lookup_warns_when_database_has_no_data_plane_activity(tmp_path: Path) -> None:
+    db_path = tmp_path / "empty.db"
+
+    report = build_recent_promo_lookup_report(str(db_path), hours=2)
+
+    assert "## Data Plane Warning" in report
+    assert "local Tanya database has no messages or promos" in report
+    assert "tanyadfbot-runtime.service" in report
+    assert "do not fall back to SSH" in report
+
+
+def test_service_health_report_warns_when_database_has_no_data_plane_activity(tmp_path: Path) -> None:
+    db_path = tmp_path / "empty.db"
+
+    report = build_service_health_report(str(db_path), hours=24)
+
+    assert "## Data Plane Warning" in report
+    assert "local Tanya database has no messages or promos" in report
+    assert "tanyadfbot-runtime.service" in report
+
+
 def test_hermes_reports_import_without_dotenv_dependency(tmp_path: Path) -> None:
     db_path = tmp_path / "report.db"
     _seed_db(db_path)

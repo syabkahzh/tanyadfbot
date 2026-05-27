@@ -7,7 +7,7 @@ python-dotenv
 apscheduler
 pytz
 psutil
-fasttext-wheel
+fasttext-wheel; python_version < "3.13"
 numpy
 telegramify-markdown
 matplotlib

@@ -71,6 +71,17 @@ def _format_bullets(rows: list[str], empty_message: str) -> str:
     return "\n".join(f"- {row}" for row in rows)
 
 
+def _data_plane_warning(total_messages: int, total_promos: int) -> str:
+    if total_messages or total_promos:
+        return ""
+    return (
+        "## Data Plane Warning\n"
+        "- The local Tanya database has no messages or promos. This can mean the data plane is not running, "
+        "is pointed at a different database, or has not ingested data yet.\n"
+        "- Verify `tanyadfbot-runtime.service` on the same VM before treating an empty promo result as normal.\n"
+    )
+
+
 def _window_param(hours: int) -> tuple[str]:
     return (f"-{hours} hours",)
 
@@ -336,6 +347,7 @@ def build_service_health_report(
         total_messages = _safe_fetchone_value(conn, "SELECT COUNT(*) FROM messages")
         total_promos = _safe_fetchone_value(conn, "SELECT COUNT(*) FROM promos")
         ai_failures = _safe_fetchone_value(conn, "SELECT COUNT(*) FROM messages WHERE ai_failure_count >= 2")
+        data_plane_warning = _data_plane_warning(total_messages=total_messages, total_promos=total_promos)
 
         failure_rows = _safe_fetchall(
             conn,
@@ -381,6 +393,8 @@ def build_service_health_report(
             f"- Total messages: {total_messages}\n"
             f"- Total promos: {total_promos}\n"
             f"- Messages with repeated AI failures: {ai_failures}\n\n"
+            f"{data_plane_warning}"
+            f"{'\n' if data_plane_warning else ''}"
             "## Recent Failures\n"
             f"{_format_bullets(failure_lines, 'No failures recorded in the lookback window.')}\n\n"
             "## Recent System Logs\n"
@@ -493,6 +507,9 @@ def build_recent_promo_lookup_report(
             """,
             tuple(params),
         )
+        total_messages = _safe_fetchone_value(conn, "SELECT COUNT(*) FROM messages")
+        total_promos = _safe_fetchone_value(conn, "SELECT COUNT(*) FROM promos")
+        data_plane_warning = _data_plane_warning(total_messages=total_messages, total_promos=total_promos)
         latest_lines = [
             (
                 f"{row['created_at']} `{row['brand'] or 'Unknown'}`: {row['summary'] or 'no AI summary'}"
@@ -516,6 +533,8 @@ def build_recent_promo_lookup_report(
             f"- Lookback window: last {hours} hours\n"
             f"{scope_line}"
             "\n"
+            f"{data_plane_warning}"
+            f"{'\n' if data_plane_warning else ''}"
             "## Latest Promo\n"
             f"{_format_bullets(latest_lines, empty_message)}\n"
         )

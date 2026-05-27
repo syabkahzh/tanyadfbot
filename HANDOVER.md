@@ -1,47 +1,149 @@
-# TanyaDFBot Project Handover
+# TanyaDFBot / Hermes Handover
 
-## Project Overview
-TanyaDFBot is a high-performance, AI-powered Telegram deal aggregator. It monitors a target group chat, extracts promotions using the Gemini API (Gemma model), and sends structured alerts to the owner.
+## Snapshot
 
-## System Architecture
-The system follows an **Ingest -> Store -> Extract -> Alert** pipeline.
+- Local repo: clean on `master`
+- Local `HEAD`: `0c99913` — `fix: make hermes local reports dotenv-safe`
+- GitHub `origin/master`: includes `bd16d5c` and `0c99913`
+- VM repo: `/home/haqqanimalang/tanyadfbot` at `0c99913`
+- VM `hermes-gateway.service`: `active`
+- VM `tanyadfbot-runtime.service`: `inactive`
 
-### 1. Ingestion (`listener.py`)
-- **Engine:** Telethon (Telegram Client).
-- **Mechanism:** Listens for `NewMessage` events and performs a non-blocking background history sync (up to 12 hours) on startup.
-- **Storage:** Messages are saved to the `messages` table with `processed = 0`.
+## What Was Done
 
-### 2. Storage (`db.py`)
-- **Engine:** `aiosqlite` with a **single persistent connection**.
-- **Mode:** `PRAGMA journal_mode=WAL` (Write-Ahead Logging) to allow concurrent read/write.
-- **Atomicity:** Uses `save_promos_batch` for transactional commits (saves promos and marks messages as processed in one transaction).
+### Repo-side maestro work
 
-### 3. AI Processing (`processor.py` & `main.py`)
-- **Primary Model:** `gemma-3-4b-it` (Gemma 3).
-- **Fleet:** AI Army (multiple providers including Gemma 3 [4b, 12b, 27b], Gemma 4, Mistral, Llama, Qwen).
-- **Extraction:** Processes messages in batches of 150 every 1 minute.
-- **Deduplication:** Uses **Batch AI Deduplication**. A single AI call compares a batch of new promos against recent history to filter out duplicates semantically.
-- **Alert Logic:**
-    - **Freshness:** 60-minute cutoff for alerts.
-    - **Catch-up:** During the first 5 minutes of startup (`is_booting`), the 60-minute rule is ignored to notify of deals found during history sync.
+- Added a repo instruction file: `AGENTS.md`
+- Added a combined control-plane report: `tools/hermes_maestro_report.py`
+- Added a focused recent promo lookup tool: `tools/hermes_recent_promos.py`
+- Expanded `hermes_reports.py` with:
+  - command center report
+  - recent promo lookup report
+  - review + recommendations report
+  - tuning proposal report
+  - combined maestro report
+- Added tests in `tests/test_hermes_reports.py`
+- Added same-VM cutover docs:
+  - `docs/HERMES_PHASE1_RUNBOOK.md`
+  - `docs/MAESTRO_CUTOVER.md`
+  - `HERMES_CONTROL_PLANE.md`
+- Updated `deploy.sh` so local same-VM deploy is the default and the deprecated remote host is rejected
 
-### 4. Interaction (`bot.py`)
-- **Engine:** `python-telegram-bot`.
-- **UI:** Structured alerts with WIB timestamps, "Mark Expired" interactive buttons, and `/summary` lists.
-- **Commands:**
-    - `/aisummary [n]`: AI-centric raw text summary of the last $N$ messages.
-    - `/summary [jam]`: List of extracted promos from the last $X$ hours.
-    - `/status`: Real-time system health and queue depth.
-    - `/today`: All promos from the last 24 hours.
+### Live VM sync work
 
-## Technical Standards
-- **Timezone:** Internal logic and database use **UTC**. Presentation layer (`bot.py`) adds a **+7 hour offset** for **WIB**.
-- **Data Integrity:** No messages are marked as processed until the AI successfully extracts promos and they are saved to the DB.
-- **Deployment:** Uses `rsync` with exclusions for `.db`, `.session`, and `.env`.
+- Confirmed the live VM repo now matches the pushed repo at `0c99913`
+- Preserved older VM-only drift on backup branches:
+  - `vm-backup-20260527-123236`
+  - `vm-backup-20260527-123255`
+- Left unrelated VM-only helper `tools/tanyafetch.py` on the backup branch, not in `master`
 
-## Current State
-- **Performance:** Optimized for high-volume groups with batch processing and persistent DB connections.
-- **Robustness:** Handles service restarts and history catch-ups without losing data or silencing important deals.
-- **Slang Sensitivity:** AI instructions are tuned for Indonesian "deal hunter" slang (e.g., "pln on", "aman", "nyantol").
+### Hermes SSH fallback fix
 
-Ran on GCP's VPS
+Root cause of the bad "latest promo" behavior was not just model drift:
+
+1. Hermes memory on the VM was stale and still described Phase 1 as only:
+   - `tools/hermes_daily_report.py`
+   - `tools/hermes_health_report.py`
+2. The new local recent-promo tool initially crashed on the VM because `hermes_reports.py` imported `config.py`, which required `python-dotenv`
+3. When the local tool crashed, Hermes fell back to shell improvisation and tried SSH
+
+Fixes applied:
+
+- Added `tools/hermes_recent_promos.py`
+- Updated `AGENTS.md` to explicitly say:
+  - use local report scripts first
+  - do not use SSH for normal promo lookup
+  - do not probe alternate SSH ports
+- Changed `hermes_reports.py` to fall back to `tanya_main.db` without requiring `dotenv` at import time
+- Synced that fix to the VM at `0c99913`
+- Verified on the VM:
+  - `.venv/bin/python tools/hermes_recent_promos.py --hours 2`
+  - now runs successfully
+- Updated `/home/haqqanimalang/.hermes/memories/MEMORY.md` to mention:
+  - `tools/hermes_recent_promos.py`
+  - `tools/hermes_maestro_report.py`
+  - never use SSH for normal promo lookup
+
+## What Is Still Wrong
+
+### The data plane is still not live on the same VM
+
+This is the biggest remaining blocker.
+
+- `tanyadfbot-runtime.service` is `inactive`
+- Earlier VM inspection showed:
+  - local `tanya_main.db` was empty
+  - local Tanya runtime dependencies were incomplete at least at one point
+  - the bot was not actually running as a live same-VM data plane
+
+That means Hermes may now know the right local tool path, but it still may not have real promo data to answer from until the Tanya runtime is truly up and writing to the local DB.
+
+### Hermes gateway has restart instability / startup noise
+
+Recent journal shows multiple issues:
+
+- earlier gateway starts reported:
+  - `No messaging platforms enabled`
+  - `no delivery target resolved for deliver=telegram`
+- earlier turns still logged failed SSH attempts to the deprecated host `34.101.41.172`
+- after a manual restart, journal showed:
+  - `Self-improvement review: Skill 'tanyadfbot-operations' created.`
+  - then `Main process exited, status=1/FAILURE`
+  - systemd restarted it and current state is `active`
+
+So Hermes is currently up, but it has shown unstable startup behavior and should be treated as not fully trusted yet.
+
+## Current Truth About "Latest Promo"
+
+As of this handover:
+
+- The repo and VM now contain a local promo lookup path that works:
+  - `PYTHONPATH=. .venv/bin/python tools/hermes_recent_promos.py --hours 2`
+- The VM tool currently returns a valid local-only response shape
+- But the underlying Tanya runtime on the VM is still inactive, so "latest promo" may legitimately return no data until the data plane is restored
+
+## Recommended Next Checks
+
+1. Bring up the real Tanya runtime on `34.21.211.116`
+   - verify `.env`
+   - verify Telethon session
+   - verify runtime deps in `.venv`
+   - verify non-empty live DB
+   - verify `tanyadfbot-runtime.service`
+2. Confirm the local DB starts receiving fresh promos
+3. Re-ask Hermes:
+   - "what's the latest promo right now?"
+4. Watch `journalctl -u hermes-gateway.service`
+   - confirm it uses the local tool path
+   - confirm no SSH attempt appears
+5. If Hermes still SSHs after the data plane is live:
+   - inspect Hermes session/state persistence, not just repo files
+
+## Useful Commands
+
+### Local repo
+
+```bash
+git status --short --branch
+git log --oneline -n 5
+.venv/bin/python -m pytest -q tests/test_hermes_reports.py
+```
+
+### VM repo
+
+```bash
+ssh haqqanimalang@34.21.211.116
+cd /home/haqqanimalang/tanyadfbot
+git status --short --branch
+git rev-parse --short HEAD
+.venv/bin/python tools/hermes_recent_promos.py --hours 2
+.venv/bin/python tools/hermes_maestro_report.py --command-hours 2 --review-hours 24
+```
+
+### VM services
+
+```bash
+systemctl is-active hermes-gateway.service
+systemctl is-active tanyadfbot-runtime.service
+journalctl -u hermes-gateway.service -n 80 --no-pager
+```
