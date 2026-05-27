@@ -1,14 +1,16 @@
 # Hermes Phase 1 Runbook
 
-This repo stays the `tanyadfbot` data plane. Hermes Agent runs as a separate service on the same VM and uses the commands below as its read-only inspection surface.
+This repo stays the `tanyadfbot` data plane. Hermes Agent runs as a separate service on the same VM and uses the commands below as its read-only inspection surface. The same-VM contract is the important bit: Hermes should inspect local Tanya state, not a deprecated remote host.
 
 ## Stable Commands
 
 Run from the repo root:
 
 ```bash
+PYTHONPATH=. .venv/bin/python tools/hermes_recent_promos.py --hours 2
 PYTHONPATH=. .venv/bin/python tools/hermes_daily_report.py --hours 24
 PYTHONPATH=. .venv/bin/python tools/hermes_health_report.py --hours 24
+PYTHONPATH=. .venv/bin/python tools/hermes_maestro_report.py --command-hours 2 --review-hours 24
 ```
 
 Optional log tail:
@@ -16,6 +18,11 @@ Optional log tail:
 ```bash
 PYTHONPATH=. .venv/bin/python tools/hermes_health_report.py \
   --hours 24 \
+  --log-path /var/log/tanyadfbot/runtime.log \
+  --tail-lines 40
+PYTHONPATH=. .venv/bin/python tools/hermes_maestro_report.py \
+  --command-hours 2 \
+  --review-hours 24 \
   --log-path /var/log/tanyadfbot/runtime.log \
   --tail-lines 40
 ```
@@ -32,7 +39,7 @@ These commands are intentionally:
 Hermes may:
 
 - read repo text files
-- run the two report scripts above
+- run the report scripts above
 - inspect `git diff`, `git log`, and read-only service status commands
 - read log files that do not expose secrets directly
 
@@ -55,6 +62,12 @@ Hermes must not:
 - repeat-fire brand hints
 - top brands and top correction labels
 
+`tools/hermes_recent_promos.py` covers:
+
+- latest promo within a recent time window
+- recent promos for an optional brand filter
+- explicit local-only guidance so Hermes does not fall back to SSH
+
 `tools/hermes_health_report.py` covers:
 
 - queue depth
@@ -63,6 +76,17 @@ Hermes must not:
 - recent failures
 - recent warning/error system logs
 - optional log tail with secret redaction
+
+`tools/hermes_maestro_report.py` covers:
+
+- command-center promo lookup within a recent time window
+- runtime health snapshot
+- review findings and prioritized recommendations
+- reviewable tuning proposals grounded in the recent window
+
+## Operator Guardrail
+
+For normal operator questions like "latest promo" or "latest promo in the last 2 hours", Hermes should use `tools/hermes_recent_promos.py` first. It should not open SSH sessions or try alternate SSH ports for that class of question.
 
 ## VM Setup Still Required
 

@@ -68,10 +68,28 @@ PYTHONPATH=. .venv/bin/python tools/hermes_health_report.py --hours 24
 PYTHONPATH=. .venv/bin/python tools/hermes_health_report.py --hours 24 --log-path /var/log/tanyadfbot/runtime.log --tail-lines 40
 ```
 
+### `tools/hermes_maestro_report.py`
+Builds the combined Hermes maestro view for command center, review, and tuning proposals.
+
+**Usage:**
+```bash
+PYTHONPATH=. .venv/bin/python tools/hermes_maestro_report.py --command-hours 2 --review-hours 24
+PYTHONPATH=. .venv/bin/python tools/hermes_maestro_report.py --command-hours 2 --review-hours 24 --log-path /var/log/tanyadfbot/runtime.log --tail-lines 40
+```
+
+### `tools/hermes_recent_promos.py`
+Builds a focused local lookup answer for recent promo questions so Hermes does not need SSH, ad hoc SQL, or remote host probing.
+
+**Usage:**
+```bash
+PYTHONPATH=. .venv/bin/python tools/hermes_recent_promos.py --hours 2
+PYTHONPATH=. .venv/bin/python tools/hermes_recent_promos.py --hours 2 --brand Alfamart
+```
+
 See [docs/HERMES_PHASE1_RUNBOOK.md](docs/HERMES_PHASE1_RUNBOOK.md) for the Phase 1 control-plane contract.
 
 ## Deployment
-The project is managed via a Git repository. Deployment is handled through a custom `deploy.sh` script that performs incremental syncs and service restarts.
+The project is managed via a Git repository. Deployment is handled through a custom `deploy.sh` script that supports same-VM local restart mode and explicit remote sync mode. See [docs/MAESTRO_CUTOVER.md](docs/MAESTRO_CUTOVER.md) for the operator cutover flow.
 
 ---
 *Maintained with ✨ by TanyaDFBot Team*

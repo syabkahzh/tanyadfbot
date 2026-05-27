@@ -148,17 +148,18 @@ collect bot feedback (false positives, false negatives, user corrections)
 
 ## Phased Rollout
 
-### Phase 0 — Hermes permissions and install/run shape on GCP VM
+### Phase 0 — Hermes permissions and install/run shape on the shared VM
 
 - Document Hermes install path, config location, systemd unit, and env file.
 - Define the whitelist of files Hermes may write.
 - Set up separate Hermes bot token and env file.
 - Confirm Hermes gateway runs alongside tanyadfbot without port/session conflicts.
+- Keep the same-VM contract explicit: Hermes must inspect local Tanya state, not a deprecated remote host.
 
-### Phase 1 — Read-only daily review report from logs/DB
+### Phase 1 — Command center from logs/DB
 
 - Hermes reads tanyadfbot logs and recent judgments.
-- Produces a daily summary: alert count, false positive/negative estimates, top brands, trending promos.
+- Produces a command-center summary: latest promo, recent promos, runtime health, and hot brands.
 - Delivers report to operator via Hermes Telegram gateway.
 - No writes to tanyadfbot code or config yet.
 
@@ -166,21 +167,23 @@ collect bot feedback (false positives, false negatives, user corrections)
 
 - `PYTHONPATH=. .venv/bin/python tools/hermes_daily_report.py --hours 24`
 - `PYTHONPATH=. .venv/bin/python tools/hermes_health_report.py --hours 24`
+- `PYTHONPATH=. .venv/bin/python tools/hermes_maestro_report.py --command-hours 2 --review-hours 24`
 - Optional log tail: `PYTHONPATH=. .venv/bin/python tools/hermes_health_report.py --hours 24 --log-path /path/to/runtime.log --tail-lines 40`
 
 These commands are the preferred Phase 1 contract for Hermes instead of ad hoc SQL queries.
 
-### Phase 2 — Skills/lingo/prompt update proposals
+### Phase 2 — Review + recommendations
+
+- Hermes proposes daily reviews of false positives, missed signals, repeat-fire brands, and runtime issues.
+- Recommendations are grouped into investigate, monitor, likely tuning opportunity, and likely runtime issue.
+- Hermes presents the review output to the operator via Telegram.
+
+### Phase 3 — Gated tuning proposals
 
 - Hermes proposes updates to `skills/*.md`, `config/trigger_terms.yaml`, `prompts/*.md`.
 - Proposals are staged as git diffs, presented to operator for approval.
 - Approved changes are applied and tanyadfbot is restarted.
-
-### Phase 3 — Gated source-code patches with tests and user approval
-
-- Hermes may propose changes to tanyadfbot source code.
-- Every patch must: pass existing tests, include new tests for the change, produce a reviewable git diff.
-- No patch is applied without explicit user approval.
+- No file mutation happens automatically in the recommend-only roadmap.
 
 ### Phase 4 — Limited autonomous low-risk updates (after enough evaluation)
 
