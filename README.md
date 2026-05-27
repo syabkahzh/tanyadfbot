@@ -51,6 +51,25 @@ A cron job runs this every 6 hours on the VPS so `latest_feedback_export.md` is 
 0 */6 * * * cd /home/hfzhkn/tanyadfbot && /home/hfzhkn/tanyadfbot/venv/bin/python tools/export_corrections.py >> /home/hfzhkn/tanyadfbot/logs/export_cron.log 2>&1
 ```
 
+### `tools/hermes_daily_report.py`
+Builds a Hermes-friendly Markdown report for alert quality review without exposing Hermes to raw ad hoc SQL.
+
+**Usage:**
+```bash
+PYTHONPATH=. .venv/bin/python tools/hermes_daily_report.py --hours 24
+```
+
+### `tools/hermes_health_report.py`
+Builds a Hermes-friendly Markdown report for runtime health, recent failures, and optional redacted log tails.
+
+**Usage:**
+```bash
+PYTHONPATH=. .venv/bin/python tools/hermes_health_report.py --hours 24
+PYTHONPATH=. .venv/bin/python tools/hermes_health_report.py --hours 24 --log-path /var/log/tanyadfbot/runtime.log --tail-lines 40
+```
+
+See [docs/HERMES_PHASE1_RUNBOOK.md](docs/HERMES_PHASE1_RUNBOOK.md) for the Phase 1 control-plane contract.
+
 ## Deployment
 The project is managed via a Git repository. Deployment is handled through a custom `deploy.sh` script that performs incremental syncs and service restarts.
 

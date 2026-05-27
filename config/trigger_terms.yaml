@@ -1,0 +1,114 @@
+# Trigger terms for Discountfess promo intelligence.
+# This file is a control-plane writable asset for Hermes.
+# Do not hardcode lingo in Python; load from here instead.
+
+# Each category has a weight applied when terms match.
+# The attention trigger sums weights from all matching categories.
+# A score >= 2.0 gates context building for the LLM judge.
+
+promo:
+  weight: 2.0
+  terms:
+    - diskon
+    - disc
+    - cashback
+    - cash back
+    - cb
+    - kesbek
+    - keshbek
+    - cashbek
+    - casback
+    - voucher
+    - vocer
+    - voucer
+    - vc
+    - promo
+    - potongan
+    - gratis ongkir
+    - ongkir
+    - flash sale
+    - kode
+    - kupon
+    - claim
+    - klaim
+    - redeem
+
+payment:
+  weight: 1.5
+  terms:
+    - qris
+    - gopay
+    - ovo
+    - dana
+    - shopeepay
+    - spay
+    - spaylater
+    - paylater
+    - bca
+    - mandiri
+    - bni
+    - bri
+    - jago
+    - blu
+    - seabank
+    - cc
+    - kartu kredit
+    - debit
+
+platform:
+  weight: 1.5
+  terms:
+    - shopee
+    - tokped
+    - toped
+    - tokopedia
+    - lazada
+    - lzd
+    - blibli
+    - gofood
+    - gf
+    - grabfood
+    - traveloka
+    - tiket
+    - alfagift
+    - alfamart
+    - indomaret
+    - idm
+    - klg
+
+mechanic:
+  weight: 1.0
+  terms:
+    - min
+    - minbel
+    - maks
+    - max
+    - cap
+    - kuota
+    - user baru
+    - selected
+    - targeted
+    - stack
+    - distack
+    - gabung
+    - combine
+    - expired
+    - exp
+    - berlaku
+    - hari ini
+    - jam
+
+social:
+  weight: 1.0
+  terms:
+    - masih bisa
+    - work
+    - works
+    - gagal
+    - abis
+    - habis
+    - buruan
+    - gas
+    - murah
+    - error price
+    - ep

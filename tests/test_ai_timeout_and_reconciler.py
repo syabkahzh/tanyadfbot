@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -38,10 +39,16 @@ async def test_reconciler_noop_when_counter_matches_live_tasks() -> None:
     # Clean state
     main._active_spawn_tasks.clear()
     shared._active_ai_tasks = 0
-
-    # Counter matches live tasks (both 0) → no-op
-    await main._active_ai_tasks_reconciler()
-    assert shared._active_ai_tasks == 0
+    
+    # Mock db to avoid real DB calls in health_monitor_job
+    original_db = main.db
+    main.db = AsyncMock()
+    try:
+        # Counter matches live tasks (both 0) → no-op
+        await main.health_monitor_job()
+        assert shared._active_ai_tasks == 0
+    finally:
+        main.db = original_db
 
 
 @pytest.mark.asyncio
@@ -54,10 +61,16 @@ async def test_reconciler_fixes_counter_drift_high() -> None:
     # Simulate leak: counter says 3, no live tasks
     shared._active_ai_tasks = 3
 
-    await main._active_ai_tasks_reconciler()
-    assert shared._active_ai_tasks == 0, (
-        f"Counter should drop to 0 (live task count), got {shared._active_ai_tasks}"
-    )
+    # Mock db
+    original_db = main.db
+    main.db = AsyncMock()
+    try:
+        await main.health_monitor_job()
+        assert shared._active_ai_tasks == 0, (
+            f"Counter should drop to 0 (live task count), got {shared._active_ai_tasks}"
+        )
+    finally:
+        main.db = original_db
 
 
 @pytest.mark.asyncio
@@ -79,10 +92,15 @@ async def test_reconciler_preserves_counter_when_live_tasks_exist() -> None:
     main._active_spawn_tasks.add(t1)
     main._active_spawn_tasks.add(t2)
     shared._active_ai_tasks = 2
+    
+    # Mock db
+    original_db = main.db
+    main.db = AsyncMock()
     try:
-        await main._active_ai_tasks_reconciler()
+        await main.health_monitor_job()
         assert shared._active_ai_tasks == 2
     finally:
+        main.db = original_db
         t1.cancel()
         t2.cancel()
         await asyncio.gather(t1, t2, return_exceptions=True)
@@ -106,8 +124,14 @@ async def test_reconciler_ignores_done_tasks() -> None:
     main._active_spawn_tasks.add(t1)
     shared._active_ai_tasks = 1   # counter thinks 1 is running
 
-    await main._active_ai_tasks_reconciler()
-    # 0 live tasks, counter should drop to 0
-    assert shared._active_ai_tasks == 0
+    # Mock db
+    original_db = main.db
+    main.db = AsyncMock()
+    try:
+        await main.health_monitor_job()
+        # 0 live tasks, counter should drop to 0
+        assert shared._active_ai_tasks == 0
+    finally:
+        main.db = original_db
 
     main._active_spawn_tasks.clear()

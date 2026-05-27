@@ -1,6 +1,9 @@
 venv/
 __pycache__/
 *.db
+*.db-shm
+*.db-wal
+*.db-journal
 *.session*
 *.session-journal
 .env
@@ -10,3 +13,7 @@ __pycache__/
 *.ftz
 *.txt
 !requirements.txt
+
+# Data and logs
+data/
+*.log

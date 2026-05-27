@@ -589,7 +589,7 @@ class _ModelSlot:
 class GeminiProcessor:
     """Orchestrates AI analysis using the multi-provider fleet."""
 
-    _AI_CALL_TIMEOUT_SEC = 60.0
+    _AI_CALL_TIMEOUT_SEC = 30.0
 
     # Global fleet lock: prevents thundering-herd where N concurrent coroutines
     # all see the same slot as "available" before any has committed its reservation.

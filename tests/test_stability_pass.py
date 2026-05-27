@@ -35,7 +35,8 @@ def _mk_promo(brand: str, summary: str, status: str = "active") -> PromoExtracti
 async def test_filter_duplicates_intra_batch_dedup():
     """A single batch with 4 phrasings of the same Sayurbox promo keeps ≤ 1."""
     proc = GeminiProcessor.__new__(GeminiProcessor)
-    proc._dedup_lock = asyncio.Lock()
+    # The new processor might not have _dedup_lock anymore, but we add it if needed for the test to run.
+    # Actually, current filter_duplicates doesn't use it, so it's fine.
 
     promos = [
         _mk_promo("Sayurbox", "Promo Guncang 5.5 Sayurbox: Daging Sapi Rendang 500g diskon 81% Rp16.480"),
@@ -51,7 +52,6 @@ async def test_filter_duplicates_intra_batch_dedup():
 async def test_filter_duplicates_different_brands_all_pass():
     """Different-brand promos in the same batch all pass through."""
     proc = GeminiProcessor.__new__(GeminiProcessor)
-    proc._dedup_lock = asyncio.Lock()
 
     promos = [
         _mk_promo("Sayurbox", "Daging Sapi Rendang 500g Rp20.600"),
@@ -66,7 +66,6 @@ async def test_filter_duplicates_different_brands_all_pass():
 async def test_filter_duplicates_respects_history_snapshot():
     """If history already contains a similar promo, the new one is dropped."""
     proc = GeminiProcessor.__new__(GeminiProcessor)
-    proc._dedup_lock = asyncio.Lock()
 
     history = [{"brand": "Sayurbox", "summary": "Sayurbox Daging Sapi Rendang 500g Rp20.600"}]
     new = [_mk_promo("Sayurbox", "Sayurbox menawarkan Daging Sapi Rendang 500 gram seharga Rp20.600")]
@@ -82,7 +81,6 @@ async def test_concurrent_batches_with_shared_history_only_one_survives():
     must make the reservation atomic so batch 2 sees batch 1's reservation.
     """
     proc = GeminiProcessor.__new__(GeminiProcessor)
-    proc._dedup_lock = asyncio.Lock()
 
     shared_history: list[dict] = []
     outer_lock = asyncio.Lock()
@@ -114,15 +112,11 @@ async def test_concurrent_batches_with_shared_history_only_one_survives():
 
 @pytest.mark.asyncio
 async def test_filter_duplicates_no_longer_takes_internal_lock():
-    """Concurrent filter_duplicates calls don't serialise on the old _dedup_lock.
-
-    Regression pin: if someone re-adds `async with self._dedup_lock` around the
-    whole filter, this will still pass (correctness), but the OUTER caller
-    lock in main.process_one_batch is what makes it atomic. This test just
-    proves the function is safe to call concurrently without deadlock.
+    """Concurrent filter_duplicates calls don't serialise on an internal lock.
+    
+    The function is safe to call concurrently without deadlock.
     """
     proc = GeminiProcessor.__new__(GeminiProcessor)
-    proc._dedup_lock = asyncio.Lock()
 
     async def one():
         return await proc.filter_duplicates(
@@ -169,18 +163,24 @@ async def test_in_progress_reaper_evicts_stale():
     # Snapshot & reset
     saved = dict(mainmod._in_progress_ids)
     mainmod._in_progress_ids.clear()
+    
+    # Mock db
+    original_db = mainmod.db
+    mainmod.db = AsyncMock()
+    
     try:
         now = time.monotonic()
         mainmod._in_progress_ids[1] = now - 400   # stale (>130s)
         mainmod._in_progress_ids[2] = now - 50    # fresh (<130s)
         mainmod._in_progress_ids[3] = now - 600   # very stale
 
-        await mainmod._in_progress_reaper()
+        await mainmod.health_monitor_job()
 
         assert 1 not in mainmod._in_progress_ids
         assert 3 not in mainmod._in_progress_ids
         assert 2 in mainmod._in_progress_ids
     finally:
+        mainmod.db = original_db
         mainmod._in_progress_ids.clear()
         mainmod._in_progress_ids.update(saved)
 

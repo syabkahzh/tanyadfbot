@@ -31,6 +31,7 @@ from shared import (
     _make_tg_link, _flush_alert_buffer, _score_confidence,
     _reconnect_listener
 )
+import structured_judge
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,21 @@ _PROTECTED_SIGNALS = re.compile(
 
 _MARKETPLACE_URLS = re.compile(r'https?://(?!t\.me)[^\s]+', re.IGNORECASE)
 _URL_EXTRACT_RE = re.compile(r'(https?://[^\s>]+)')
+
+# ── YAML attention trigger (loaded once at import) ───────────────────────────
+try:
+    _TRIGGER_TERMS = structured_judge.load_trigger_terms()
+    logger.info(f"YAML trigger terms loaded: {len(_TRIGGER_TERMS)} categories")
+except Exception as e:
+    _TRIGGER_TERMS = {}
+    logger.warning(f"YAML trigger terms failed to load, YAML attention disabled: {e}")
+
+
+def _yaml_attention_result(text: str, has_photo: bool = False) -> dict[str, Any]:
+    """Score text using YAML trigger terms. Returns structured_judge.score_from_yaml result."""
+    if not _TRIGGER_TERMS:
+        return {"score": 0.0, "reasons": [], "should_build_context": False}
+    return structured_judge.score_from_yaml(text, _TRIGGER_TERMS, has_media=has_photo)
 
 
 # ── Queue triage ───────────────────────────────────────────────────────────────
@@ -421,6 +437,21 @@ async def processing_loop() -> None:
                 has_photo = bool(r['has_photo'])
                 # Tier 1: Dumb Regex (Zero cost)
                 if not gemini._is_worth_checking(text, has_photo):
+                    # YAML attention gate: let slang variants from trigger_terms.yaml through
+                    if _TRIGGER_TERMS:
+                        yaml_result = _yaml_attention_result(text, has_photo)
+                        if yaml_result["should_build_context"]:
+                            logger.debug(f"YAML attention rescued msg {r['id']}: score={yaml_result['score']:.1f} reasons={yaml_result['reasons']}")
+                            to_ai.append({
+                                "id":               r['id'],
+                                "text":             r['text'],
+                                "timestamp":        r['timestamp'],
+                                "tg_msg_id":        r['tg_msg_id'],
+                                "chat_id":          r['chat_id'],
+                                "reply_to_msg_id":  r['reply_to_msg_id'],
+                                "has_photo":        has_photo,
+                            })
+                            continue
                     regex_noise_ids.append(r['id'])
                     continue
                 
