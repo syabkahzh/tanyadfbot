@@ -86,6 +86,15 @@ PYTHONPATH=. .venv/bin/python tools/hermes_recent_promos.py --hours 2
 PYTHONPATH=. .venv/bin/python tools/hermes_recent_promos.py --hours 2 --brand Alfamart
 ```
 
+### `tools/hermes_supervisor_report.py`
+Builds a proactive supervisor report for Hermes. It combines second-chance promo candidates, runtime watch signals, and recommended actions for scheduled operator-facing monitoring.
+
+**Usage:**
+```bash
+PYTHONPATH=. .venv/bin/python tools/hermes_supervisor_report.py --hours 2
+PYTHONPATH=. .venv/bin/python tools/hermes_supervisor_report.py --hours 2 --log-path /var/log/tanyadfbot/runtime.log
+```
+
 See [docs/HERMES_PHASE1_RUNBOOK.md](docs/HERMES_PHASE1_RUNBOOK.md) for the Phase 1 control-plane contract.
 
 ## Deployment

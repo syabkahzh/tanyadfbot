@@ -11,6 +11,7 @@ PYTHONPATH=. .venv/bin/python tools/hermes_recent_promos.py --hours 2
 PYTHONPATH=. .venv/bin/python tools/hermes_daily_report.py --hours 24
 PYTHONPATH=. .venv/bin/python tools/hermes_health_report.py --hours 24
 PYTHONPATH=. .venv/bin/python tools/hermes_maestro_report.py --command-hours 2 --review-hours 24
+PYTHONPATH=. .venv/bin/python tools/hermes_supervisor_report.py --hours 2
 ```
 
 Optional log tail:
@@ -84,6 +85,22 @@ Hermes must not:
 - review findings and prioritized recommendations
 - reviewable tuning proposals grounded in the recent window
 
+`tools/hermes_supervisor_report.py` covers:
+
+- second-chance candidates where Tanya extracted a weak promo or missed a signal
+- runtime watch signals such as queue depth, repeated AI failures, and database lock noise
+- recommended Hermes actions with operator-DM first and high-confidence `force_alert` only as an auditable escalation
+
+## Proactive Supervisor Loop
+
+Hermes should run a scheduled supervisor loop every 15-30 minutes from `/home/haqqanimalang/tanyadfbot`:
+
+```bash
+PYTHONPATH=. .venv/bin/python tools/hermes_supervisor_report.py --hours 2
+```
+
+The default delivery target should be the Hermes operator DM. The supervisor loop is a second-chance monitor, not the first-line realtime alert path. Tanya still owns immediate alerts; Hermes notices weak extractions, missed juicy context, and runtime problems after the fact.
+
 ## Operator Guardrail
 
 For normal operator questions like "latest promo" or "latest promo in the last 2 hours", Hermes should use `tools/hermes_recent_promos.py` first. It should not open SSH sessions or try alternate SSH ports for that class of question.
@@ -96,4 +113,4 @@ You still need to do these on the GCP VM:
 2. Configure Hermes gateway with its own Telegram bot token.
 3. Point Hermes terminal `cwd` at the live `tanyadfbot` checkout.
 4. Keep Hermes approvals in manual mode for Phase 1.
-5. Create a daily Hermes cron/job that runs the report commands and sends the result back to your Telegram destination.
+5. Create a frequent Hermes cron/job for `tools/hermes_supervisor_report.py` and a daily job for broader review output.

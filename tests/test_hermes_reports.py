@@ -14,6 +14,7 @@ from hermes_reports import (
     build_recent_promo_lookup_report,
     build_review_recommendations_report,
     build_service_health_report,
+    build_supervisor_report,
     build_tuning_proposal_report,
 )
 
@@ -250,6 +251,44 @@ def test_build_maestro_report_combines_operator_views(tmp_path: Path) -> None:
     assert "## Tuning Proposals" in report
 
 
+def test_build_supervisor_report_flags_weak_latest_promo(tmp_path: Path) -> None:
+    db_path = tmp_path / "report.db"
+    _seed_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO messages (id, tg_msg_id, chat_id, timestamp, text, processed, skip_reason, ai_failure_count) "
+            "VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?)",
+            (50, 8470350, -1, "Xiaomi A27i voucher scroll dapet 900rb", 1, None, 0),
+        )
+        conn.execute(
+            "INSERT INTO promos (id, source_msg_id, summary, brand, tg_link, status, via_fastpath, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%S+00:00','now'))",
+            (50, 50, "makasi udh kasi tauu", "Xiaomi", "https://t.me/c/1/8470350", "active", 1),
+        )
+
+    report = build_supervisor_report(str(db_path), hours=2)
+
+    assert "# Hermes Supervisor Report" in report
+    assert "Second-Chance Candidates" in report
+    assert "weak promo summary" in report
+    assert "8470350" in report
+
+
+def test_build_supervisor_report_mentions_database_lock_health(tmp_path: Path) -> None:
+    db_path = tmp_path / "report.db"
+    _seed_db(db_path)
+    log_path = tmp_path / "runtime.log"
+    log_path.write_text(
+        "2026-05-28 ERROR jobs: image_processing_job item error: database is locked\n",
+        encoding="utf-8",
+    )
+
+    report = build_supervisor_report(str(db_path), hours=2, log_path=str(log_path))
+
+    assert "Runtime Watch" in report
+    assert "database is locked" in report
+
+
 def test_build_recent_promo_lookup_report_answers_latest_prompt_locally(tmp_path: Path) -> None:
     db_path = tmp_path / "report.db"
     _seed_db(db_path)
@@ -318,3 +357,25 @@ def test_hermes_reports_import_without_dotenv_dependency(tmp_path: Path) -> None
 
     assert result.returncode == 0, result.stderr
     assert "# Hermes Recent Promo Lookup" in result.stdout
+
+
+def test_hermes_supervisor_report_cli_runs(tmp_path: Path) -> None:
+    db_path = tmp_path / "report.db"
+    _seed_db(db_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "tools/hermes_supervisor_report.py",
+            "--db-path",
+            str(db_path),
+            "--hours",
+            "2",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "# Hermes Supervisor Report" in result.stdout

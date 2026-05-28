@@ -25,6 +25,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from db import Database
 
 
+SUPPORTED_COMMANDS = {"reprocess", "suppress_brand", "override_alert", "force_alert"}
+
+
 async def show_config(db: Database) -> int:
     config = await db.get_all_hermes_config()
     if not config:
@@ -51,6 +54,10 @@ async def delete_config(db: Database, key: str) -> int:
 
 
 async def send_command(db: Database, command: str, payload: str) -> int:
+    if command not in SUPPORTED_COMMANDS:
+        supported = ", ".join(sorted(SUPPORTED_COMMANDS))
+        print(f"Unsupported command: {command}. Supported commands: {supported}", file=sys.stderr)
+        return 2
     # Validate JSON
     try:
         json.loads(payload)

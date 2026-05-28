@@ -23,6 +23,10 @@ def _to_wib(utc_str: str | None) -> str:
         return utc_str
 
 NEGATIVE_CORRECTIONS = {"NOT_A_PROMO", "SPAM_OR_NOISE"}
+_WEAK_SUMMARY_PATTERN = re.compile(
+    r"\b(?:makasi|makasih|terima kasih|thanks|thankyou|kasi tau|kasih tau|info(?:nya)?|udah|udh)\b",
+    re.IGNORECASE,
+)
 _SECRET_PATTERNS = [
     re.compile(r"\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|AUTH)[A-Z0-9_]*)=([^\s]+)"),
     re.compile(r"\b(ghp_[A-Za-z0-9]+)\b"),
@@ -693,6 +697,119 @@ def build_maestro_report(
         "## Tuning Proposals\n"
         f"{build_tuning_proposal_report(db_path=db_path, hours=review_hours)}\n"
     )
+
+
+def _database_lock_lines(conn: sqlite3.Connection, hours: int, log_path: str | None = None) -> list[str]:
+    rows = _safe_fetchall(
+        conn,
+        """
+        SELECT level, logger_name, message, created_at
+        FROM system_logs
+        WHERE created_at >= strftime('%Y-%m-%d %H:%M:%S+00:00','now', ?)
+          AND LOWER(message) LIKE '%database is locked%'
+        ORDER BY created_at DESC
+        LIMIT 5
+        """,
+        _window_param(hours),
+    )
+    lines = [
+        f"{_to_wib(row['created_at'])} `{row['level']}` `{row['logger_name'] or 'unknown'}`: {_redact_secrets(row['message'])}"
+        for row in rows
+    ]
+    if log_path:
+        tailed = _tail_lines(Path(log_path), 80)
+        if tailed:
+            lines.extend(
+                _redact_secrets(line)
+                for line in tailed
+                if "database is locked" in line.lower()
+            )
+    return lines[:8]
+
+
+def _second_chance_candidate_lines(conn: sqlite3.Connection, hours: int) -> list[str]:
+    promo_rows = _safe_fetchall(
+        conn,
+        """
+        SELECT p.id, p.source_msg_id, p.created_at, p.brand, p.summary, p.tg_link, p.status, p.via_fastpath,
+               m.tg_msg_id, m.text
+        FROM promos p
+        LEFT JOIN messages m ON m.id = p.source_msg_id
+        WHERE p.created_at >= strftime('%Y-%m-%d %H:%M:%S+00:00','now', ?)
+        ORDER BY p.created_at DESC
+        LIMIT 20
+        """,
+        _window_param(hours),
+    )
+    lines: list[str] = []
+    for row in promo_rows:
+        summary = row["summary"] or ""
+        brand = row["brand"] or "Unknown"
+        reasons: list[str] = []
+        if brand.lower() == "unknown":
+            reasons.append("unknown brand")
+        if _WEAK_SUMMARY_PATTERN.search(summary) and len(summary) <= 80:
+            reasons.append("weak promo summary")
+        if not reasons:
+            continue
+        msg_ref = row["tg_msg_id"] or row["source_msg_id"] or row["id"]
+        lines.append(
+            f"{', '.join(reasons)}: msg={msg_ref} `{brand}` -> {summary or 'no AI summary'}"
+            + (f" | source={_redact_secrets(row['text'])[:140]}" if row["text"] else "")
+            + (f" | link={row['tg_link']}" if row["tg_link"] else "")
+        )
+
+    review_payload = _review_payload(conn, hours)
+    for row in review_payload["missed_signal_rows"][:5]:
+        lines.append(
+            f"missed-signal correction: `{row['correction']}` weight={row['weight']} "
+            f"msg={_redact_secrets(row['text'])[:140] or 'missing'}"
+            + (f" | link={row['tg_link']}" if row["tg_link"] else "")
+        )
+    return lines[:10]
+
+
+def build_supervisor_report(
+    db_path: str | None = None,
+    hours: int = 2,
+    log_path: str | None = None,
+) -> str:
+    conn = _connect(db_path)
+    try:
+        queue_depth = _safe_fetchone_value(conn, "SELECT COUNT(*) FROM messages WHERE processed = 0")
+        ai_failures = _safe_fetchone_value(conn, "SELECT COUNT(*) FROM messages WHERE ai_failure_count >= 2")
+        promo_count = _safe_fetchone_value(
+            conn,
+            "SELECT COUNT(*) FROM promos WHERE created_at >= strftime('%Y-%m-%d %H:%M:%S+00:00','now', ?)",
+            _window_param(hours),
+        )
+        candidate_lines = _second_chance_candidate_lines(conn, hours)
+        db_lock_lines = _database_lock_lines(conn, hours, log_path=log_path)
+        runtime_lines = [
+            f"Queue depth: {queue_depth}",
+            f"Repeated AI failures: {ai_failures}",
+            f"Promos observed in window: {promo_count}",
+        ]
+        runtime_lines.extend(db_lock_lines)
+        action_lines = [
+            "Send second-chance findings to the Hermes operator DM before triggering public-facing alert paths.",
+        ]
+        if candidate_lines:
+            action_lines.append("Review weak or missed candidates; use `tools/hermes_control.py send-command force_alert` only for high-confidence evidence.")
+        if db_lock_lines:
+            action_lines.append("Investigate image/job database contention before broadening autonomous runtime actions.")
+        return (
+            "# Hermes Supervisor Report\n\n"
+            f"- Lookback window: last {hours} hours\n\n"
+            "## Second-Chance Candidates\n"
+            f"{_format_bullets(candidate_lines, 'No second-chance candidates in the lookback window.')}\n\n"
+            "## Runtime Watch\n"
+            f"{_format_bullets(runtime_lines, 'No runtime watch data available.')}\n\n"
+            "## Recommended Actions\n"
+            f"{_format_bullets(action_lines, 'Continue monitoring.')}\n"
+        )
+    finally:
+        conn.close()
 
 
 def build_extraction_quality_report(
