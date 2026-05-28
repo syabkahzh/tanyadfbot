@@ -95,6 +95,15 @@ PYTHONPATH=. .venv/bin/python tools/hermes_supervisor_report.py --hours 2
 PYTHONPATH=. .venv/bin/python tools/hermes_supervisor_report.py --hours 2 --log-path /var/log/tanyadfbot/runtime.log
 ```
 
+### `tools/hermes_shadow_watch.py`
+Builds a near-live shadow-watch report for Hermes by scanning Tanya's local message stream for fresh high-signal messages that have not produced promos yet.
+
+**Usage:**
+```bash
+PYTHONPATH=. .venv/bin/python tools/hermes_shadow_watch.py --minutes 5
+PYTHONPATH=. .venv/bin/python tools/hermes_shadow_watch.py --minutes 5 --quiet-empty
+```
+
 See [docs/HERMES_PHASE1_RUNBOOK.md](docs/HERMES_PHASE1_RUNBOOK.md) for the Phase 1 control-plane contract.
 
 ## Deployment

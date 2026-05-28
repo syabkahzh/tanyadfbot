@@ -21,7 +21,9 @@ it must prefer the repo-owned local inspection tools first.
    `PYTHONPATH=. .venv/bin/python tools/hermes_maestro_report.py --command-hours <n> --review-hours 24`
 3. For proactive supervisor checks, run:
    `PYTHONPATH=. .venv/bin/python tools/hermes_supervisor_report.py --hours <n>`
-4. For runtime-only checks, run:
+4. For near-live shadow checks, run:
+   `PYTHONPATH=. .venv/bin/python tools/hermes_shadow_watch.py --minutes <n>`
+5. For runtime-only checks, run:
    `PYTHONPATH=. .venv/bin/python tools/hermes_health_report.py --hours 24`
 
 ## Hard Prohibitions

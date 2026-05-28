@@ -14,6 +14,7 @@ from hermes_reports import (
     build_recent_promo_lookup_report,
     build_review_recommendations_report,
     build_service_health_report,
+    build_shadow_watch_report,
     build_supervisor_report,
     build_tuning_proposal_report,
 )
@@ -289,6 +290,33 @@ def test_build_supervisor_report_mentions_database_lock_health(tmp_path: Path) -
     assert "database is locked" in report
 
 
+def test_build_shadow_watch_report_flags_unalerted_high_signal_message(tmp_path: Path) -> None:
+    db_path = tmp_path / "report.db"
+    _seed_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO messages (id, tg_msg_id, chat_id, timestamp, text, processed, skip_reason, ai_failure_count) "
+            "VALUES (?, ?, ?, strftime('%Y-%m-%d %H:%M:%S+00:00','now'), ?, ?, ?, ?)",
+            (60, 8470400, -1, "Grab voucher diskon 90% GOSENDHEMAT claim sekarang", 1, "ai_skip", 0),
+        )
+
+    report = build_shadow_watch_report(str(db_path), minutes=5)
+
+    assert "# Hermes Near-Live Shadow Watch" in report
+    assert "unalerted high-signal message" in report
+    assert "8470400" in report
+    assert "GOSENDHEMAT" in report
+
+
+def test_build_shadow_watch_report_can_return_empty_string_when_quiet(tmp_path: Path) -> None:
+    db_path = tmp_path / "report.db"
+    _seed_db(db_path)
+
+    report = build_shadow_watch_report(str(db_path), minutes=1, quiet_empty=True)
+
+    assert report == ""
+
+
 def test_build_recent_promo_lookup_report_answers_latest_prompt_locally(tmp_path: Path) -> None:
     db_path = tmp_path / "report.db"
     _seed_db(db_path)
@@ -379,3 +407,26 @@ def test_hermes_supervisor_report_cli_runs(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "# Hermes Supervisor Report" in result.stdout
+
+
+def test_hermes_shadow_watch_cli_runs_quiet_when_empty(tmp_path: Path) -> None:
+    db_path = tmp_path / "report.db"
+    _seed_db(db_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "tools/hermes_shadow_watch.py",
+            "--db-path",
+            str(db_path),
+            "--minutes",
+            "1",
+            "--quiet-empty",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""

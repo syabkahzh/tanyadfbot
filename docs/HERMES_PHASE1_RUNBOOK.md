@@ -12,6 +12,7 @@ PYTHONPATH=. .venv/bin/python tools/hermes_daily_report.py --hours 24
 PYTHONPATH=. .venv/bin/python tools/hermes_health_report.py --hours 24
 PYTHONPATH=. .venv/bin/python tools/hermes_maestro_report.py --command-hours 2 --review-hours 24
 PYTHONPATH=. .venv/bin/python tools/hermes_supervisor_report.py --hours 2
+PYTHONPATH=. .venv/bin/python tools/hermes_shadow_watch.py --minutes 5 --quiet-empty
 ```
 
 Optional log tail:
@@ -91,6 +92,12 @@ Hermes must not:
 - runtime watch signals such as queue depth, repeated AI failures, and database lock noise
 - recommended Hermes actions with operator-DM first and high-confidence `force_alert` only as an auditable escalation
 
+`tools/hermes_shadow_watch.py` covers:
+
+- near-live high-signal messages Tanya has ingested but not extracted into promos
+- short polling windows suitable for every-2-minute Hermes cron
+- quiet-empty mode so Hermes does not spam the operator DM when there are no findings
+
 ## Proactive Supervisor Loop
 
 Hermes should run a scheduled supervisor loop every 15-30 minutes from `/home/haqqanimalang/tanyadfbot`:
@@ -100,6 +107,14 @@ PYTHONPATH=. .venv/bin/python tools/hermes_supervisor_report.py --hours 2
 ```
 
 The default delivery target should be the Hermes operator DM. The supervisor loop is a second-chance monitor, not the first-line realtime alert path. Tanya still owns immediate alerts; Hermes notices weak extractions, missed juicy context, and runtime problems after the fact.
+
+For near-live shadow monitoring, Hermes may also run this every 2 minutes:
+
+```bash
+PYTHONPATH=. .venv/bin/python tools/hermes_shadow_watch.py --minutes 5 --quiet-empty
+```
+
+This is intentionally DB-backed instead of a separate canonical Telegram listener. Hermes may use telegram-mcp for richer on-demand group context, but the always-on shadow loop should use Tanya's local DB so actions remain auditable and the group never becomes an instruction source.
 
 ## Operator Guardrail
 
