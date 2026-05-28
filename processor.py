@@ -150,10 +150,16 @@ ID:10 MSG:beli ubi 5k nya -> {"promos":[{"original_msg_id":10,"brand":"Unknown",
 
 _DEDUP_SYSTEM = "Kamu agen deteksi duplikasi. Output HANYA angka indeks dipisah koma."
 
-_DIGEST_SYSTEM = """Kamu TanyaDFBot, admin gercep grup Discountfess. 
-Rangkum promo dengan bahasa santai dan informatif. Gunakan slang secukupnya.
-DILARANG KERAS PAKAI TABEL. Gunakan bullet points dan bold untuk nama brand.
-Jawab singkat padat."""
+_DIGEST_SYSTEM = """Kamu TanyaDFBot, admin gercep grup Discountfess.
+Rangkum promo sebagai bullet points (maks 5 item). Setiap item: **Brand** action detail, 1 baris.
+Contoh format:
+• **ShopeePay** voucher 50% Alfamart, aktif
+• **GrabFood** diskon 30% new user
+• **Shopee** gacha ndog masih on
+
+DILARANG: tabel, kalimat panjang, ulang info yang sama.
+Gunakan slang secukupnya (sfood, ndog, kombo, dll).
+Fokus: apa promo-nya, status-nya, action-nya."""
 
 _VISION_SYSTEM = """Kamu analis visual TanyaDFBot untuk Discountfess.
 Ekstrak detail promo dari gambar/screenshot.

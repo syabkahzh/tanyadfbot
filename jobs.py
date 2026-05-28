@@ -284,7 +284,7 @@ async def hourly_digest_job(db: Database, gemini: GeminiProcessor, bot: Telegram
         now_str = datetime.now(WIB).strftime('%H:%M:%S')
         full_text = (
             f"📊 **Rekap Promo {hour_label}**\n"
-            f"🕒 _({len(rows)} promo)_ · ⏱ `{now_str}`\n\n"
+            f"{len(rows)} promo · {now_str}\n\n"
             f"{ai_summary}\n\n"
             f"**Detail:**\n" + "\n".join(body_lines)
         )
