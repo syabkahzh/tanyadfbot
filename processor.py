@@ -197,7 +197,12 @@ _WEAK_KEYWORDS: set[str] = {
     'cek','info','makasih','thx','thanks','makasi','mks','terimakasih','terima kasih'
 }
 
-_JUNK_SUMMARIES: set[str] = {'summary','none','n/a','-','tidak ada','tidak ditemukan'}
+_JUNK_SUMMARIES: set[str] = {
+    'summary','none','n/a','-','tidak ada','tidak ditemukan',
+    'thx ka','thanks ka','makasih ka',
+    'ini on','on','klik idm',
+    'tsel on','on tsel',
+}
 
 # ── False positive filters ──────────────────────────────────────────
 # Detect questions (messages asking about promos, not announcing them)
@@ -219,7 +224,19 @@ _QUESTION_PATTERN = re.compile(
     r'gimana\s+(?:sih|dong|kak|ka|gy)|'
     r'gmn\s+sih|ko\s+tumben|'
     r'(?:pada|pade)\s+dpt|'
-    r'yang\s+(?:tau|tahu|tw)\s+\w)',
+    r'yang\s+(?:tau|tahu|tw)\s+\w|'
+    r'(?:masih|lagi)\s+ada.*(?:butuh|pake|pakai)|'
+    r'gimana\s+ya\s+caranya|'
+    r'ada\s+yg\s+dpt\s+kah|'
+    r'mending\s+(?:komplain|ga|gak|nggak)|'
+    r'jam\s+\d+.*masih\s+ada|'
+    r'(?:apa|knp|kenapa)\s+(?:ngga|nggak|ga|gak)\s+ya|'
+    r'(?:ada\s+opsi|ada\s+cara)|'
+    r'yang\s+kena\b|'
+    r'susah\s+kalo|'
+    r'ko\s+tumben|'
+    r'saranin\s+\w+|'
+    r'(?:apa|gimana)\s+ngga\s+ya)',
     re.IGNORECASE
 )
 # Detect vague/low-quality summaries that don't convey useful promo info
