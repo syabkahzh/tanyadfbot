@@ -22,3 +22,7 @@
 ## 2025-05-18 - [Optimization & Stability: Regex & Exceptions]
 **Learning:** Pre-compiling commonly used regular expressions improves application throughput. Additionally, using bare `except:` clauses is dangerous as it can swallow `KeyboardInterrupt` and `SystemExit`.
 **Action:** Always declare heavy regular expressions at module scope using `re.compile()`, and explicitly catch specific exceptions (like `ValueError` or `json.JSONDecodeError`) instead of relying on a catch-all `except:`.
+
+## 2025-05-28 - [Set Operations vs any() Generator for Membership Checks]
+**Learning:** Using `any(w in TARGET_SET for w in words_list)` incurs significant Python iteration and generator overhead, making it around 8x slower than checking for set intersection natively. For optimal performance, `not TARGET_SET.isdisjoint(words_list)` is the fastest operation in Python for this check because it avoids creating intermediate sets and operates at the C-level, terminating early as soon as a match is found.
+**Action:** Replace `any()` generator expressions involving membership checks against a known collection with `not TARGET_SET.isdisjoint(iterable)` or standard set intersections (`TARGET_SET & other_set`) when operating on hot paths like batch filtering loops. For checking a small number of substrings, unrolling to `a in str or b in str` is also an order of magnitude faster than `any(s in str for s in [a,b])`.
