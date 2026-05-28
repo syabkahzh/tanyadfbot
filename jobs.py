@@ -538,11 +538,29 @@ async def image_processing_job(db: Database, gemini: GeminiProcessor, listener: 
 
                 return msg_id
             except Exception as e:
-                logger.error(f"image_processing_job item (msg {tg_msg_id}) error: {e}")
+                err_str = str(e).lower()
+                if 'database is locked' in err_str:
+                    # Retry once after brief pause — SQLite WAL contention
+                    await asyncio.sleep(1.0)
+                    try:
+                        if promo:
+                            await db.save_pending_alert(
+                                promo.brand.lower().strip(),
+                                promo.model_dump_json(), tg_link, ts,
+                                source='ai', commit=True
+                            )
+                        return msg_id
+                    except Exception as e2:
+                        logger.error(f"image_processing_job retry failed (msg {tg_msg_id}): {e2}")
+                else:
+                    logger.error(f"image_processing_job item (msg {tg_msg_id}) error: {e}")
                 return None
 
-        tasks = [_process_single_image(r) for r in rows]
-        results = await asyncio.gather(*tasks)
+        results = []
+        for r in rows:
+            res = await _process_single_image(r)
+            results.append(res)
+            await asyncio.sleep(0.2)  # pacing to avoid DB lock contention
         processed_ids = [res for res in results if res is not None]
         
         if processed_ids:
