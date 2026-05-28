@@ -148,9 +148,19 @@ ID:8 MSG:sering harga 50k pake koin -> {"promos":[{"original_msg_id":8,"brand":"
 ID:9 MSG:Alhamdulillah -> {"promos":[{"original_msg_id":9,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
 ID:10 MSG:beli ubi 5k nya -> {"promos":[{"original_msg_id":10,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
 
+CONTOH YANG BUKAN PROMO (jangan diekstrak):
+ID:11 MSG:punyaku gangguan mulu pas klaim -> {"promos":[{"original_msg_id":11,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:12 MSG:pas stanby malah belum on si tsel -> {"promos":[{"original_msg_id":12,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:13 MSG:Gatau rin, tiba2 ga bisa jalan fast chargingnya -> {"promos":[{"original_msg_id":13,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+
 BOIKOT (jangan diekstrak — ini layanan keuangan/kredit, BUKAN promo diskon):
 - paylater, cicilan, kredit, bank saqu, superbank
-Jika pesan membahas paylater/cicilan/kredit: brand="Unknown", summary="Unknown"."""
+Jika pesan membahas paylater/cicilan/kredit: brand="Unknown", summary="Unknown".
+
+SYSTEM VOUCHER: Jika pesan adalah notifikasi sistem ("Anda mendapatkan voucher...", "Masukkan kode..."):
+- Extract sebagai promo dengan brand yang sesuai
+- Status: active (voucher valid)
+- Confidence: 0.90"""
 
 _DEDUP_SYSTEM = "Kamu agen deteksi duplikasi. Output HANYA angka indeks dipisah koma."
 
@@ -284,6 +294,18 @@ _CASUAL_CHAT_PATTERN = re.compile(
 # User directive: skip promos about paylater, cicilan, kredit, bank saqu, superbank
 _BOIKOT_PATTERN = re.compile(
     r'(paylater|pay\s*later|cicilan|kredit|bank\s*saqu|saqu|superbank)',
+    re.IGNORECASE
+)
+
+
+# ── Complaint/status update filter ──────────────────────────────────────────
+# Messages describing problems/issues — NOT promos
+_COMPLAINT_PATTERN = re.compile(
+    r'(gangguan|ga bisa|gak bisa|ga jalan|gak jalan|rusak|error|bug|'
+    r'habis terus|ga dapet|gak dapet|ga keluar|gak keluar|'
+    r'belum on|belum aktif|belum jalan|masih off|'
+    r'kena refund|dibatalkan|dicancel|'
+    r'tiba2|tiba-tiba|tiba tiba)',
     re.IGNORECASE
 )
 
@@ -1147,6 +1169,9 @@ class GeminiProcessor:
                     continue
                 if _BOIKOT_PATTERN.search(summary):
                     logger.info(f'🚫 Boikot filtered: {summary[:60]}')
+                    continue
+                if _COMPLAINT_PATTERN.search(summary):
+                    logger.info(f'🚫 Complaint filtered: {summary[:60]}')
                     continue
                 verified_brand = normalize_brand(p.brand)
                 if verified_brand == "Unknown":
