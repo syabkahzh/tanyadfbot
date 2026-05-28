@@ -113,7 +113,7 @@ class TrendResponse(BaseModel):
 _EXTRACT_SYSTEM = """Kamu TanyaDFBot, sistem ekstraksi promo untuk grup Discountfess Indonesia.
 Output HARUS berupa JSON valid sesuai skema. DILARANG tabel/markdown.
 
-SLANG PENTING:
+SLANG:
 jp=jackpot/berhasil | aman/on/work/nyala=aktif | nt/koid/habis/zonk=expired
 sfood=ShopeeFood | gfood=GoFood | sopi=Shopee | tsel=Telkomsel | idm=Indomaret
 alfa/jsm/psm/afm=Alfamart | kopken=Kopi Kenangan | cgv=CGV | ag/alfagift=Alfagift
@@ -122,30 +122,31 @@ tukpo=tukar poin | minbel=minimum belanja | gratong=gratis ongkir
 
 ATURAN EKSTRAKSI:
 1. Baca C: (konteks/reply) DAHULU untuk tahu brand dan konteks.
-2. Evaluasi status: ACTIVE jika "jp/aman/on/work/nyala/alhamdulillah/dapet".
-   EXPIRED jika "nt/habis/zonk/koid/gaib/badut/limit". UNKNOWN jika tidak jelas.
-3. Jika pesan hanya tanya-tanya atau OOT: set brand="Unknown", summary="Unknown".
-4. Jangan tulis "SKIP" - gunakan "Unknown" untuk brand/summary yang tidak relevan.
-5. Summary: 1 kalimat padat, awali dengan nama brand bold (**Brand**).
+2. Status: ACTIVE jika "jp/aman/on/work/nyala/dapet". EXPIRED jika "nt/habis/zonk/koid/gaib/badut/limit". UNKNOWN jika tidak jelas.
+3. Jika pesan hanya tanya/OOT: brand="Unknown", summary="Unknown".
 
-PENTING - JANGAN EKSTRAK SEBAGAI PROMO:
-- Pesan yang mengandung "?" atau tanda tanya → itu PERTANYAAN, bukan promo
-- Pesan yang hanya bilang "on/aktif", "masih ada", "habis" → itu STATUS, bukan promo
-- Pesan casual seperti "makasih", "ok", "sip", "hehe" → itu REPLY, bukan promo
-- Pesan yang nanya "pake voucher apa", "gimana caranya", "brp harganya" → itu TANYA, bukan promo
-- Pesan yang cuma bilang "sering harga 50k" tanpa info promo spesifik → itu OBSERVASI, bukan promo
-- Pesan yang cuma bilang "Alhamdulillah", "syukur", "thanks" → itu EKSPRESI, bukan promo
-- Pesan yang cerita "beli X", "makan X", "lagi X" → itu CHAT, bukan promo
+ATURAN SUMMARY (WAJIB DIPATUHI):
+- Maksimal 15 kata. Kalau lebih, potong.
+- JANGAN ulang brand yang sudah di bold. Contoh: ✅ "**Shopee** diskon 50%" ❌ "**Shopee** voucher Shopee diskon 50%"
+- JANGAN tulis "melalui aplikasi", "di dalam aplikasi", "untuk pengguna" → semua promo pakai app, itu filling.
+- JANGAN tulis "yang tidak jelas", "sepertinya", "kabarnya" → tulis FAKTA saja.
+- JANGAN sebut status pesanan ("dikemas", "dikirim") → itu bukan info promo.
+- JANGAN sebut tanggal kecuali ada deadline promo spesifik.
+- AWALI dengan **Brand** dalam bold. Contoh: "**GrabFood** diskon 30% new user."
 
-CONTOH:
+CONTOH YANG BENAR:
 ID:1 C:sfood diskon 80k MSG:nyala -> {"promos":[{"original_msg_id":1,"brand":"ShopeeFood","summary":"**ShopeeFood** diskon 80k aktif.","status":"active","confidence":0.95}]}
-ID:2 C:gopay coins MSG:nt -> {"promos":[{"original_msg_id":2,"brand":"GoPay","summary":"**GoPay** Coins sudah habis/expired.","status":"expired","confidence":0.90}]}
-ID:3 MSG:ada yg tau cgv tsel? -> {"promos":[{"original_msg_id":3,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
-ID:4 MSG:kak pake voucher apa? -> {"promos":[{"original_msg_id":4,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
-ID:5 MSG:on/aktif -> {"promos":[{"original_msg_id":5,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
-ID:6 MSG:sering harga 50k pake koin -> {"promos":[{"original_msg_id":6,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
-ID:7 MSG:Alhamdulillah -> {"promos":[{"original_msg_id":7,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
-ID:8 MSG:beli ubi 5k nya -> {"promos":[{"original_msg_id":8,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}"""
+ID:2 C:gopay coins MSG:nt -> {"promos":[{"original_msg_id":2,"brand":"GoPay","summary":"**GoPay** Coins habis/expired.","status":"expired","confidence":0.90}]}
+ID:3 C:prize 5 koin 5rb koin MSG:klaim di riwayat hadiah -> {"promos":[{"original_msg_id":3,"brand":"Shopee","summary":"**Shopee** Prize 5 Koin + 5RB Koin, klaim di riwayat hadiah.","status":"active","confidence":0.85}]}
+ID:4 C:twitt snack mall ori MSG:diskon -> {"promos":[{"original_msg_id":4,"brand":"Twitt Snack","summary":"**Twitt Snack** Mall ORI diskon, status dikemas.","status":"active","confidence":0.80}]}
+
+CONTOH YANG BUKAN PROMO (jangan diekstrak):
+ID:5 MSG:ada yg tau cgv tsel? -> {"promos":[{"original_msg_id":5,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:6 MSG:kak pake voucher apa? -> {"promos":[{"original_msg_id":6,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:7 MSG:on/aktif -> {"promos":[{"original_msg_id":7,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:8 MSG:sering harga 50k pake koin -> {"promos":[{"original_msg_id":8,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:9 MSG:Alhamdulillah -> {"promos":[{"original_msg_id":9,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:10 MSG:beli ubi 5k nya -> {"promos":[{"original_msg_id":10,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}"""
 
 _DEDUP_SYSTEM = "Kamu agen deteksi duplikasi. Output HANYA angka indeks dipisah koma."
 
