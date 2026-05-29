@@ -1023,7 +1023,9 @@ class GeminiProcessor:
             score -= 8
         if t.endswith('?') and words and words[0] in _QUESTION_WORDS:
             score -= 5
-        if any(w in _QUESTION_WORDS for w in words) and ('aman' in t or 'work' in t or 'on' in t):
+        # ⚡ Bolt: Use C-level `isdisjoint()` for significantly faster keyword intersection checking
+        # compared to Python generator expressions.
+        if not _QUESTION_WORDS.isdisjoint(words) and ('aman' in t or 'work' in t or 'on' in t):
             score -= 8
         if _QUESTION_NGGA_PATTERN.search(t):
             score -= 15
