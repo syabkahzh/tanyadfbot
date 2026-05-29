@@ -217,6 +217,7 @@ _JUNK_SUMMARIES: set[str] = {
     'ini on','on','klik idm',
     'tsel on','on tsel',
     'done✅','done','mantap','oke','ok',
+    'aman🤲',
 }
 
 # ── False positive filters ──────────────────────────────────────────
