@@ -145,7 +145,7 @@ class TelethonListener:
             is_fuzzy_duplicate, get_hermes_config_bool,
         )
         from db import normalize_brand
-        from processor import PromoExtraction, _SOCIAL_FILLER
+        from processor import PromoExtraction, _SOCIAL_FILLER, _COMPLAINT_PATTERN, _JUNK_SUMMARIES
 
         # ── Hermes kill switch ──────────────────────────────────────────
         if not get_hermes_config_bool('fastpath_enabled', True):
@@ -253,6 +253,13 @@ class TelethonListener:
             summary = f"Kode Promo: {m.group(0)}" if m else text[:120]
         else:
             summary = text[:120]
+
+        # ── Gate: complaint/junk summary filter ────────────────────────────
+        summary_lower = summary.lower().strip()
+        if summary_lower in _JUNK_SUMMARIES:
+            return
+        if _COMPLAINT_PATTERN.search(summary):
+            return
 
         # Extract non-Telegram links
         combined = (text or "") + " " + (parent_text or "")

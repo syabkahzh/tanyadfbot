@@ -220,6 +220,7 @@ _JUNK_SUMMARIES: set[str] = {
     'aman🤲',
     'ag 50k',
     'info kk',
+    'link di pesan','coba besok','cek di sini kak',
 }
 
 # ── False positive filters ──────────────────────────────────────────
@@ -315,7 +316,8 @@ _COMPLAINT_PATTERN = re.compile(
     r'tampilan|interface|ui|layar|tampil|gimana ini|refresh|'
     r'masalah|trouble|ganggu|'
     r'balik ke|ga mau|gak mau|gamau|mau.*nempel|'
-    r'gk ada|ga ada|gak ada)',
+    r'gk ada|ga ada|gak ada|'
+    r'gagal|ga ngaruh|gak ngaruh|tidak jelas|status tidak jelas)',
     re.IGNORECASE
 )
 
