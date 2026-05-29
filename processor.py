@@ -216,6 +216,7 @@ _JUNK_SUMMARIES: set[str] = {
     'thx ka','thanks ka','makasih ka',
     'ini on','on','klik idm',
     'tsel on','on tsel',
+    'done✅','done','mantap','oke','ok',
 }
 
 # ── False positive filters ──────────────────────────────────────────
