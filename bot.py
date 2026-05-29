@@ -657,7 +657,7 @@ class TelegramBot:
                     InlineKeyboardButton("⏰ Expired", callback_data=f"fopt_{orig_msg_id}_expired")
                 ],
                 [
-                    InlineKeyboardButton("👯 Duplicate", callback_data=f"fopt_{orig_msg_id}_dup"),
+                    InlineKeyboardButton("❌ Wrong Inference", callback_data=f"fopt_{orig_msg_id}_dup"),
                     InlineKeyboardButton("⚖️ Weight", callback_data=f"weight_{orig_msg_id}")
                 ],
                 [
@@ -689,7 +689,7 @@ class TelegramBot:
                     parse_mode=ParseMode.MARKDOWN
                 )
             else:
-                mapping = {"brand": "Wrong brand", "expired": "Expired", "dup": "Duplicate"}
+                mapping = {"brand": "Wrong brand", "expired": "Expired", "dup": "Wrong inference"}
                 correction = mapping.get(option, "Feedback")
                 try:
                     await self.db.conn.execute(
@@ -848,7 +848,7 @@ class TelegramBot:
                     InlineKeyboardButton("⏰ Expired", callback_data=f"fopt_{orig_msg_id}_expired")
                 ],
                 [
-                    InlineKeyboardButton("👯 Duplicate", callback_data=f"fopt_{orig_msg_id}_dup"),
+                    InlineKeyboardButton("❌ Wrong Inference", callback_data=f"fopt_{orig_msg_id}_dup"),
                     InlineKeyboardButton(f"⚖️ Weight: {weight}", callback_data=f"weight_{orig_msg_id}")
                 ],
                 [
