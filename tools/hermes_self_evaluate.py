@@ -272,8 +272,8 @@ def evaluate(messages: list[dict], promos: list[dict]) -> dict:
                 "detected_brand": brand,
             })
 
-        # False positive: complaint/filler/boikot captured as promo
-        if cat in ("complaint", "social_filler", "boikot", "question", "too_short") and mid in msg_ids_with_promo:
+        # False positive: complaint/filler/boikot/question/reply/casual_chat captured as promo
+        if cat in ("complaint", "social_filler", "boikot", "question", "too_short", "reply", "casual_chat") and mid in msg_ids_with_promo:
             p = promo_by_msg[mid]
             results["false_positives"].append({
                 "msg_id": mid,

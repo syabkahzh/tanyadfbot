@@ -276,8 +276,9 @@ _VAGUE_OBSERVATION_PATTERN = re.compile(
 
 # Detect casual replies that aren't promo announcements
 _CASUAL_REPLY_PATTERN = re.compile(
-    r'^(iya|oh|ok|oke|ohh|ohhh|nah|hehe|haha|wkwk|'
-    r'makasih|thanks|thx|mks|terimakasih|'
+    r'^(?:\*\*[^*]+\*\*\s*)?'  # optional **Brand** prefix from AI summary
+    r'(iya|oh|ok|oke|ohh|ohhh|nah|hehe|haha|wkwk|'
+    r'makasi|makasih|thanks|thx|mks|terimakasih|terima kasih|'
     r'sip|mantap|jos|joss|keren|'
     r'ga\s+tau|gak\s+tau|gatau|'
     r'alhamdulillah|syukur|allhamdulillah|alhamdulilah)',
@@ -286,7 +287,8 @@ _CASUAL_REPLY_PATTERN = re.compile(
 
 # Detect casual chat about buying/eating things (not promos)
 _CASUAL_CHAT_PATTERN = re.compile(
-    r'^(beli\s+\w+|makan\s+\w+|lagi\s+\w+|habis\s+\w+|'
+    r'^(?:\*\*[^*]+\*\*\s*)?'  # optional **Brand** prefix from AI summary
+    r'(beli\s+\w+|makan\s+\w+|lagi\s+\w+|habis\s+\w+|'
     r'udah\s+\w+|baru\s+\w+|mau\s+\w+| lagi\s+\w+|'
     r'kemarin\s+\w+|kemaren\s+\w+|'
     r'gak\s+\w+|ga\s+\w+|nggak\s+\w+)',
