@@ -219,6 +219,7 @@ _JUNK_SUMMARIES: set[str] = {
     'done✅','done','mantap','oke','ok',
     'aman🤲',
     'ag 50k',
+    'info kk',
 }
 
 # ── False positive filters ──────────────────────────────────────────
