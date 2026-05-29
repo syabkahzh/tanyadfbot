@@ -22,3 +22,7 @@
 ## 2025-05-18 - [Optimization & Stability: Regex & Exceptions]
 **Learning:** Pre-compiling commonly used regular expressions improves application throughput. Additionally, using bare `except:` clauses is dangerous as it can swallow `KeyboardInterrupt` and `SystemExit`.
 **Action:** Always declare heavy regular expressions at module scope using `re.compile()`, and explicitly catch specific exceptions (like `ValueError` or `json.JSONDecodeError`) instead of relying on a catch-all `except:`.
+
+## 2026-05-29 - [Optimization Trade-offs: C-level methods over generators]
+**Learning:** Python generator expressions inside `any()` have overhead. For small, fixed lists of substring checks, expanding into explicit `or` boolean conditions is significantly faster. Similarly, replacing Python-level set iteration within generator expressions `any(x in set for x in iter)` with C-level set operations like `not set.isdisjoint(iter)` provides substantial speed improvements. However, do not sacrifice readability by unwrapping clean comprehensions into multi-line loops, and ensure semantic equivalence (e.g. `re.findall(r'\w+')` is NOT equivalent to `.split()`).
+**Action:** When working on hot paths or tight loops, look for opportunities to replace `any()` generator expressions with C-level set methods (like `isdisjoint`) or explicit `or` chains, while avoiding regressions in code readability and logic.
