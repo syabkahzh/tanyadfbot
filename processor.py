@@ -305,7 +305,9 @@ _COMPLAINT_PATTERN = re.compile(
     r'habis terus|ga dapet|gak dapet|ga keluar|gak keluar|'
     r'belum on|belum aktif|belum jalan|masih off|'
     r'kena refund|dibatalkan|dicancel|'
-    r'tiba2|tiba-tiba|tiba tiba)',
+    r'tiba2|tiba-tiba|tiba tiba|'
+    r'tampilan|interface|ui|layar|tampil|gimana ini|refresh|'
+    r'masalah|trouble|ganggu)',
     re.IGNORECASE
 )
 
