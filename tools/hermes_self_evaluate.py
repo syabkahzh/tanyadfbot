@@ -84,13 +84,15 @@ _QUESTION_PATTERN = re.compile(
 )
 
 _COMPLAINT_PATTERN = re.compile(
-    r'(gangguan|ga bisa|gak bisa|ga jalan|gak jalan|rusak|error|bug|'
+    r'(gangguan|ga bisa|gak bisa|gk bisa|ga jalan|gak jalan|rusak|error|bug|'
     r'habis terus|ga dapet|gak dapet|ga keluar|gak keluar|'
     r'belum on|belum aktif|belum jalan|masih off|'
     r'kena refund|dibatalkan|dicancel|'
     r'tiba2|tiba-tiba|tiba tiba|'
     r'tampilan|interface|ui|layar|tampil|gimana ini|refresh|'
-    r'masalah|trouble|ganggu)',
+    r'masalah|trouble|ganggu|'
+    r'balik ke|ga mau|gak mau|gamau|mau.*nempel|'
+    r'gk ada|ga ada|gak ada)',
     re.IGNORECASE
 )
 
@@ -137,18 +139,23 @@ _BRAND_CANON_KEYS = {
 }
 
 
+def _cutoff_iso(hours: int) -> str:
+    """Return cutoff timestamp in the same format the DB stores (no T, no μs)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    return cutoff.strftime("%Y-%m-%d %H:%M:%S+00:00")
+
+
 def get_recent_messages(hours: int = 1) -> list[dict]:
     """Fetch recent messages from the group."""
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     rows = conn.execute(
         """SELECT id, tg_msg_id, text, timestamp, processed, sender_name,
                   skip_reason
            FROM messages
            WHERE timestamp > ?
            ORDER BY timestamp ASC""",
-        (cutoff.isoformat(),)
+        (_cutoff_iso(hours),)
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -158,14 +165,13 @@ def get_recent_promos(hours: int = 1) -> list[dict]:
     """Fetch recent promos extracted by the bot."""
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     rows = conn.execute(
         """SELECT id, source_msg_id, summary, brand, status, conditions,
                   created_at
            FROM promos
            WHERE created_at > ?
            ORDER BY created_at ASC""",
-        (cutoff.isoformat(),)
+        (_cutoff_iso(hours),)
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
