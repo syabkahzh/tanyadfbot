@@ -336,6 +336,20 @@ _JUNK_SUMMARIES: set[str] = {
     'tautan WhatsApp, gagal chat',
     'Promo Reward saya yang siap digunakan',
     'Reward ku siap digunakan masa aktif sampai besok',
+    # FP summaries batch 2026-05-30 13:52 WIB — complaints/questions only
+    '100 diluar jangkauan, status tidak jelas',
+    'Voucher 25k, bisa potong.',
+    'delay, status ga dpt.',
+    'PC disini, status habis.',
+    '50% diskon khusus weekend, minimum belanja tidak jelas, status expired.',
+    'tetap pilihan, meski Shopee ramai.',
+    'PaLm Sugar Latte Voc VIP, yakin sam kuliah di sini.',
+    'Banyak kode, berharap ada komboan.',
+    'TIFUL MOMENTS Klaim menit 22, belum masuk.',
+    'TIFUL MOMENTS Terima kasih, bisa pakai semua.',
+    'Kode pot 99% 15k, status unknown.',
+    'Ultah, diskon 50% untuk point.',
+    'VIP Point Coffee, voucher live, status unknown.',
 }
 
 # ── False positive filters ──────────────────────────────────────────
@@ -455,7 +469,20 @@ _COMPLAINT_PATTERN = re.compile(
     r'belum on|belum aktif|belum jalan|'
     r'disogok|malu disogok|'
     r'kentut|apk kentut|'
-    r'dikirim\s+\d|struk\s+\d)',
+    r'dikirim\\s+\\d|struk\\s+\\d|'
+    # FP filter batch 2026-05-30 13:52 WIB
+    r'kirain.*(?:ga dpt|ga dapet|diluar|bisa)|'
+    r'blom masuk|belum masuk|'
+    r'kok di aku|gaada ya|ga ada ya|'
+    r'klo buat.*gabisa|klo.*klem.*gabisa|'
+    r'ga kebagian|gak kebagian|'
+    r'abisnya jam|jam berapa.*abis|'
+    r'bisa dipakai kah|bisa pake.*ga\b|'
+    r'misal.*jadi.*ya\?|'
+    r'ga nganggur voc|biar ga nganggur|'
+    r'udah chattan|kirain bisa|'
+    r'mau tiramisu tp|jdnya kepaksa|'
+    r'paling ga|setidaknya)',
     re.IGNORECASE
 )
 
