@@ -145,7 +145,7 @@ class TelethonListener:
             is_fuzzy_duplicate, get_hermes_config_bool,
         )
         from db import normalize_brand
-        from processor import PromoExtraction, _SOCIAL_FILLER, _COMPLAINT_PATTERN, _JUNK_SUMMARIES
+        from processor import PromoExtraction, _SOCIAL_FILLER, _COMPLAINT_PATTERN, _JUNK_SUMMARIES, _PERSONAL_STATUS_PATTERN
 
         # ── Hermes kill switch ──────────────────────────────────────────
         if not get_hermes_config_bool('fastpath_enabled', True):
@@ -192,6 +192,7 @@ class TelethonListener:
         # ── Brand resolution: ONE non-blocking DB read, no retry sleep ────
         parent_text = None
         brand = normalize_brand(_guess_brand(text))
+        brand_from_context = False  # Track if brand leaked from context_tracker
 
         if brand == "Unknown" and reply_to_msg_id:
             try:
@@ -218,6 +219,8 @@ class TelethonListener:
             try:
                 async with asyncio.timeout(0.1):
                     brand = await context_tracker.get_context(chat_id)
+                    if brand != "Unknown":
+                        brand_from_context = True  # Mark as context-inherited
             except Exception:
                 pass
 
@@ -233,6 +236,18 @@ class TelethonListener:
             return
         if not is_allcaps and not has_promo_code and brand == "Unknown" and (is_aman_standalone or is_instant):
             return
+
+        # ── Gate 3b: context-inherited brand needs strong signal ────────────
+        # If brand leaked from context_tracker (not from message itself),
+        # the message MUST contain a clear status signal to justify it.
+        # This prevents casual chat ("Pake voc apa ka") from inheriting
+        # the last-discussed brand.
+        if brand_from_context and not is_allcaps and not has_promo_code:
+            STRONG_SIGNALS = {'aman', 'jp', 'jackpot', 'habis', 'nt', 'koid',
+                              'expired', 'luber', 'pecah', 'restock', 'ristok',
+                              'on', 'aktif', 'nyala', 'work'}
+            if not (found_sigs & STRONG_SIGNALS):
+                return
 
         # ── Gate 4: brand-level dedup (short window) ──────────────────────
         if brand and brand != "Unknown":
@@ -262,6 +277,11 @@ class TelethonListener:
             return
         # Also filter on raw message text — AI summaries strip complaint signals
         if _COMPLAINT_PATTERN.search(text_lower):
+            return
+        # Personal status updates (reward saya, hadiah ku, etc.) — NOT promos
+        if _PERSONAL_STATUS_PATTERN.search(text):
+            return
+        if _PERSONAL_STATUS_PATTERN.search(summary):
             return
 
         # Extract non-Telegram links

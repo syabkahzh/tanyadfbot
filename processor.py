@@ -396,6 +396,21 @@ _COMPLAINT_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# ── Personal status update filter ──────────────────────────────────────────────
+# Detect forwarded app notifications / personal reward status (NOT promos)
+_PERSONAL_STATUS_PATTERN = re.compile(
+    r'((?:promo|voucher)?\s*reward(?:ku|saya| gw| gue| ane)?\s+(?:saya|ku|gw|gue|ane)?|'
+    r'reward\s+(?:saya|ku|gw|gue|ane)|'
+    r'rewardku|'
+    r'hadiah\s+(?:saya|ku|gw|gue|ane)|'
+    r'(?:promo|voucher)\s+(?:reward|hadiah)\s+(?:saya|ku|gw|gue|ane)|'
+    r'siap\s+digunakan.*masa\s+(?:aktif|berlaku)|'
+    r'masa\s+(?:aktif|berlaku).*siap\s+digunakan|'
+    r'(?:status|info)\s+reward(?:ku)?|'
+    r'point\s+(?:saya|ku|gw|gue)\s+(?:masih|sudah|belum))',
+    re.IGNORECASE
+)
+
 # ── Pre-compiled optimized keyword patterns ───────────────────────────────────
 _STRONG_PATTERN = re.compile('|'.join(map(re.escape, _STRONG_KEYWORDS)))
 _WEAK_PATTERN = re.compile('|'.join(map(re.escape, _WEAK_KEYWORDS)))
@@ -1259,6 +1274,9 @@ class GeminiProcessor:
                     continue
                 if _COMPLAINT_PATTERN.search(summary):
                     logger.info(f'🚫 Complaint filtered: {summary[:60]}')
+                    continue
+                if _PERSONAL_STATUS_PATTERN.search(summary):
+                    logger.info(f'🚫 Personal status filtered: {summary[:60]}')
                     continue
                 verified_brand = normalize_brand(p.brand)
                 if verified_brand == "Unknown":

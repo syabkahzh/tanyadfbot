@@ -111,6 +111,11 @@ _BRAND_CANON: dict[str, str] = {
     'dananerima': 'DANA', 'dana': 'DANA', 'd+n+a': 'DANA',
     # Sopbek / travel voucher
     'sopbek': 'ShopeePay', 'shopbek': 'ShopeePay',
+    # Personal pronouns — NOT brands (false positive 2026-05-30)
+    'saya': 'Unknown', 'aku': 'Unknown', 'gue': 'Unknown', 'gw': 'Unknown',
+    'gue': 'Unknown', 'gua': 'Unknown', 'ane': 'Unknown', 'beta': 'Unknown',
+    'kamu': 'Unknown', 'lu': 'Unknown', 'lo': 'Unknown',
+    'reward saya': 'Unknown', 'rewardku': 'Unknown',
 }
 
 def get_brand_canon() -> dict[str, str]:
