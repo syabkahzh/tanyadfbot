@@ -227,6 +227,29 @@ _JUNK_SUMMARIES: set[str] = {
     'cek di app spay',
     'ka ss voc nya',
     'ag kak',
+    # Casual chat patterns (self-eval 2026-05-30)
+    'aman pc 3 biji', 'alhamdulilah aman pc 3 biji',
+    'aman pc pagi2', 'aman pc 24.999',
+    'aman, yg 1 perak yg 1 nombok 1k',
+    'aman pc scan dri rumah',
+    'aman getok 5k',
+    'alhamdulillah aman pc 3',
+    'bug alfa voc ywwa',
+    'bug alfa 100k',
+    'gatau ka. notifnya kayagitu',
+    'kalian yang nuker vip pake voc 25k sama 15k di sinisin sama barista nya gaa',
+    'aku menu psl, minbel sesuai, kompi pc, vc nyantol, akunnya aja yang oon',
+    'cb kl gini sekalian diinfokan struk dan bukti gagalny',
+    'alhamdulilah aman pc',
+    'guys info dong yg lolos',
+    'guys mau ke idm garap kredivo pagi2 bisa kan yaa',
+    'bilang aja mau beli psl sama creamy tiramisu latte',
+    'saranku mending dihapus aj kl scan dr rumah',
+    'habis kak td voc deals 10k jadi 100k',
+    'alhamdulillah setelah kuliah pc 1 sks',
+    'aman nya bilang qris shopeepay aja kak',
+    'harus dong. kan no minbel beli barang random aja',
+    'ygs tiramisu kan masuk promo birthday pc',
 }
 
 # ── False positive filters ──────────────────────────────────────────
@@ -288,7 +311,9 @@ _CASUAL_REPLY_PATTERN = re.compile(
     r'makasi|makasih|thanks|thx|mks|terimakasih|terima kasih|'
     r'sip|mantap|jos|joss|keren|'
     r'ga\s+tau|gak\s+tau|gatau|'
-    r'alhamdulillah|syukur|allhamdulillah|alhamdulilah)',
+    r'alhamdulillah|syukur|allhamdulillah|alhamdulilah|'
+    r'aman\s+(?:pc|pp|idm|alfa|ag|grab|gfood|sfood|gofood|'
+    r'shopee|tokped|lazada|spay|gopay|ovo|dana))',
     re.IGNORECASE
 )
 
@@ -323,7 +348,10 @@ _COMPLAINT_PATTERN = re.compile(
     r'masalah|trouble|ganggu|'
     r'balik ke|ga mau|gak mau|gamau|mau.*nempel|'
     r'gk ada|ga ada|gak ada|'
-    r'gagal|ga ngaruh|gak ngaruh|tidak jelas|status tidak jelas)',
+    r'gagal|ga ngaruh|gak ngaruh|tidak jelas|status tidak jelas|'
+    r'gapernah|ga pernah|gak pernah|'
+    r'sinisin|disinisn|sinis|'
+    r'nyantol|stuck|error terus|gabisa masuk|gak bisa masuk)',
     re.IGNORECASE
 )
 

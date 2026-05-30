@@ -1,0 +1,36 @@
+{
+  "timestamp": "2026-05-30T03:24:07.761579+07:00",
+  "message_count": 296,
+  "new_terms": {
+    "yg": 46,
+    "ga": 36,
+    "psl": 27,
+    "aku": 25,
+    "aja": 22,
+    "jam": 19,
+    "udh": 18,
+    "beli": 15,
+    "apa": 15,
+    "aman": 14
+  },
+  "mechanisms": {
+    "poin": 5,
+    "combo": 5,
+    "voucher": 2,
+    "klaim": 1,
+    "diskon": 1,
+    "b1g1": 1
+  },
+  "time_mentions": {
+    "hari ini": 9,
+    "habis": 3,
+    "besok": 2
+  },
+  "top_users": {
+    "Hil || Qpon : 2E847Z": 33,
+    "Sasasa": 19,
+    "han": 14,
+    "Nur": 10,
+    "oye hoki": 10
+  }
+}

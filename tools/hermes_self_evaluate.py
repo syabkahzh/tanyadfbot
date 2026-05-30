@@ -93,7 +93,10 @@ _COMPLAINT_PATTERN = re.compile(
     r'masalah|trouble|ganggu|'
     r'balik ke|ga mau|gak mau|gamau|mau.*nempel|'
     r'gk ada|ga ada|gak ada|'
-    r'gagal|ga ngaruh|gak ngaruh|tidak jelas|status tidak jelas)',
+    r'gagal|ga ngaruh|gak ngaruh|tidak jelas|status tidak jelas|'
+    r'gapernah|ga pernah|gak pernah|'
+    r'sinisin|disinisn|sinis|'
+    r'nyantol|stuck|error terus|gabisa masuk|gak bisa masuk)',
     re.IGNORECASE
 )
 
@@ -183,7 +186,9 @@ _CASUAL_CHAT = re.compile(
     r'udah\s+\w+|baru\s+\w+|mau\s+\w+|'
     r'kemarin\s+\w+|kemaren\s+\w+|'
     r'gak\s+\w+|ga\s+\w+|nggak\s+\w+|'
-    r'(?:iya|oh|ok|oke|nah|hehe|haha|wkwk|sip|mantap|jos|alhamdulillah))',
+    r'(?:iya|oh|ok|oke|nah|hehe|haha|wkwk|sip|mantap|jos|alhamdulillah|alhamdulilah)|'
+    r'aman\s+(?:pc|pp|idm|alfa|ag|grab|gfood|sfood|gofood|'
+    r'shopee|tokped|lazada|spay|gopay|ovo|dana)\b)',
     re.IGNORECASE
 )
 

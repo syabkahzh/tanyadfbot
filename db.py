@@ -93,6 +93,11 @@ _BRAND_CANON: dict[str, str] = {
     'brand': 'Unknown', 'tidak diketahui': 'Unknown',
     'tidak disebutkan': 'Unknown', 'sunknown': 'Unknown',
     'bunknown': 'Unknown', 'n/a': 'Unknown',
+    # Slang/informal terms that are NOT brands (self-eval 2026-05-30)
+    'tdi': 'Unknown', 'psl': 'Point Coffee', 'cashback': 'Unknown',
+    'selfre': 'Unknown', 'selfreward': 'Unknown', 'self-reward': 'Unknown',
+    'panik bangett': 'Unknown', 'ywwa': 'Unknown', 'brrti': 'Unknown',
+    'pling': 'Unknown', 'berarti': 'Unknown', 'paling': 'Unknown',
 }
 
 def get_brand_canon() -> dict[str, str]:
