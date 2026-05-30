@@ -1,38 +1,40 @@
 {
-  "timestamp": "2026-05-30T11:08:24.410771+07:00",
-  "message_count": 299,
+  "timestamp": "2026-05-30T21:27:48.902256+07:00",
+  "message_count": 298,
   "new_terms": {
-    "ga": 53,
-    "yg": 44,
-    "aku": 36,
-    "aja": 22,
-    "pake": 18,
-    "udh": 18,
-    "kalo": 17,
-    "apa": 16,
-    "abis": 15,
-    "psl": 15
+    "yg": 36,
+    "aku": 35,
+    "ga": 33,
+    "beli": 32,
+    "apa": 20,
+    "pake": 19,
+    "aja": 18,
+    "udh": 16,
+    "ditarik": 14,
+    "masuk": 14
   },
   "mechanisms": {
-    "diskon": 5,
-    "poin": 5,
-    "combo": 5,
-    "qr": 3,
-    "voucher": 3,
-    "scan": 2,
-    "koin": 2,
-    "b1g1": 2
+    "voucher": 6,
+    "diskon": 4,
+    "tukpo": 4,
+    "scan": 3,
+    "koin": 3,
+    "poin": 3,
+    "combo": 2,
+    "klaim": 1
   },
   "time_mentions": {
-    "hari ini": 7,
-    "habis": 4,
-    "besok": 4
+    "habis": 5,
+    "hari ini": 1,
+    "besok": 1,
+    "expir": 1,
+    "tanggal 5": 1
   },
   "top_users": {
-    "Ara": 13,
-    "wiuwww": 7,
-    "Hil || Qpon : 2E847Z": 7,
-    "s": 7,
-    "c.eendy": 6
+    "Rehan": 21,
+    "Nur": 12,
+    "esteh🥃": 12,
+    "Aya🥰": 7,
+    "Sasasa||": 7
   }
 }

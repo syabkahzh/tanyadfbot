@@ -409,6 +409,7 @@ _JUNK_SUMMARIES: set[str] = {
     'ohh makasih infonya', 'makasiie', 'makasiiie',
     'makasi infonya', 'makasih infonya',
     'riyal', 'riyall no fekkk tengkyu',
+    'aman 5k',
 }
 
 # ── False positive filters ──────────────────────────────────────────
