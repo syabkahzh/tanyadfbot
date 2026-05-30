@@ -517,7 +517,12 @@ _COMPLAINT_PATTERN = re.compile(
     r'tgl \d+.*biasanya|'
     r'ambang.*stamp|stamp.*transaksi|'
     r'apk.*indomaret|idm.*poinku|'
-    r'dapet 2.*telat|turu)',
+    r'dapet 2.*telat|turu|'
+    # FP filter batch 2026-05-30 17:18 WIB
+    r'gabisa dipake|gak bisa dipake|ga bisa dipake|'
+    r'belum semuanya habis|habis soalnya|habis semua|'
+    r'promo gajelas|emg promo|'
+    r'gak bisa dipake|tidak bisa dipakai)',
     re.IGNORECASE
 )
 

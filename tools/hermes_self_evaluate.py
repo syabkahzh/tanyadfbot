@@ -97,7 +97,12 @@ _COMPLAINT_PATTERN = re.compile(
     r'gapernah|ga pernah|gak pernah|'
     r'sinisin|disinisn|sinis|'
     r'nyantol|stuck|error terus|error mulu|gabisa masuk|gak bisa masuk|'
-    r'ga dikasih|gak dikasih|disangkutin)',
+    r'ga dikasih|gak dikasih|disangkutin|'
+    # FP filter batch 2026-05-30 17:18 WIB
+    r'gabisa dipake|gak bisa dipake|ga bisa dipake|'
+    r'belum semuanya habis|habis soalnya|habis semua|'
+    r'promo gajelas|emg promo|'
+    r'tidak bisa dipakai)',
     re.IGNORECASE
 )
 
