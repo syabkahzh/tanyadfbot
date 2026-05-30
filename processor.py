@@ -323,7 +323,8 @@ _CASUAL_CHAT_PATTERN = re.compile(
     r'(beli\s+\w+|makan\s+\w+|lagi\s+\w+|habis\s+\w+|'
     r'udah\s+\w+|baru\s+\w+|mau\s+\w+| lagi\s+\w+|'
     r'kemarin\s+\w+|kemaren\s+\w+|'
-    r'gak\s+\w+|ga\s+\w+|nggak\s+\w+)',
+    r'gak\s+\w+|ga\s+\w+|nggak\s+\w+|'
+    r'aku\s+tau\s+udah|biasanya\s+aman\s+aja|baru\s+nemu\s+yang)',
     re.IGNORECASE
 )
 
