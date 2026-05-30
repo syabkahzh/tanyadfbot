@@ -410,6 +410,8 @@ _JUNK_SUMMARIES: set[str] = {
     'makasi infonya', 'makasih infonya',
     'riyal', 'riyall no fekkk tengkyu',
     'aman 5k',
+    'Combo gaz engga kawan kawan DF.',
+    'ga nyantol, coba lagi nanti.',
 }
 
 # ── False positive filters ──────────────────────────────────────────
@@ -488,7 +490,14 @@ _CASUAL_CHAT_PATTERN = re.compile(
     r'udah\s+\w+|baru\s+\w+|mau\s+\w+| lagi\s+\w+|'
     r'kemarin\s+\w+|kemaren\s+\w+|'
     r'gak\s+\w+|ga\s+\w+|nggak\s+\w+|'
-    r'aku\s+tau\s+udah|biasanya\s+aman\s+aja|baru\s+nemu\s+yang)',
+    r'aku\\s+tau\\s+udah|biasanya\\s+aman\\s+aja|baru\\s+nemu\\s+yang)',
+    re.IGNORECASE
+)
+
+
+# Detect AI-generated casual phrases anywhere in summary (not anchored)
+_AI_CASUAL_ANYWHERE = re.compile(
+    r'kawan\s+kawan|ga\s+nyantol|coba\s+lagi\s*$',
     re.IGNORECASE
 )
 
@@ -1475,6 +1484,9 @@ class GeminiProcessor:
                 if _CASUAL_REPLY_PATTERN.search(summary):
                     continue
                 if _CASUAL_CHAT_PATTERN.search(summary):
+                    continue
+                if _AI_CASUAL_ANYWHERE.search(summary):
+                    logger.info(f'🚫 AI casual filtered: {summary[:60]}')
                     continue
                 if _BOIKOT_PATTERN.search(summary):
                     logger.info(f'🚫 Boikot filtered: {summary[:60]}')
