@@ -82,7 +82,7 @@ _BRAND_CANON: dict[str, str] = {
     'g2g': 'G2G',
     'burek': 'Burek',
     'aice': 'Aice', 'a+i+c+e': 'Aice',
-    'point coffee': 'Point Coffee', 'poin coffee': 'Point Coffee',
+    'pc': 'Point Coffee', 'point coffee': 'Point Coffee', 'poin coffee': 'Point Coffee',
     'svip': 'ShopeeFood',
     'spud': 'SPUD',
     'skin1004': 'SKIN1004', 'skin': 'SKIN1004', 'skinenjel': 'SKIN1004',
