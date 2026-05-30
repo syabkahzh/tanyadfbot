@@ -111,7 +111,7 @@ _COMPLAINT_PATTERN = re.compile(
 )
 
 _BOIKOT_PATTERN = re.compile(
-    r'(paylater|pay\s*later|cicilan|kredit|bank\s*saqu|saqu|superbank)',
+    r'(paylater|paylat|pay\s*later|cicilan|kredit|bank\s*saqu|saqu|superbank)',
     re.IGNORECASE
 )
 

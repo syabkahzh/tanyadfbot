@@ -505,7 +505,7 @@ _AI_CASUAL_ANYWHERE = re.compile(
 # ── Boikot filter: financial/credit services ───────────────────────────────
 # User directive: skip promos about paylater, cicilan, kredit, bank saqu, superbank
 _BOIKOT_PATTERN = re.compile(
-    r'(paylater|pay\s*later|cicilan|kredit|bank\s*saqu|saqu|superbank)',
+    r'(paylater|paylat|pay\s*later|cicilan|kredit|bank\s*saqu|saqu|superbank)',
     re.IGNORECASE
 )
 
