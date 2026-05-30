@@ -152,6 +152,26 @@ CONTOH YANG BUKAN PROMO (jangan diekstrak):
 ID:11 MSG:punyaku gangguan mulu pas klaim -> {"promos":[{"original_msg_id":11,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
 ID:12 MSG:pas stanby malah belum on si tsel -> {"promos":[{"original_msg_id":12,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
 ID:13 MSG:Gatau rin, tiba2 ga bisa jalan fast chargingnya -> {"promos":[{"original_msg_id":13,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:14 MSG:saya coba screenshot pembayaran, status ga motong selfre -> {"promos":[{"original_msg_id":14,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:15 MSG:coba screenshot pembayaran, status ga motong selfre -> {"promos":[{"original_msg_id":15,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:16 MSG:Kasir nombok, bingung -> {"promos":[{"original_msg_id":16,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:17 MSG:3L CM, dikirim 6L, struk 3L -> {"promos":[{"original_msg_id":17,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:18 MSG:tautan WhatsApp, gagal chat -> {"promos":[{"original_msg_id":18,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:19 MSG:Fitur baru, pesanan selesai otomatis -> {"promos":[{"original_msg_id":19,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:20 MSG:Promo Reward saya yang siap digunakan -> {"promos":[{"original_msg_id":20,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:21 MSG:Reward ku siap digunakan masa aktif sampai besok -> {"promos":[{"original_msg_id":21,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:22 MSG:pc tp gapunya voc live -> {"promos":[{"original_msg_id":22,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:23 MSG:greget malu disogok 50k voc vip sore -> {"promos":[{"original_msg_id":23,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+ID:24 MSG:force close mulu nih apk kentut -> {"promos":[{"original_msg_id":24,"brand":"Unknown","summary":"Unknown","status":"unknown","confidence":0.1}]}
+
+POLA YANG HARUS DI-REJECT (jangan diekstrak):
+- Pesan yang hanya menceritakan pengalaman personal: "aku beli...", "punyaku...", "saya coba..."
+- Pesan complaint/curhat: "bingung", "greget", "malu", "gangguan", "error", "force close"
+- Pesan tentang notifikasi reward/hadiah pribadi: "reward saya", "hadiah ku", "point saya"
+- Pesan tentang status order: "dikirim", "dikemas", "struk", "dikirim 6L"
+- Pesan yang cuma tanya/curhat tentang ketersediaan: "gapunya voc", "belum on", "belum aktif"
+- Pesan tentang fitur app baru tanpa promo: "fitur baru", "otomatis"
+- Pesan tentang masalah pembayaran: "ga motong", "gagal chat", "tautan WhatsApp"
 
 BOIKOT (jangan diekstrak — ini layanan keuangan/kredit, BUKAN promo diskon):
 - paylater, cicilan, kredit, bank saqu, superbank
@@ -286,6 +306,36 @@ _JUNK_SUMMARIES: set[str] = {
     'voc kwg tukpo kalo disimpen barcodenya ajaa exp nya tetep sebulan kan guyss',
     'TUKPO ON', 'hbd point coffee, always on point',
     'Kode Promo: GATAUUU',
+    # False positive casual chat (self-eval 2026-05-30 17:00)
+    'inpo dong idm manaa yg lengkap kakk',
+    'di klik idm ka ada voc live',
+    'Pake voc apa ka',
+    'Aman sawit pake voc alfa ngebung itu, nombok dikit',
+    'Kangen cocis idm promo',
+    'wihh mayan byr qr brusan dpt cb 5k',
+    'struknya kelihatan ada nama point kak, kalo idm tulisannya idm',
+    'alhamdulilah td aman beli psl+creamy tiramisu latte+shaken tiramisu latte',
+    'ish baru pulang dr idm',
+    'yang abis voc svip nya kali',
+    'galiat info',
+    'Kalo on lagi, siap df banyak pameran azko informa',
+    'when yah dapet notif klg web flexa nyala',
+    'promoan di klik idm ka',
+    'Kayak cerita temenku, ke bandara lewat toll padahal udah pake etoll temenku',
+    'Voc svip nya ka yg dah abis',
+    'Voc 10k, masuknya 100k. Deals sopi',
+    'Pc sama bug voc alfa',
+    'hwaaa sama baiknya kaya mas mas pc daan mogot yg lupa scan barcode',
+    'ndog trakhir aman',
+    'kopinya jadi, dapet kesbek uangnya, pocernya pun blm kepake',
+    'Force Close, mulu nih apk kentut',
+    'greget malu disogok 50k voc vip sore',
+    'pc tp gapunya voc live',
+    'screenshot pembayaran, status ga motong selfre',
+    'Fitur baru, pesanan selesai otomatis',
+    'tautan WhatsApp, gagal chat',
+    'Promo Reward saya yang siap digunakan',
+    'Reward ku siap digunakan masa aktif sampai besok',
 }
 
 # ── False positive filters ──────────────────────────────────────────
@@ -392,7 +442,19 @@ _COMPLAINT_PATTERN = re.compile(
     # False positive filters (self-eval 2026-05-30 10:37)
     r'kasir.*(?:nakal|tidak|salah)|ga motong|lag bgt|'
     r'keabisan|habis.*bener|masalah|trouble|'
-    r'gimana dong|kasirnya.*salah|diinput.*salah)',
+    r'gimana dong|kasirnya.*salah|diinput.*salah|'
+    # False positive filters (self-eval 2026-05-30 17:00)
+    r'force close|fc terus|fc mulu|'
+    r'nombok|nombokin|'
+    r'gagal chat|tautan.*(?:whatsapp|wa)|'
+    r'fitur baru.*(?:otomatis|pesanan)|'
+    r'reward saya|reward ku|hadiah ku|point saya|'
+    r'ga motong|ga.*potong|gak motong|'
+    r'gapunya|ga punya|gak punya|'
+    r'belum on|belum aktif|belum jalan|'
+    r'disogok|malu disogok|'
+    r'kentut|apk kentut|'
+    r'dikirim\s+\d|struk\s+\d)',
     re.IGNORECASE
 )
 
@@ -407,7 +469,11 @@ _PERSONAL_STATUS_PATTERN = re.compile(
     r'siap\s+digunakan.*masa\s+(?:aktif|berlaku)|'
     r'masa\s+(?:aktif|berlaku).*siap\s+digunakan|'
     r'(?:status|info)\s+reward(?:ku)?|'
-    r'point\s+(?:saya|ku|gw|gue)\s+(?:masih|sudah|belum))',
+    r'point\s+(?:saya|ku|gw|gue)\s+(?:masih|sudah|belum)|'
+    # Additional personal status patterns (2026-05-30 17:00)
+    r'reward\s+(?:saya|ku|gw)\s+(?:yang|yg)\s+(?:siap|ready)|'
+    r'(?:point|poin)\s+(?:tsel|telkomsel)\s+(?:saya|ku|gw)|'
+    r'masa\s+(?:aktif|berlaku)\s+(?:sampai|s/d|hingga)\s+\w+)',
     re.IGNORECASE
 )
 

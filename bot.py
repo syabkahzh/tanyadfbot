@@ -935,6 +935,7 @@ class TelegramBot:
             f"{status_emoji} {brand_tag}\n"
             f"📝 {p_data.summary}\n"
             f"⏰ Jam: `{msg_wib}`\n"
+            f"🔗 {tg_link}\n"
             f"{source_tag}{perf_tag}"
         )
 
@@ -989,7 +990,7 @@ class TelegramBot:
                 source_icon = "⚡"
                 lat_info = f"`{p.queue_time or 0:.2f}s`"
             
-            lines.append(f"• {source_icon} {p.summary} (`{msg_wib}`) | {lat_info}")
+            lines.append(f"• {source_icon} {p.summary} (`{msg_wib}`) | {lat_info} 🔗 {link}")
 
         text = header + "\n" + "\n".join(lines)
         safe_text, entities = convert(text)
