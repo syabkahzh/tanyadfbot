@@ -350,6 +350,30 @@ _JUNK_SUMMARIES: set[str] = {
     'Kode pot 99% 15k, status unknown.',
     'Ultah, diskon 50% untuk point.',
     'VIP Point Coffee, voucher live, status unknown.',
+    # Fast-path junk summaries (self-eval 2026-05-30 15:03)
+    'Kode Promo: HAHAHA',
+    'Kode Promo: SPPDCPLN5KAYKBF9SZ8',
+    'Kode Promo: PCSEPULUHTAHUN',
+    'kasir pisah blm tentu bisa😭 kadang konputer pc aneh jd kadang pembayaran ttp di idm😭',
+    'psl dan tiramisu pake voc 20% jadi 1 rp',
+    'Cabang sini komputernya rusak, jadi beli 1 aja deh kombo voc live + tumbler + koin baar 3.75k aja',
+    'Ada add on-nya kak',
+    'gpp suruh klik konfirmasi aja, tinggal klik pdhl di edc',
+    'wow dpt makasi kuk, berkah selalu 🥰',
+    'Voc ini beli 2 psl combo voc live bisa yaa',
+    'tgl 25 biasanya voc gede',
+    'Gemeter digedor kukka😭',
+    'oalah makasi infonya',
+    'dapet gedoran kukka, masyaallah i lop u kukka',
+    'kupon pc delay, 55 blm masuk',
+    'alhamdulillah dapet 2, yang 2 telat masuk nya soalnya turu',
+    'Aman 15k',
+    'Absen jp 5k harian',
+    'Ambil 2 ka dpt stamp, pake voc 20% ttp 25k yuhuu',
+    'Apk indomaret point',
+    'Idm poinku, klik kado di pojok kanan atas',
+    'ada kak. aku yg ketiga juga delay trs masuk',
+    'aman pc creamy tiramisu latte upsize 9.5k',
 }
 
 # ── False positive filters ──────────────────────────────────────────
@@ -482,7 +506,16 @@ _COMPLAINT_PATTERN = re.compile(
     r'ga nganggur voc|biar ga nganggur|'
     r'udah chattan|kirain bisa|'
     r'mau tiramisu tp|jdnya kepaksa|'
-    r'paling ga|setidaknya)',
+    r'paling ga|setidaknya|'
+    # FP filter batch 2026-05-30 15:03 WIB — fast-path complaints/casual
+    r'kasir.*pisah|komputernya.*rusak|delay.*masuk|kupon.*delay|'
+    r'gemeter|gedoran|masyaallah|'
+    r'makasi.*kuk|dpt makasi|berkah selalu|'
+    r'alhamdulillah.*dapet|absen jp|'
+    r'tgl \d+.*biasanya|'
+    r'ambang.*stamp|stamp.*transaksi|'
+    r'apk.*indomaret|idm.*poinku|'
+    r'dapet 2.*telat|turu)',
     re.IGNORECASE
 )
 

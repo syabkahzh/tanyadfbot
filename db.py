@@ -116,6 +116,12 @@ _BRAND_CANON: dict[str, str] = {
     'gue': 'Unknown', 'gua': 'Unknown', 'ane': 'Unknown', 'beta': 'Unknown',
     'kamu': 'Unknown', 'lu': 'Unknown', 'lo': 'Unknown',
     'reward saya': 'Unknown', 'rewardku': 'Unknown',
+    # Products/drinks mistaken as brands (self-eval 2026-05-30 15:03)
+    'tiramisu': 'Point Coffee', 'tumbler': 'Unknown', 'cuculemon': 'Unknown',
+    'pcs': 'Point Coffee', 'pc sepuluh tahun': 'Point Coffee',
+    'blockji': 'Unknown', 'janlup': 'Unknown', 'flexa': 'Unknown',
+    'discountfess': 'Unknown', 'indomaret point': 'Indomaret',
+    'aman': 'Unknown',
 }
 
 def get_brand_canon() -> dict[str, str]:
