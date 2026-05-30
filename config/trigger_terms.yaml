@@ -108,6 +108,10 @@ transport:
     - stasiun
     - commuter
     - krl
+    - byond
+    - bsi byond
+    - tiket.com
+    - traveloka
 
 social:
   weight: 1.0

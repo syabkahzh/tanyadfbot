@@ -102,6 +102,15 @@ _BRAND_CANON: dict[str, str] = {
     'co': 'Unknown', 'cantolin': 'Unknown', 'tukar poin': 'Tukar Poin',
     'shibal': 'Point Coffee', 'next omega': 'Unknown',
     'kek bansos jir': 'Unknown', 'guys pc vip': 'Unknown',
+    # Travel/transport brands (added 2026-05-30)
+    'bsi': 'BSI', 'b+s+i': 'BSI', 'bank bsi': 'BSI',
+    'byond': 'BSI Byond', 'byond lyfe': 'BSI Byond', 'bsi byond': 'BSI Byond',
+    'tiket.com': 'Tiket.com', 'tiketcom': 'Tiket.com', 't+k+t': 'Tiket.com',
+    'kai': 'KAI', 'k+a+i': 'KAI', 'kereta api': 'KAI',
+    'traveloka': 'Traveloka', 'trvlka': 'Traveloka', 't+r+v+l+k': 'Traveloka',
+    'dananerima': 'DANA', 'dana': 'DANA', 'd+n+a': 'DANA',
+    # Sopbek / travel voucher
+    'sopbek': 'ShopeePay', 'shopbek': 'ShopeePay',
 }
 
 def get_brand_canon() -> dict[str, str]:

@@ -160,7 +160,15 @@ Jika pesan membahas paylater/cicilan/kredit: brand="Unknown", summary="Unknown".
 SYSTEM VOUCHER: Jika pesan adalah notifikasi sistem ("Anda mendapatkan voucher...", "Masukkan kode..."):
 - Extract sebagai promo dengan brand yang sesuai
 - Status: active (voucher valid)
-- Confidence: 0.90"""
+- Confidence: 0.90
+
+TRAVEL/TIKET KERETA: Jika pesan membahas promo tiket kereta, travel, atau transportasi:
+- Brand: gunakan KAI, Tiket.com, Traveloka, BSI Byond, atau DANA sesuai konteks
+- Contoh: "BSI Byond cashback 50% tiket kereta" → brand="BSI Byond", summary="**BSI Byond** cashback 50% tiket kereta tarif standar."
+- Contoh: "DANA diskon tiket kereta" → brand="DANA", summary="**DANA** diskon tiket kereta."
+- JANGAN extract obrolan kasual soal tiket kereta (tanya status, personal report) sebagai promo
+- HANYA extract yang jelas-jelas PROMO (ada diskon/cashback/voucher)
+- Confidence: 0.85 untuk travel promos"""
 
 _DEDUP_SYSTEM = "Kamu agen deteksi duplikasi. Output HANYA angka indeks dipisah koma."
 
@@ -205,6 +213,7 @@ _STRONG_KEYWORDS: set[str] = {
     'blibli','serbabu','famima','familymart','supin','superindo',
     'gacoan','mie gacoan','wingstop','yoshinoya','azko','sei',
     'flip','superbank','dana','tts','emados','ndog','pc','garap',
+    'kereta','kai','tiket kereta','travel','byond','tiket.com','traveloka',
 }
 
 _WEAK_KEYWORDS: set[str] = {
