@@ -96,7 +96,8 @@ _COMPLAINT_PATTERN = re.compile(
     r'gagal|ga ngaruh|gak ngaruh|tidak jelas|status tidak jelas|'
     r'gapernah|ga pernah|gak pernah|'
     r'sinisin|disinisn|sinis|'
-    r'nyantol|stuck|error terus|gabisa masuk|gak bisa masuk)',
+    r'nyantol|stuck|error terus|error mulu|gabisa masuk|gak bisa masuk|'
+    r'ga dikasih|gak dikasih|disangkutin)',
     re.IGNORECASE
 )
 

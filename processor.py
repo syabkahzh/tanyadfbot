@@ -438,7 +438,8 @@ _COMPLAINT_PATTERN = re.compile(
     r'gagal|ga ngaruh|gak ngaruh|tidak jelas|status tidak jelas|'
     r'gapernah|ga pernah|gak pernah|'
     r'sinisin|disinisn|sinis|'
-    r'nyantol|stuck|error terus|gabisa masuk|gak bisa masuk|'
+    r'nyantol|stuck|error terus|error mulu|gabisa masuk|gak bisa masuk|'
+    r'ga dikasih|gak dikasih|disangkutin|'
     # False positive filters (self-eval 2026-05-30 10:37)
     r'kasir.*(?:nakal|tidak|salah)|ga motong|lag bgt|'
     r'keabisan|habis.*bener|masalah|trouble|'
@@ -1309,6 +1310,12 @@ class GeminiProcessor:
         responses = await asyncio.gather(*tasks, return_exceptions=True)
 
         valid: list[PromoExtraction] = []
+        # Build lookup for raw message text (to filter AI-cleaned summaries)
+        _raw_msg_lookup: dict[int, str] = {
+            m['id']: (m.get('text') or '').lower()
+            for m in filtered
+        }
+
         for i, response in enumerate(responses):
             if isinstance(response, Exception):
                 logger.error(f"❌ Chunk {i} crashed: {response}")
@@ -1344,6 +1351,23 @@ class GeminiProcessor:
                 if _PERSONAL_STATUS_PATTERN.search(summary):
                     logger.info(f'🚫 Personal status filtered: {summary[:60]}')
                     continue
+                # Raw text false-positive gate (self-eval 2026-05-30)
+                # AI may "clean up" a question/complaint into a promo summary.
+                # Also check the original message text against non-promo filters.
+                raw_text = _raw_msg_lookup.get(p.original_msg_id, '')
+                if raw_text:
+                    if _COMPLAINT_PATTERN.search(raw_text):
+                        logger.info(f'🚫 Raw complaint filtered: {raw_text[:60]}')
+                        continue
+                    if _QUESTION_PATTERN.search(raw_text):
+                        logger.info(f'🚫 Raw question filtered: {raw_text[:60]}')
+                        continue
+                    if _CASUAL_REPLY_PATTERN.search(raw_text):
+                        logger.info(f'🚫 Raw reply filtered: {raw_text[:60]}')
+                        continue
+                    if _CASUAL_CHAT_PATTERN.search(raw_text):
+                        logger.info(f'🚫 Raw casual filtered: {raw_text[:60]}')
+                        continue
                 verified_brand = normalize_brand(p.brand)
                 if verified_brand == "Unknown":
                     continue
