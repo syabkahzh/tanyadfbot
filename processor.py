@@ -226,6 +226,7 @@ _JUNK_SUMMARIES: set[str] = {
     'link ag dong',
     'cek di app spay',
     'ka ss voc nya',
+    'ag kak',
 }
 
 # ── False positive filters ──────────────────────────────────────────
