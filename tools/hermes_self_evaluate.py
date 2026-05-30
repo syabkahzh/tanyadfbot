@@ -194,10 +194,12 @@ _CASUAL_CHAT = re.compile(
 )
 
 _REPLY_PATTERN = re.compile(
-    r'^(?:iya|oh|ok|oke|nah|hehe|haha|wkwk|sip|mantap|jos|'
+    r'^(?:\*\*[^*]+\*\*\s*)?'  # optional **Brand** prefix
+    r'(iya|oh|ok|oke|nah|hehe|haha|wkwk|sip|mantap|jos|'
     r'ga\s+tau|gak\s+tau|gatau|alhamdulillah|'
     r'makasih|thanks|thx|mks|terimakasih|'
-    r'on|off|aktif|habis|abis| expired|'
+    r'on|off|aktif|habis|abis|pulang| expired|'
+    r'semoga\s+ada|maunya|moga|moga2|'
     r'(?:bisa|bs)\s+(?:ga|gak|ya)|'
     r'(?:masih|udah|belum)\s+\w+)',
     re.IGNORECASE

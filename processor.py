@@ -436,6 +436,8 @@ _CASUAL_REPLY_PATTERN = re.compile(
     r'sip|mantap|jos|joss|keren|'
     r'ga\s+tau|gak\s+tau|gatau|'
     r'alhamdulillah|syukur|allhamdulillah|alhamdulilah|'
+    r'habis|abis|pulang|'
+    r'semoga\s+ada|maunya|moga|moga2|'
     r'aman\s+(?:pc|pp|idm|alfa|ag|grab|gfood|sfood|gofood|'
     r'shopee|tokped|lazada|spay|gopay|ovo|dana))',
     re.IGNORECASE
