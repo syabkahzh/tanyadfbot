@@ -374,6 +374,35 @@ _JUNK_SUMMARIES: set[str] = {
     'Idm poinku, klik kado di pojok kanan atas',
     'ada kak. aku yg ketiga juga delay trs masuk',
     'aman pc creamy tiramisu latte upsize 9.5k',
+    # FP filter batch 2026-05-30 18:40 WIB — bad AI summaries from casual chat
+    'masa jaya, langganan goyang inul',
+    'new, join now!',
+    'habis harian',
+    'status weehhh',
+    'status ga jelas',
+    'rug, zonk',
+    'diskon elektronik, semoga lebih gacor',
+    'SVIPvoc, habis harian',
+    'UV & Sma gak bisa ditumpuk, status unknown',
+    'makasihhh aktif',
+    'baru sampe rumah, ternyata montok banget',
+    'langganan goyang inul',
+    'voc influ event',
+    'goyang inul',
+    'minimal 60-70GB storage',
+    'pamerin co an live xtra 60%',
+    'biasa, war di lite',
+    'voucher, bayar keedivo',
+    'Flash Sale (FS) habis/expired, pindah ke Tukar Tukas',
+    'diskon, status nyala tapi nyangkut voucher',
+    'Palm Sugar 15k + Creammy Latte 15k, motong 25k',
+    'masih bisa deals',
+    'finally active, finally can play again',
+    'status unknown',
+    'habis/expired',
+    'diskon elektronik',
+    'minimal belanja tidak jelas',
+    'status expired',
 }
 
 # ── False positive filters ──────────────────────────────────────────
@@ -522,7 +551,23 @@ _COMPLAINT_PATTERN = re.compile(
     r'gabisa dipake|gak bisa dipake|ga bisa dipake|'
     r'belum semuanya habis|habis soalnya|habis semua|'
     r'promo gajelas|emg promo|'
-    r'gak bisa dipake|tidak bisa dipakai)',
+    r'gak bisa dipake|tidak bisa dipakai|'
+    # FP filter batch 2026-05-30 18:40 WIB
+    r'kasir.*(?:ribet|gamau|gak mau|ga mau|aneh|salah)|'
+    r'debat.*kasir|'
+    r'fantast|zonk|pantes.*zonk|'
+    r'pamer.*(?:ibuk|ibu|keluarga|temen)|'
+    r'montok|duren|buah.*banget|'
+    r'abu.*abu.*(?:gabisa|gak|ga|habis)|'
+    r'brati gabisa|brp.*habis|'
+    r'gak liat|ga liat|tidak lihat|'
+    r'kirain.*(?:tiktok|tts|shop)|'
+    r'ternyata.*(?:tiktok|tts|shop)|'
+    r'join.*yuk|gas.*kak.*join|'
+    r'makasih|hatur nuhun|terima kasih|'
+    r'menurut.*ku|kayaknya|sepertinya|'
+    r'kupon.*sekali|kupon.*bisa|'
+    r'wkwk|wk wk|hihi|hehe|lol)',
     re.IGNORECASE
 )
 
