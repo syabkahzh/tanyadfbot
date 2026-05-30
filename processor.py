@@ -1350,7 +1350,7 @@ class GeminiProcessor:
         if _SOCIAL_FILLER.match(t):
             return False
 
-        words = t.split()
+        words = _WORDS_PATTERN.findall(t)
         score = 0
 
         has_strong = bool(_STRONG_PATTERN.search(t))
