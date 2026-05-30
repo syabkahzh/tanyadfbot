@@ -403,6 +403,12 @@ _JUNK_SUMMARIES: set[str] = {
     'diskon elektronik',
     'minimal belanja tidak jelas',
     'status expired',
+    # FP filter batch 2026-05-30 21:00 WIB — casual thanks/reaction
+    'pc aja ka', 'pc aja', 'pc ka',
+    'oh makasi', 'ohh makasi', 'oh makasih',
+    'ohh makasih infonya', 'makasiie', 'makasiiie',
+    'makasi infonya', 'makasih infonya',
+    'riyal', 'riyall no fekkk tengkyu',
 }
 
 # ── False positive filters ──────────────────────────────────────────
@@ -461,13 +467,15 @@ _VAGUE_OBSERVATION_PATTERN = re.compile(
 _CASUAL_REPLY_PATTERN = re.compile(
     r'^(?:\*\*[^*]+\*\*\s*)?'  # optional **Brand** prefix from AI summary
     r'(iya|oh|ok|oke|ohh|ohhh|nah|hehe|haha|wkwk|'
-    r'makasi|makasih|thanks|thx|mks|terimakasih|terima kasih|'
+    r'makasi|makasiie|makasih|thanks|thx|mks|terimakasih|terima kasih|'
+    r'tengkyu|tenkyu|tenkyou|tq|tanks|'
+    r'riyal|riyall|ryal|ryal|'
     r'sip|mantap|jos|joss|keren|'
-    r'ga\s+tau|gak\s+tau|gatau|'
+    r'ga\\s+tau|gak\\s+tau|gatau|'
     r'alhamdulillah|syukur|allhamdulillah|alhamdulilah|'
     r'habis|abis|pulang|'
-    r'semoga\s+ada|maunya|moga|moga2|'
-    r'aman\s+(?:pc|pp|idm|alfa|ag|grab|gfood|sfood|gofood|'
+    r'semoga\\s+ada|maunya|moga|moga2|'
+    r'aman\\s+(?:pc|pp|idm|alfa|ag|grab|gfood|sfood|gofood|'
     r'shopee|tokped|lazada|spay|gopay|ovo|dana))',
     re.IGNORECASE
 )
@@ -567,7 +575,11 @@ _COMPLAINT_PATTERN = re.compile(
     r'makasih|hatur nuhun|terima kasih|'
     r'menurut.*ku|kayaknya|sepertinya|'
     r'kupon.*sekali|kupon.*bisa|'
-    r'wkwk|wk wk|hihi|hehe|lol)',
+    r'wkwk|wk wk|hihi|hehe|lol|'
+    # FP filter batch 2026-05-30 21:00 WIB — reaction/thanks/worry
+    r'ditarik|dtarik|tumbal|kasbon|'
+    r'semoga.*(?:ditarik|ga|gak|habis)|'
+    r'aamiin|amin)',
     re.IGNORECASE
 )
 
