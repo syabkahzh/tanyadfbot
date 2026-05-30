@@ -260,6 +260,9 @@ class TelethonListener:
             return
         if _COMPLAINT_PATTERN.search(summary):
             return
+        # Also filter on raw message text — AI summaries strip complaint signals
+        if _COMPLAINT_PATTERN.search(text_lower):
+            return
 
         # Extract non-Telegram links
         combined = (text or "") + " " + (parent_text or "")
