@@ -254,6 +254,29 @@ _JUNK_SUMMARIES: set[str] = {
     'on kk',
     'aman 4',
     'on tlur',
+    # False positive casual chat (self-eval 2026-05-30 10:37)
+    'kak makasi banyak 🥰', 'y lupa idm', 'yah lupa idm',
+    'aku jga disini ka biasanya, aman aja ka',
+    'nah aku mau tanya ini bukannya klo scan spay lgsg barcode',
+    'kesel lag bgt buka spx di spay',
+    'padahal on time kak sm spl kl dipake trx shopee aman aja',
+    'aku barusan co masih kak', 'lupa idm',
+    'Cek di hal voucher', 'Cantolin voc nya',
+    'oh pake shopee vip ya kak', 'ya bilang bayar pake shopeepay',
+    'aku jakbar kak idm nya jakut klo gasalah soalnya nombok ongkir dkit',
+    'wahh terimakasih info nyaa.. baru tau hari ini ada live',
+    'Yg voc 15 knp gbisa kak tg pertama',
+    'Yg ke 7 idm apa kak', 'Aman 3 idm', 'Aman 1 aja idm alhamdulillah',
+    'kesel lag bgt buka spx di spay jadinya idm dapet 2 aja',
+    'Kak makasi banyak 🥰', 'kak makasi banyak 🥰',
+    'cepet bgt', 'yah lupa idm', 'bug voc alfa 10k jadi 100k',
+    'ih baru aja belanja alfagift ttp motong 10',
+    'cb aja dlu beli jajan kak',
+    'pasti masih punya voc FM, beli himalayan gih',
+    'Member df yg layak menerima pret',
+    'voc kwg tukpo kalo disimpen barcodenya ajaa exp nya tetep sebulan kan guyss',
+    'TUKPO ON', 'hbd point coffee, always on point',
+    'Kode Promo: GATAUUU',
 }
 
 # ── False positive filters ──────────────────────────────────────────
@@ -356,7 +379,11 @@ _COMPLAINT_PATTERN = re.compile(
     r'gagal|ga ngaruh|gak ngaruh|tidak jelas|status tidak jelas|'
     r'gapernah|ga pernah|gak pernah|'
     r'sinisin|disinisn|sinis|'
-    r'nyantol|stuck|error terus|gabisa masuk|gak bisa masuk)',
+    r'nyantol|stuck|error terus|gabisa masuk|gak bisa masuk|'
+    # False positive filters (self-eval 2026-05-30 10:37)
+    r'kasir.*(?:nakal|tidak|salah)|ga motong|lag bgt|'
+    r'keabisan|habis.*bener|masalah|trouble|'
+    r'gimana dong|kasirnya.*salah|diinput.*salah)',
     re.IGNORECASE
 )
 

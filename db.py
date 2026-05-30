@@ -98,6 +98,10 @@ _BRAND_CANON: dict[str, str] = {
     'selfre': 'Unknown', 'selfreward': 'Unknown', 'self-reward': 'Unknown',
     'panik bangett': 'Unknown', 'ywwa': 'Unknown', 'brrti': 'Unknown',
     'pling': 'Unknown', 'berarti': 'Unknown', 'paling': 'Unknown',
+    # Not brands — checkout/payment terms (self-eval 2026-05-30 10:37)
+    'co': 'Unknown', 'cantolin': 'Unknown', 'tukar poin': 'Tukar Poin',
+    'shibal': 'Point Coffee', 'next omega': 'Unknown',
+    'kek bansos jir': 'Unknown', 'guys pc vip': 'Unknown',
 }
 
 def get_brand_canon() -> dict[str, str]:
