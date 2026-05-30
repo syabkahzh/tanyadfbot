@@ -530,6 +530,9 @@ _COMPLAINT_PATTERN = re.compile(
     r'ga motong|ga.*potong|gak motong|'
     r'gapunya|ga punya|gak punya|'
     r'belum on|belum aktif|belum jalan|'
+    # False positive filters (self-eval 2026-05-31 00:15)
+    r'lupa\b|trauma|mager|antri|tutor|biasanya|'
+    r'hiks|capek|sepi|drama|diarsipkan|'
     r'disogok|malu disogok|'
     r'kentut|apk kentut|'
     r'dikirim\\s+\\d|struk\\s+\\d|'
