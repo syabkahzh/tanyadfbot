@@ -250,6 +250,10 @@ _JUNK_SUMMARIES: set[str] = {
     'aman nya bilang qris shopeepay aja kak',
     'harus dong. kan no minbel beli barang random aja',
     'ygs tiramisu kan masuk promo birthday pc',
+    'lom on',
+    'on kk',
+    'aman 4',
+    'on tlur',
 }
 
 # ── False positive filters ──────────────────────────────────────────

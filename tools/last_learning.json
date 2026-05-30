@@ -1,36 +1,38 @@
 {
-  "timestamp": "2026-05-30T03:24:07.761579+07:00",
-  "message_count": 296,
+  "timestamp": "2026-05-30T09:25:15.495647+07:00",
+  "message_count": 298,
   "new_terms": {
-    "yg": 46,
-    "ga": 36,
-    "psl": 27,
-    "aku": 25,
-    "aja": 22,
-    "jam": 19,
-    "udh": 18,
-    "beli": 15,
-    "apa": 15,
-    "aman": 14
+    "yg": 49,
+    "ga": 41,
+    "abis": 38,
+    "aku": 24,
+    "baru": 22,
+    "aja": 18,
+    "kalo": 15,
+    "hari": 14,
+    "aman": 14,
+    "buat": 13
   },
   "mechanisms": {
-    "poin": 5,
-    "combo": 5,
-    "voucher": 2,
-    "klaim": 1,
-    "diskon": 1,
-    "b1g1": 1
+    "poin": 13,
+    "tukpo": 9,
+    "klaim": 6,
+    "restock": 3,
+    "potongan": 3,
+    "koin": 3,
+    "combo": 3,
+    "diskon": 2
   },
   "time_mentions": {
-    "hari ini": 9,
-    "habis": 3,
-    "besok": 2
+    "habis": 13,
+    "besok": 10,
+    "hari ini": 10
   },
   "top_users": {
-    "Hil || Qpon : 2E847Z": 33,
-    "Sasasa": 19,
-    "han": 14,
-    "Nur": 10,
-    "oye hoki": 10
+    "Cipi": 6,
+    "Hil || Qpon : 2E847Z": 6,
+    "ㄱ": 5,
+    "Popok | Jual Kuota XL Axis | Aselole": 5,
+    "Bloo": 4
   }
 }
