@@ -425,9 +425,12 @@ class TelethonListener:
                 msg_age = (datetime.now(timezone.utc) - message.date.astimezone(timezone.utc)).total_seconds()
                 mark_processed = 1 if msg_age > 900 else 0
 
-                has_time = any(
-                    w in message.text.lower()
-                    for w in ['jam', 'menit', 'detik', 'sore', 'siang', 'pagi', 'malam']
+                # ⚡ Bolt optimization: Unrolled `or` string conditions instead of `any(...)`
+                # generator comprehension avoids repetitive `.lower()` calls and generator overhead
+                text_lower = message.text.lower()
+                has_time = (
+                    'jam' in text_lower or 'menit' in text_lower or 'detik' in text_lower or
+                    'sore' in text_lower or 'siang' in text_lower or 'pagi' in text_lower or 'malam' in text_lower
                 )
 
                 buffer.append((
