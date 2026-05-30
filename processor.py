@@ -222,6 +222,10 @@ _JUNK_SUMMARIES: set[str] = {
     'info kk',
     'link di pesan','coba besok','cek di sini kak',
     'udh on',
+    'cek voc agny',
+    'link ag dong',
+    'cek di app spay',
+    'ka ss voc nya',
 }
 
 # ── False positive filters ──────────────────────────────────────────
