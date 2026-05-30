@@ -102,7 +102,11 @@ _COMPLAINT_PATTERN = re.compile(
     r'gabisa dipake|gak bisa dipake|ga bisa dipake|'
     r'belum semuanya habis|habis soalnya|habis semua|'
     r'promo gajelas|emg promo|'
-    r'tidak bisa dipakai)',
+    r'tidak bisa dipakai|'
+    # FP filter batch 2026-05-30 23:15 WIB — self-eval misses
+    r'voucher.*hilang|hilang.*voucher|hilang di halaman|'
+    r'kok gini lg|kok gini lagi|udah tutup|sudah tutup|'
+    r'belum tamat|udah kenyang)',
     re.IGNORECASE
 )
 

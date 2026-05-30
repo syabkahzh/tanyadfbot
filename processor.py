@@ -579,7 +579,11 @@ _COMPLAINT_PATTERN = re.compile(
     # FP filter batch 2026-05-30 21:00 WIB — reaction/thanks/worry
     r'ditarik|dtarik|tumbal|kasbon|'
     r'semoga.*(?:ditarik|ga|gak|habis)|'
-    r'aamiin|amin)',
+    r'aamiin|amin|'
+    # FP filter batch 2026-05-30 23:15 WIB — self-eval misses
+    r'voucher.*hilang|hilang.*voucher|hilang di halaman|'
+    r'kok gini lg|kok gini lagi|udah tutup|sudah tutup|'
+    r'belum tamat|udah kenyang)',
     re.IGNORECASE
 )
 
