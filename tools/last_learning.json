@@ -1,40 +1,38 @@
 {
-  "timestamp": "2026-05-30T21:27:48.902256+07:00",
-  "message_count": 298,
+  "timestamp": "2026-05-31T03:29:07.139643+07:00",
+  "message_count": 295,
   "new_terms": {
-    "yg": 36,
+    "ga": 42,
     "aku": 35,
-    "ga": 33,
-    "beli": 32,
-    "apa": 20,
-    "pake": 19,
-    "aja": 18,
-    "udh": 16,
-    "ditarik": 14,
-    "masuk": 14
+    "yg": 31,
+    "aja": 25,
+    "udh": 25,
+    "jam": 19,
+    "apa": 18,
+    "udah": 16,
+    "alhamdulillah": 13,
+    "dpt": 13
   },
   "mechanisms": {
+    "koin": 14,
     "voucher": 6,
-    "diskon": 4,
-    "tukpo": 4,
-    "scan": 3,
-    "koin": 3,
-    "poin": 3,
+    "fs": 2,
+    "diskon": 2,
     "combo": 2,
-    "klaim": 1
+    "klaim": 1,
+    "qr": 1,
+    "gratong": 1
   },
   "time_mentions": {
-    "habis": 5,
-    "hari ini": 1,
-    "besok": 1,
-    "expir": 1,
-    "tanggal 5": 1
+    "hari ini": 2,
+    "sampai 4": 1,
+    "besok": 1
   },
   "top_users": {
-    "Rehan": 21,
-    "Nur": 12,
-    "esteh🥃": 12,
-    "Aya🥰": 7,
-    "Sasasa||": 7
+    "Moek": 12,
+    "Ara": 12,
+    "caca": 10,
+    "jenny": 9,
+    "Cake": 9
   }
 }

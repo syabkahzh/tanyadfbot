@@ -568,6 +568,8 @@ _COMPLAINT_PATTERN = re.compile(
     r'ambang.*stamp|stamp.*transaksi|'
     r'apk.*indomaret|idm.*poinku|'
     r'dapet 2.*telat|turu|'
+    # FP filter batch 2026-05-31 07:47 WIB — absen hari / casual chatter
+    r'absen hari|absen terakhir|absen dong|absen ya|'
     # FP filter batch 2026-05-30 17:18 WIB
     r'gabisa dipake|gak bisa dipake|ga bisa dipake|'
     r'belum semuanya habis|habis soalnya|habis semua|'
